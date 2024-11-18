@@ -29,6 +29,7 @@ bin/FLASH*
 bin/iqtree*
 bin/mafft-linux64/
 bin/minimap2-2.22_x64-linux
+bin/minimap*
 bin/minimap2-2.17_x64-linux
 bin/lambda*
 bin/*.rst
