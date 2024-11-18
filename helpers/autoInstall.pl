@@ -66,21 +66,30 @@ my $downloadLmbdIdx = 0; #download lambda index from webpage
 my $compile_lambda=0;
 if (@ARGV > 0 && $ARGV[0] eq "-forceUpdate"){$forceUpdate=1};
 if (@ARGV > 0 && $ARGV[0] eq "-condaDBinstall"){$condaDBinstall=1};
-if (@ARGV > 1 && $ARGV[1] eq "-downloadLmbdIdx" || $ARGV[0] eq "-downloadLmbdIdx"){$downloadLmbdIdx=1};
+if (@ARGV > 1 && ($ARGV[1] eq "-downloadLmbdIdx" || $ARGV[0] eq "-downloadLmbdIdx" ) ){$downloadLmbdIdx=1};
 if (@ARGV > 1 && ($ARGV[1] eq "-lambdaIndex" || $ARGV[0] eq "-lambdaIndex")){$compile_lambda=1};
 
 if ($compile_lambda && $downloadLmbdIdx){
 	die "Can't use both -lambdaIndex and -downloadLmbdIdx arguments together\nAborting..\n";
 }
-#die "$ARGV[0] $forceUpdate\n";
+#die "$ARGV[0] $forceUpdate ".scalar(@ARGV) . "\n";
 
 my $isMac = 1;
-if ($^O =~ m/linux/ || $^O =~ m/MSWin/){
+if ($^O =~ m/linux/ ){#|| $^O =~ m/MSWin/){
 	$isMac = 0;
+} else {
+	print "Detected MAC.. will install LotuS3 for MAC\n";
 }
 
 my $ldir = abs_path($0);
-$ldir =~ s/[^\/]*$//;
+$ldir =~ s/\/[^\/]*$/\//;
+if (! -e "$ldir/lotus3" && -e "$ldir/../lotus3"){#autoInstall might be in helpers/
+	$ldir =~ s/\/[^\/]+\/$/\//;
+}
+
+print "installing into $ldir\n";
+#die "\n\n$ldir\n\n";
+
 #die ($ldir."\n");
 my $bdir = $ldir."/bin/";
 my $ddir = $ldir."/DB/";
@@ -291,6 +300,7 @@ sub addInfoLtS($ $ $ $){
 	if ($reqF ==2 && ! -d $ex){print "Can't find required directory $ex\nPlease check if the package was correctly downloaded.\nAborting..\n"; exit(5);}
 	my @txt = @{$aref};
 	my $ss = quotemeta $cmd;
+	#print "$ss\nXX\n";
 	my $i=0; my $tagset=0;
 	while ($txt[$i] !~ m/^$ss\s/){
 		#print $txt[$i]."\n";
@@ -1229,6 +1239,31 @@ sub getUsearch{
 sub get_programs{
 	#-----------  exit prog here, if set
 	#-----------------------
+
+
+
+	#minimap2
+	print "Downloading minimap2 executables..\n";
+	my $dtar = "$bdir/minimap2-2.28_x64-linux.tar.bz2";
+	my $dexe = "$bdir/minimap2-2.28_x64-linux/minimap2";
+	if ($isMac){
+		#getS2("http://lotus2.earlham.ac.uk/lotus/packs/dnaclust/dnaclust_OSX_release3.zip",$dtar);
+		#$dexe = "$bdir/dnaclust_OSX_release3/dnaclust";
+		print "please natively install minimap2 for MAC users\n";
+	} else {
+		getS2("http://lotus2.earlham.ac.uk/lotus/packs//minimap2-2.28_x64-linux.tar.bz2",$dtar);
+	}
+	system("tar -xjf $dtar -C $bdir");
+	unlink($dtar);
+	if (-e $dexe){ #not essential
+		system("chmod +x $dexe");
+		@txt = addInfoLtS("minimap2",$dexe,\@txt,1);
+	} else {
+		$finalWarning .= "minimap2 exe did not exist at $dexe\n Therefore minimap2 was not installed (please manually install).\n";
+		print "minimap2 exe did not exist at $dexe\n Therefore minimap2 was not installed (please manually install).\n";
+	}
+
+
 	if ($ITSready){ #ITSx
 		#itsx
 		print "Downloading ITSX to detect valid ITS regions..\n";
@@ -1379,27 +1414,6 @@ sub get_programs{
 
 
 
-	#DEBUG
-	#minimap2
-	print "Downloading minimap2 executables..\n";
-	my $dtar = "$bdir/minimap2-2.17_x64-linux.tar.bz2";
-	my $dexe = "$bdir/minimap2-2.17_x64-linux/minimap2";
-	if ($isMac){
-		#getS2("http://lotus2.earlham.ac.uk/lotus/packs/dnaclust/dnaclust_OSX_release3.zip",$dtar);
-		#$dexe = "$bdir/dnaclust_OSX_release3/dnaclust";
-		print "please natively install minimap2 for MAC users\n";
-	} else {
-		getS2("https://github.com/lh3/minimap2/releases/download/v2.17/minimap2-2.17_x64-linux.tar.bz2",$dtar);
-	}
-	system("tar -xjf $dtar -C $bdir");
-	unlink($dtar);
-	if (-e $dexe){ #not essential
-		system("chmod +x $dexe");
-		@txt = addInfoLtS("minimap2",$dexe,\@txt,1);
-	} else {
-		$finalWarning .= "minimap2 exe did not exist at $dexe\n Therefore minimap2 was not installed (please manually install).\n";
-		print "minimap2 exe did not exist at $dexe\n Therefore minimap2 was not installed (please manually install).\n";
-	}
 
 	## iqtree2
 	print "Downloading IQ-TREE 2 executables..\n";

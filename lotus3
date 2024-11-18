@@ -26,60 +26,25 @@ use Getopt::Long qw( GetOptions );
 #use threads;
 use 5.012;
 use FindBin qw($RealBin);
-#my $LWPsimple = eval {require LWP::Simple;LWP::Simple->import();1;};
 
-sub frame;sub printL;
 
-sub announce_options;sub announce_self;
-sub usage;sub help;
 
+sub systemL; sub uniq; sub printL;sub frame;
+sub checkLtsVer; sub announce_options;sub announce_self;sub prepLtsOptions; sub usage;
+sub printWarnings; 
+sub readMap; 
 sub buildOTUs;
-sub mergeUCs;sub delineateUCs;sub cutUCstring;sub uniq;
-sub prepLtsOptions;
-
-sub makeAbundTable2;
-sub readMap;sub writeMap; sub addSeqRun;
-sub assignTaxOnly; sub runRDP;
-
-sub writeUTAXhiera;
-sub doDBblasting;
-sub numberOTUs;
-sub getTaxForOTUfromRefBlast;
-sub get16Sstrand;
-sub splitBlastTax;
-sub extractTaxoForRefs;
-sub calcHighTax;
 sub buildTree;
-sub combine;
-sub contamination_rem;
-sub readOTUmat;
 sub runPhyloObj;
-sub readFastaHd;
-sub replaceFastaHd;
-sub splitFastas;
-sub extractFastas;
-sub writeFasta;
-sub readFasta;
-sub revComplFasta;
-sub reverse_complement_IUPAC;
-sub newUCSizes;
-sub readLinkRefFasta;
-sub readTaxIn;
+sub readFasta; sub readLinkRefFasta;
+sub calcHighTax;sub assignTaxOnly; sub runRDP;
 sub biomFmt;
-sub finWarn;
-sub printWarnings;    #1 to add warnings, the other to print these
+   #1 to add warnings, the other to print these
 sub mergeRds;
-sub clean_otu_mat;
-sub systemL;
-sub swarmClust;
-sub dnaClust2UC;
-sub chimera_ref_rem; sub chimera_denovo;
-sub checkLtsVer;
+sub clean_otu_mat; sub contamination_rem; sub lulu;sub checkXtalk;sub chimera_ref_rem; sub chimera_denovo;
 sub ITSxOTUs; sub vfxtractor;
-sub lulu;
-sub checkXtalk;
+sub makeAbundTable2; sub readOTUmat;
 sub annotateFaProTax;
-sub systemW;
 
 #versioning
 #2.29: added Lambda3, replaces lamdba < 3
@@ -89,7 +54,8 @@ sub systemW;
 #2.33: 21.5.24: sdm 2.17
 #2.34: 2.8.24: sdm 2.18 (AVITI support), usearch v12 added, LULU fix, -platform AVITI added
 #2.35: 14.9.24: updated PR2 to version 5.0
-#3.0: 29.924: started new LotuS branch - version 3.0 - with new additions to long read amplicons
+#3.0: 29.9.24: started new LotuS branch - version 3.0 - with new additions to long read amplicons
+#3.01: 31.10.24: code clean up, additional checks
 my $selfID = "LotuS 3.0"; 
 
 
@@ -270,7 +236,7 @@ my $ASVpostClust = 0;
 my $doXtalk             = -1;    #check for cross talk in OTU tables
 my $usearchVer          = 0; my $usearchsubV = 0; my $vsearchVer = 0;
 my $REFflag = 0;#reference based OTU clustering requested?
-my $mini2RdPreset = " -x sr --sr -u both --secondary=no -N 30 -c "; #minimap2 general parameters
+my $mini2RdPreset = " -x sr --sr -u b --secondary=no -N 0 -c "; #minimap2 general parameters
 my $useMini4map = 1; #use minimap (1) or u/vsearch (2) for mapping
 
 #flash control
@@ -823,13 +789,13 @@ sub sdmStep1{
 		$filterOut    = "$lotus_tempDir/demulti.1.fna,$lotus_tempDir/demulti.2.fna";
 		$filterOutAdd = "$lotus_tempDir/demulti.1.add.fna,$lotus_tempDir/demulti.2.add.fna";
 	}
-	my $filOutCmd = " -o_fna ";
-	my $filOutCmdAdd = " -o_fna2 ";
+	my $filOutCmd = "-o_fna ";
+	my $filOutCmdAdd = "-o_fna2 ";
 	if ($UPARSEfilter) {
 		$filterOut    = "$lotus_tempDir/demulti.fastq";
-		$filOutCmd    = " -o_fastq ";
+		$filOutCmd    = "-o_fastq ";
 		$filterOutAdd = "$lotus_tempDir/demulti.add.fastq";
-		$filOutCmdAdd = " -o_fastq2 ";
+		$filOutCmdAdd = "-o_fastq2 ";
 		if ( $numInput > 1 ) {
 			$filterOut    = "$lotus_tempDir/demulti.1.fastq,$lotus_tempDir/demulti.2.fastq";
 			$filterOutAdd = "$lotus_tempDir/demulti.1.add.fastq,$lotus_tempDir/demulti.2.add.fastq";
@@ -838,7 +804,7 @@ sub sdmStep1{
 	my $qualOffset = " -o_qual_offset 33";       #33 for UPARSE
 	
 	
-	my $sdmOut     = $filOutCmd . $filterOut . " " . $filOutCmdAdd . $filterOutAdd . " ";
+	my $sdmOut     = "$filOutCmd $filterOut $filOutCmdAdd $filterOutAdd  ";
 	my $sdmIn      = "";
 	my $paired     = $numInput;
 
@@ -856,14 +822,14 @@ sub sdmStep1{
 	#sdm merge options: -merge_pairs_filter -merge_pairs_demulti -merge_pairs_derep
 	my $sdmMergeOpt = "";
 	if ($mergePreCluster){
-		$sdmMergeOpt = " -merge_pairs_derep 1";
+		$sdmMergeOpt = "-merge_pairs_derep 1 ";
 		if ($ClusterPipe == 7){#dada2 requires more output..
-		$sdmMergeOpt .= " -merge_pairs_demulti 1";
+		$sdmMergeOpt .= "-merge_pairs_demulti 1 ";
 		}
 	}
 
 	my $sdmDemultiDir = "";
-	my $sdmOptStr     = " -options $sdmOpt ";
+	my $sdmOptStr     = "-options $sdmOpt ";
 	if ( $saveDemulti == 2 || $saveDemulti == 1 || $ClusterPipe == 7 ) { #dada2 also requires filtered raw reads
 		$sdmDemultiDir = "$outdir/demultiplexed/";
 		if ( $saveDemulti == 1 ) { 
@@ -872,11 +838,11 @@ sub sdmStep1{
 			$sdmDerepDo = 0;
 		}
 		#for valid paired output, need to keep them together..
-		$sdmOptStr .= " -pairedDemulti 1" if ($paired > 1);
+		$sdmOptStr .= "-pairedDemulti 1 " if ($paired > 1);
 
-		$sdmOptStr .= " -o_demultiplex_gz 1" if ($ClusterPipe != 7 || $saveDemulti == 1);#for dada2 leave files.. (saveDemulti==1 exits before clustering)
+		$sdmOptStr .= "-o_demultiplex_gz 1 " if ($ClusterPipe != 7 || $saveDemulti == 1);#for dada2 leave files.. (saveDemulti==1 exits before clustering)
 		if ($ClusterPipe == 7){ #dada2.. no rd pair info in head!
-			$sdmOptStr .= " -pairedRD_HD_out 0 -derep_format fq -derepPerSR 1 -DemultiBPperSR 1e8";
+			$sdmOptStr .= "-pairedRD_HD_out 0 -derep_format fq -derepPerSR 1 -DemultiBPperSR 1e8 ";
 			$sdmDemultiDir = "$lotus_tempDir/demultiplexed/" if ($saveDemulti == 0);
 		}
 	}
@@ -1482,6 +1448,33 @@ sub getOTUsize($){
 	close I;
 	return \%ret;
 }
+
+
+sub replaceFastaHd($ $) {
+	my ( $href, $ifil ) = @_;
+	my $ofil = $ifil . ".tmp";
+	my %fa   = %{$href};
+	open O, ">", $ofil;
+	open( FAS, "<", "$ifil" ) || die("Couldn't open FASTA file.");
+	my %Hseq;
+	my $line;
+	while ( $line = <FAS> ) {
+		if ( $line =~ m/^>/ ) {
+			chomp($line);
+			$line =~ s/;size=\d+;//;
+			$line = substr( $line, 1 );
+			if ( !exists( $fa{$line} ) ) { die("can't find key $line\n"); }
+			$line = ">" . $line . ";size=" . $fa{$line} . ";\n";
+		}
+		print O $line;
+	}
+	close FAS;
+	close O;
+	rename( $ofil, $ifil ) or die "Unable to overwrite file $ifil\n";
+}
+
+
+
 sub addSize2OTUfna($ $){
 	my ($otuFA,$hr) = @_;
 	my %siz = %{$hr};
@@ -2191,11 +2184,13 @@ sub biomFmt($ $ $ $ $) {
 
     #print $avSmps[0]."\n";
     foreach my $smpl (@avSmps) {
-        my $prepMeta = "{\n                             ";    #"null";
-                                                              #print $smpl."\n";
+		next if ($smpl eq "OTU");
+		if (!exists($combH{$smpl})){
+			printL "Potential problem with .biom table: Could not find sample \"$smpl\" in metadata!\n","w";next;
+		}
         my @curMeta  = @{ $mapH{ $combH{$smpl} } };
-
         my $cnt2 = -1;
+        my $prepMeta = "{\n                             ";    #"null";
         foreach my $cn (@colNms) {
             $cnt2++;
             $prepMeta .= ",\n                             " if ( $cnt2 > 0 );
@@ -2212,11 +2207,7 @@ sub biomFmt($ $ $ $ $) {
     my $rnum = scalar(@avOTUs);
     my $cnum = scalar(@avSmps);
 
-    $biomo .=
-"],\n\"matrix_type\": \"dense\",\n    \"matrix_element_type\": \"int\",\n    \"shape\": ["
-      . $rnum . ","
-      . $cnum . "],
-		\"data\":  [";
+    $biomo .="],\n\"matrix_type\": \"dense\",\n    \"matrix_element_type\": \"int\",\n    \"shape\": [". $rnum . ",". $cnum . "],\"data\":  [";
     $cnt = 0;
     foreach my $otu (@avOTUs) {
         $cnt++;
@@ -3182,7 +3173,7 @@ sub prepLtsOptions{
 		}
 	} elsif ( $platform eq "pacbio" || $platform eq "pacbio_ga") {
 		$dereplicate_minsize_def = 0;
-		$mini2RdPreset = "-x map-pb -u both --secondary=no -N 30 -c ";
+		$mini2RdPreset = "-x map-pb -u b --secondary=no -N 0 -c ";
 		$ClusterPipe_pre = "CDHIT" if ($ClusterPipe_pre eq "?");
 		if ($sdmOpt eq ""){
 			$sdmOpt = $sdmPacBioOpt ;
@@ -4335,6 +4326,27 @@ sub numberOTUs($ $ $) {    #rewrites OTUs with new header (numbered header)
     return \%lnk;
 }
 
+
+sub readFastaHd($) {
+    my ($fil) = @_;
+    open( FAS, "<", "$fil" ) || die("Couldn't open FASTA file $fil.");
+    my %Hseq;
+    my $line;
+    while ( $line = <FAS> ) {
+        if ( $line =~ m/^>/ ) {
+            chomp($line);
+            $line =~ s/;size=\d+;.*//;
+            $line = substr( $line, 1 );
+
+            #die $line."\n";
+            $Hseq{$line} = 0;
+        }
+    }
+    close FAS;
+    return \%Hseq;
+}
+
+
 sub newUCSizes($ $) {
     my ( $fafil, $ucfil ) = @_;
     my $hr = readFastaHd($fafil);
@@ -4373,23 +4385,16 @@ sub newUCSizes($ $) {
     replaceFastaHd( \%fa, $fafil );
 }
 
-sub readFastaHd($) {
-    my ($fil) = @_;
-    open( FAS, "<", "$fil" ) || die("Couldn't open FASTA file $fil.");
-    my %Hseq;
-    my $line;
-    while ( $line = <FAS> ) {
-        if ( $line =~ m/^>/ ) {
-            chomp($line);
-            $line =~ s/;size=\d+;.*//;
-            $line = substr( $line, 1 );
+sub reverse_complement_IUPAC {
+    my $dna = shift;
 
-            #die $line."\n";
-            $Hseq{$line} = 0;
-        }
-    }
-    close FAS;
-    return \%Hseq;
+    # reverse the DNA sequence
+    my $revcomp = reverse($dna);
+
+    # complement the reversed DNA sequence
+    $revcomp =~
+      tr/ABCDGHMNRSTUVWXYabcdghmnrstuvwxy/TVGHCDKNYSAABWXRtvghcdknysaabwxr/;
+    return $revcomp;
 }
 
 sub revComplFasta {
@@ -4404,18 +4409,6 @@ sub revComplFasta {
     close I;
     close O;
     systemL "rm -f $inF; mv $inF.tmp $inF;";
-}
-
-sub reverse_complement_IUPAC {
-    my $dna = shift;
-
-    # reverse the DNA sequence
-    my $revcomp = reverse($dna);
-
-    # complement the reversed DNA sequence
-    $revcomp =~
-      tr/ABCDGHMNRSTUVWXYabcdghmnrstuvwxy/TVGHCDKNYSAABWXRtvghcdknysaabwxr/;
-    return $revcomp;
 }
 
 sub readFasta($) {
@@ -4498,29 +4491,6 @@ sub resortcdhit{
 	}
 	close ICLST; close OCL;
 	systemL "rm $inF;mv $inF.1 $inF;";
-}
-
-sub replaceFastaHd($ $) {
-	my ( $href, $ifil ) = @_;
-	my $ofil = $ifil . ".tmp";
-	my %fa   = %{$href};
-	open O, ">", $ofil;
-	open( FAS, "<", "$ifil" ) || die("Couldn't open FASTA file.");
-	my %Hseq;
-	my $line;
-	while ( $line = <FAS> ) {
-		if ( $line =~ m/^>/ ) {
-			chomp($line);
-			$line =~ s/;size=\d+;//;
-			$line = substr( $line, 1 );
-			if ( !exists( $fa{$line} ) ) { die("can't find key $line\n"); }
-			$line = ">" . $line . ";size=" . $fa{$line} . ";\n";
-		}
-		print O $line;
-	}
-	close FAS;
-	close O;
-	rename( $ofil, $ifil ) or die "Unable to overwrite file $ifil\n";
 }
 
 sub onelinerSWM($) {
@@ -4871,6 +4841,7 @@ sub addSeqRun($){
 				next;
 			} 
 			my $SRid = ${$newMap{$k}}[$SRcol];
+			if ($SRid eq "NA"){die "Error: NA not allowed in \"SequencingRun\" column\n";}
 			$retMap{$SRid}{$k} = $newMap{$k};
 			$allSRs{$SRid} = 1;
 		}
@@ -4951,58 +4922,59 @@ sub writeMap($$){
 
 sub readMap() {
 	my ($createSmplSet) = @_;#tries to automatically derrive sample set
-    #find number of samples
-    #my @avSMPs = ();
+	#find number of samples
+	#my @avSMPs = ();
 	my $Ltxt = "Reading mapping file\n";
-    my %mapH; #hash of the actual map
-    my %combH; #combine these samples??
-    unless ( open M, "<", $mapFile ) {
-        printL( "Couldn't open map file $mapFile: $!\n", 3 );
-    }
-    local $/ = undef;
-    my $mapst = <M>;
-    $mapst =~ s/\r\n|\n|\r/\n/g;
-    close M;
+	my %mapH; #hash of the actual map
+	my %combH; #combine these samples??
+	unless ( open M, "<", $mapFile ) {
+		printL( "Couldn't open map file $mapFile: $!\n", 3 );
+	}
+	local $/ = undef;
+	my $mapst = <M>;
+	$mapst =~ s/\r\n|\n|\r/\n/g;
+	close M;
 
-    #$mapst=~s/\R//g;
-    my @mapar = split( /\n/, $mapst );
+	#$mapst=~s/\R//g;
+	my @mapar = split( /\n/, $mapst );
 
-    #try mac file conversion
-    #if (scalar(@mapar) == 1){ @mapar = split(/\r\n/,$mapst);}
-    #if (scalar(@mapar) == 1){ @mapar = split(/\r/,$mapst);}
-    my $cnt          = 0;
-    my $warnTrig     = 0;
-    my $fileCol      = -1;
-    my $twoFiles     = 0;
-    my $CombineCol   = -1;
-    my $hasCombiSmpl = 0;
-    my $colCnt       = -1;
-	
+	#try mac file conversion
+	#if (scalar(@mapar) == 1){ @mapar = split(/\r\n/,$mapst);}
+	#if (scalar(@mapar) == 1){ @mapar = split(/\r/,$mapst);}
+	my $cnt          = 0;
+	my $warnTrig     = 0;
+	my $fileCol      = -1;
+	my $twoFiles     = 0;
+	my $CombineCol   = -1;
+	my $hasCombiSmpl = 0;
+	my $colCnt       = -1;
+	my $biomWarns    = 0;
+
 	my $insertPrimers = 0;
 	$insertPrimers = 1 if ($fwdPrimSeq ne "" || $revPrimSeq ne "");
 
 
-    foreach my $line (@mapar) {
-        $cnt++;
-        next if ( $cnt > 1 && ( $line =~ m/^#/ || length($line) < 2 ) );
-        chomp($line);
-        my @spl = split( "\t", $line );
-        if ( @spl == 0 ) {
-            $warnTrig = 1;
-            printL"Mapping file contains lines that cannot be split by tab seperator (line $cnt):\"$line\"\n","w";
-            next;
-        }
-        if ( $colCnt != -1 && @spl != $colCnt ) {
-            for ( my $i = @spl ; $i < $colCnt ; $i++ ) { $spl[$i] = ""; }
-        }
-        chomp( $spl[0] );
-        if ( $spl[0] eq "" ) {
-            $warnTrig = 1;
-            printL("Empty SampleID in row number $cnt, skipping entry.\n","w");
-            next;
-        }
-        my $smplNms = $spl[0];
-        
+	foreach my $line (@mapar) {
+		$cnt++;
+		next if ( $cnt > 1 && ( $line =~ m/^#/ || length($line) < 2 ) );
+		chomp($line);
+		my @spl = split( "\t", $line );
+		if ( @spl == 0 ) {
+			$warnTrig = 1;
+			printL"Mapping file contains lines that cannot be split by tab seperator (line $cnt):\"$line\"\n","w";
+			next;
+		}
+		if ( $colCnt != -1 && @spl != $colCnt ) {
+			for ( my $i = @spl ; $i < $colCnt ; $i++ ) { $spl[$i] = ""; }
+		}
+		chomp( $spl[0] );
+		if ( $spl[0] eq "" ) {
+			$warnTrig = 1;
+			printL("Empty SampleID in row number $cnt, skipping entry.\n","w");
+			next;
+		}
+		if ($spl[0] =~ m/^OTU$/i){printL "SampleID \"OTU\" not allowed, aborting\n",62;}
+		my $smplNms = $spl[0];
 		if ( $cnt == 1 ) {#HEADER line
 			if ( $line !~ m/^#/ ) {
 				printL "First line does not start with \"#\". Please check mapping file for compatibility (http://psbweb05.psb.ugent.be/lotus/documentation.html#MapFile)\n",93;
@@ -5087,18 +5059,22 @@ sub readMap() {
 		}
 		
 		#warning/abort checks for mapping file START
-        if ( $line =~ m/\"/ ) {
+        if ( $line =~ m/\"/ && $biomWarns < 5) {
             $warnTrig = 0;
             printL("Possible biom incompatibility: Mapping file contains paranthesis characters (\") for sample $smplNms. Lotus is removing this.","w");
+			$biomWarns++;
         }
-        if ( $line =~ m/ / ) {
+        if ( $line =~ m/ / && $biomWarns < 5) {
             $warnTrig = 1;
             printL("Possible biom incompatibility: Mapping file contains spaces (\" \") for sample $smplNms","w");
+			$biomWarns++;
         }
-        if ( $line =~ m/[^\x00-\x7F]/ ) {
+        if ( $line =~ m/[^\x00-\x7F]/ && $biomWarns < 5) {
             $warnTrig = 1;
             printL("Possible biom incompatibility: Mapping file contains non-ASCII character for sample $smplNms","w");
+			$biomWarns++;
         }
+		if ($biomWarns == 4) {printL("(skipping further biom warnings..)\n\n");$biomWarns+=5;}
         $line =~ s/\s+/\t/g;
 		if ( $smplNms =~ m/^\s/ || $smplNms =~ m/\s$/ ) {
 			printL"SampleID $smplNms contains spaces, this is not supported. Aborting LotuS as this will lead to errors, please fix.\n",5;
@@ -5116,13 +5092,6 @@ sub readMap() {
         for ( my $i = 0 ; $i < @spl ; $i++ ) {
             $spl[$i] =~ s/\"//g;
         }
-		
-		#insert new data?
-		#if ($fwdPrimSeq ne ""){}
-		#if ($revPrimSeq ne ""){}
-		
-
-        #print $smplNms."\n";
         $mapH{$smplNms} = [@spl];
 
     }
@@ -5132,17 +5101,15 @@ sub readMap() {
         printL("Could not find sample names in mapping file (*nix/win file ending problem?\n",9);
     }
 
-    if ( $warnTrig == 1 ) {
-        print "*********\nWarnings for mapping file \n$mapFile \nAbort by pressing Ctrl+c (10 sec wait)\n*********\n";
-        sleep(10);
-    }
-	
 	#get seq run from map..
 	my ($hr,$hr2,$retStr )= addSeqRun(\%mapH);#SequencingRun
 	writeMap($hr2,$cpMapFile);
+	printL( frame($Ltxt.$retStr), 0 );
+	if ( $warnTrig == 1 ) {
+		print "*********\nWarnings for mapping file \n$mapFile \nAbort by pressing Ctrl+c (10 sec wait)\n*********\n";
+		sleep(10);
+	}
 
-	
-    printL( frame($Ltxt.$retStr), 0 );
     return ( $hr, \%combH, $hasCombiSmpl ); #\%mapH
 }
 
@@ -6760,14 +6727,5 @@ sub annotateFaProTax{
 	
 	 $citations .= 	"FaProTax (functional abundances based on OTUs): Louca, S., Parfrey, L.W., Doebeli, M. (2016) - Decoupling function and taxonomy in the global ocean microbiome. Science 353:1272-1277\n";
 	
-}
-
-
-sub systemW {
-    my ($cc) = @_;
-    my $ret = systemL $cc;
-    if ($ret) { printL "Failed command $cc\n", 99; }
-    printL("[sys]: $cc",0);
-    return $ret;
 }
 

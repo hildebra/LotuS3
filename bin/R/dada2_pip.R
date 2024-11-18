@@ -3,6 +3,7 @@ if(!require("dada2",quietly=TRUE,warn.conflicts =FALSE)){
 	if (!requireNamespace("BiocManager", quietly = TRUE)){
 		install.packages("BiocManager",repos="https://cloud.r-project.org")
 	}
+	BiocManager::install("GenomeInfoDbData")
 	BiocManager::install("dada2")
 }
 #packageVersion("dada2")
@@ -47,8 +48,9 @@ derepFastqRead= function (fls, n = 1e+06, verbose = FALSE, qualityType = "Auto")
 	}
 	derepO <- list(uniques = derepCounts, quals = derepQuals, map = derepMap, IDs=IDs)
 	derepO <- as(derepO, "derep")
-    return(derepO)
+	return(derepO)
 }
+
 combineDada2 = function (samples, orderBy = "abundance") 
 {
 	if (class(samples) %in% c("dada", "derep", "data.frame")) {
@@ -150,16 +152,11 @@ isBimeraDenovo2 = function (unqs, minFoldParentOverAbundance = 2, minParentAbund
 
 
 #ARGS parsing
-#args=c("/hpc-home/hildebra/grp/data/results/lotus/Angela/Test1.16S//tmpFiles//demultiplexed/","/hpc-home/hildebra/grp/data/results/lotus/Angela/Test1.16S//tmpFiles/","0","2","/hpc-home/hildebra/grp/data/results/lotus/Angela/Test1.16S//primary/in.map","/hpc-home/hildebra/grp/data/results/lotus/Angela/Test1.16S//tmpFiles//derep.fas")
-#args=c("/hpc-home/hildebra/grp/data/results/lotus/Anh//tmpFiles//demultiplexed/","/hpc-home/hildebra/grp/data/results/lotus/Anh//tmpFiles/","0","14","/hpc-home/hildebra/grp/data/results/lotus/Anh//primary/in.map","/hpc-home/hildebra/grp/data/results/lotus/Anh//tmpFiles//derep.fas")
-#args=c("/ei/projects/8/88e80936-2a5d-4f4a-afab-6f74b374c765/data/data/test_data/lotus2/Arabi_output/Arabidopsis_ITSd2/tmpFiles//demultiplexed/","/ei/projects/8/88e80936-2a5d-4f4a-afab-6f74b374c765/data/data/test_data/lotus2/Arabi_output/Arabidopsis_ITSd2/tmpFiles/","0","12","/ei/projects/8/88e80936-2a5d-4f4a-afab-6f74b374c765/data/data/test_data/lotus2/Arabi_output/Arabidopsis_ITSd2/primary/in.map","/ei/projects/8/88e80936-2a5d-4f4a-afab-6f74b374c765/data/data/test_data/lotus2/Arabi_output/Arabidopsis_ITSd2/tmpFiles//derep.fas")
-
 args = commandArgs(trailingOnly=TRUE)
 # test if all the arguments are there: 
 if (length(args) <= 4) {
 	stop("All the arguments must be supplied: pathF path_output seed_num ncores map_path.\n", call.=FALSE)
 }
-
 
 pathF=args[1]
 path_output = args[2]
@@ -204,6 +201,11 @@ if ("SequencingRun" %in% colnames(mapping)){ #explicitly defined groups of seque
 listF=list();listR=list();listM=list();
 maxReg=500
 tSuSe = table(subset_map)
+
+if (length(tSuSe)==0){
+	stop("Something is seriously wrong with your mapping file. Please check that either a) \"SequencingRun\" column does not contain NA or b) you do not set \"SequencingRun\" column if unsure.")
+}
+
 for (i in names(tSuSe)){
 	#forward read error pattern
 	idx = which(subset_map == i)
