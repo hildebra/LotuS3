@@ -56,7 +56,9 @@ sub annotateFaProTax;
 #2.35: 14.9.24: updated PR2 to version 5.0
 #3.0: 29.9.24: started new LotuS branch - version 3.0 - with new additions to long read amplicons
 #3.01: 31.10.24: code clean up, additional checks
-my $selfID = "LotuS 3.0"; 
+#3.02: 18.11.24: integrated GA, minimap v update, autoInstall.pl moved to helpers
+#3.03: 20.11.24: added min/maxGAampli options
+my $selfID = "LotuS 3.03"; 
 
 
 
@@ -246,6 +248,7 @@ my $flashCustom = "";
 #primer control
 my $fwdPrimSeq = "";
 my $revPrimSeq = "";
+my $GAminAmpli = 0; my $GAmaxAmpli = 0; #goldenAxe related; 0-> no size filtering (Default)
 
 #### DEPRECEATED ###
 my $truncLfwd    = 130;    #250 for fwd illumina miSeq & 454; 90 for hiSeq fwd
@@ -279,14 +282,14 @@ GetOptions(
 	"create_map=s"          => \$create_map,
 	"q|qual=s"              => \$inq,
 	"s|sdmopt=s"            => \$sdmOpt,
-	"T|tmp|tmpDir=s"          => \$lotus_tempDir,
+	"T|tmp|tmpDir=s"        => \$lotus_tempDir,
 	"c|config=s"            => \$lotusCfg,
 	"exe|executionMode=i"   => \$exec,
 	"keepTmpFiles=i"        => \$keepTmpFiles,
 	"extendedLogs=i"        => \$extendedLogs,
 	"cl|CL|clustering|UP|UPARSE=s" => \$ClusterPipe_pre,
 	"t|thr|threads=i"       => \$uthreads,
-	"sdmThreads=i"       => \$sdmThreads,
+	"sdmThreads=i"          => \$sdmThreads,
 	"v|version"             => \$versionOut,
 	"verbosity=i"           => \$verbosity,
 	"highmem=i"             => \$sdmDerepDo,
@@ -339,6 +342,8 @@ GetOptions(
 	"backmapDADA2=i"        => \$useBackmap4dada2,
 	"link_usearch=s"        => \$installUsearch,
 	"useMini4map=i"         => \$useMini4map,
+	"GAmaxAmpli=i"          => \$GAmaxAmpli,
+	"GAminAmpli=i"          => \$GAminAmpli,
 
     # "flashAvgLength" => \$flashLength,
     #"flashAvgLengthSD" => \$flashSD,
@@ -480,7 +485,7 @@ if ($REFflag){ #these need to be treated extra, as no new optimal ref seq needs 
 my $mapRestr = "-id " . ($backMapID*100) ." -minQueryCov 0.8 ";
 $mapRestr = "-id " . ($backMapID*100) ." -minQueryCov 0.4 " if ($platform eq "pacbio" || $platform eq "pacbio_ga");
 	
-$mapRestr .=  "-GoldenAxe 1 " if ($platform eq "pacbio_ga");
+#$mapRestr .=  "-GoldenAxe 1 " if ($platform eq "pacbio_ga");
 	
 
 
@@ -540,6 +545,7 @@ if ( $exec == 0 && $onlyTaxRedo == 0 && $TaxOnly eq "0" ) {
 	printL "Skipping Seed extension step\n", 0; 
 }
 
+#die;
 
 
 undef $tmpOTU;
@@ -848,7 +854,7 @@ sub sdmStep1{
 	}
 	
 	if ($platform eq "pacbio_ga"){
-		$sdmOptStr .=  "-GoldenAxe 1 ";
+		$sdmOptStr .=  "-GoldenAxe 1 -GoldenAxeMinAmpli $GAminAmpli -GoldenAxeMaxAmpli $GAmaxAmpli";
 	}
 	
 	#die "$sdmOptStr\n";
@@ -5791,7 +5797,7 @@ sub printL($ $) {
     }
     if ( defined $stat && $stat ne "0" ) { 
 		#print "Error: $msg\n";# if ($verbosity < 1) ; #print in any case, since exiting on this message
-		print "\n%@#%@#%@#%@%@#@%#@%#@#%@#%@#%@#@%#@%#@%#@#%@#%@#%@##\n      LotuS3 encounterend an error:\n$msg\n\nFirst check if the last error occurred  in a program called by LotuS3 \n\"tail $progOutPut\"\n, if there is an obvious solution (e.g. external program breaking, this we can't fix). To see (and execute) the last commands by the pipeline, run \n\"tail $cmdLogFile\".\nIn case you decide to contact us on \"https://github.com/hildebra/lotus3/\", please try to include information from these approaches in your message, this will increase our response time. Thank you.\n%@#%@#%@#%@%@#@%#@%#@#%@#%@#%@#@%#@%#@%#@#%@#%@#%@##\n";
+		print "\n%@#%@#%@#%@%@#@%#@%#@#%@#%@#%@#@%#@%#@%#@#%@#%@#%@##\n      LotuS3 encounterend an error:\n$msg\n\nFirst check if the last error occurred  in a program called by LotuS3 \n\"tail $progOutPut\"\n, if there is an obvious solution (e.g. external program breaking, this we can't fix). To see (and execute) the last commands by the pipeline, run \n\"tail $cmdLogFile\".\nIn case you decide to contact us on \"https://github.com/hildebra/lotus3/\", please try to include information from these approaches in your message, this will decrease our response time. Thank you.\n%@#%@#%@#%@%@#@%#@%#@#%@#%@#%@#@%#@%#@%#@#%@#%@#%@##\n";
 		exit($stat); 
 	}
 }
