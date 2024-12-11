@@ -130,7 +130,7 @@ if (@ARGV > 0 && $ARGV[0] eq "-link_usearch"){
 
 
 ##### TESTING / DEBUG ##########
-#		@txt = getGG2(\@txt); @txt = getKSGP(\@txt);die;
+#		@txt = getKSGP(\@txt);die;#@txt = getGG2(\@txt); 
 
 #DEBUG
 #@txt = getPR2db(\@txt);;exit;
@@ -566,13 +566,21 @@ sub getGG($){
 sub getKSGP($){
 	my ($aref) = @_;
 	my @txt = @{$aref};
-	my $DB = "$ddir/KSGP_v1.0";
+	my $DB = "$ddir/KSGP_v2.0";
 	system "rm -f ${DB}*";
-	print "Downloading KSGP 2023 release..\n";
-	my $tarUTN = "$ddir/KSGP.tar.gz";
-	getS2("https://ksgp.earlham.ac.uk/downloads/v1.0/KSGP_v1.0.tar.gz",$tarUTN);
-	getS2("https://ksgp.earlham.ac.uk/lambdaDBs/v3.0/KSGP_v1.0.fasta.lba.gz","$DB.fasta.lba.gz") if ($downloadLmbdIdx);
-	system "tar -xzf $tarUTN -C $ddir;rm -f $tarUTN";
+	print "Downloading KSGP 2024 release..\n";
+	my $tarUTN = "$ddir/KSGPv2.gz";
+	my $tarUTNtax = "$ddir/KSGPv2.tax.gz";
+	
+	getS2("http://lotus2.earlham.ac.uk/lotus/packs/DB/KSGPv2/KSGP_v2.fasta.gz",$tarUTN);
+	getS2("http://lotus2.earlham.ac.uk/lotus/packs/DB/KSGPv2/KSGP_LCA_v2.tax.gz",$tarUTNtax);
+	system("gunzip -c $tarUTN > $DB.fasta");system("gunzip -c $tarUTNtax > $DB.tax");
+	system("rm -f $tarUTN $tarUTNtax");
+	
+	
+	#getS2("https://ksgp.earlham.ac.uk/downloads/v1.0/KSGP_v1.0.tar.gz",$tarUTN);
+	getS2("http://lotus2.earlham.ac.uk/lotus/packs/DB/KSGPv2//KSGP_v2.0.fasta.lba.gz","$DB.fasta.lba.gz") if ($downloadLmbdIdx);
+	#system "tar -xzf $tarUTN -C $ddir;rm -f $tarUTN";
 	@txt = addInfoLtS("TAX_RANK_KSGP","$DB.tax",\@txt,1);
 	@txt = addInfoLtS("TAX_REFDB_KSGP","$DB.fasta",\@txt,1);
 	buildIndex("$DB.fasta");
@@ -1668,7 +1676,7 @@ sub user_options(){
 	#decide on database options
 
 	print "\n\nDo you want to install a reference database 16S database for similarity based 16S annotations?\n";
-	print " (1) KSGP (~1.5 GB), covering SSU for Archaea, Bacteria and Eukaryotes, 2023 release. \n (2) SILVA (~2.5 GB), contains LSU as well as SSU, 138.1 2020 release.\n (3) GreenGenes2 (~1 GB), 2022 release.\n (4) HITdb (~100 MB) 16S bacterial database specialized on the gut environment.\n";
+	print " (1) KSGP (~1.5 GB), covering SSU for Archaea, Bacteria and Eukaryotes, 2024 release. \n (2) SILVA (~2.5 GB), contains LSU as well as SSU, 138.1 2020 release.\n (3) GreenGenes2 (~1 GB), 2022 release.\n (4) HITdb (~100 MB) 16S bacterial database specialized on the gut environment.\n";
 	print " (5) PR2 (~100 MB) a LSU database spezialized on Ocean samples.\n";
 	print " (6) beeTax (~2 MB) database specialized (and named) on taxonomy specific to the bee gut.\n";
 	print " (8) KSGP + SILVA + GG2 + PR2 + HITdb + beeTax (select specific DB in each LotuS2 run)\n (0) no database.\n";
