@@ -1317,13 +1317,13 @@ sub get_programs{
 			my $lmdD = "https://github.com/seqan/lambda/releases/download/lambda-v3.1.0/lambda3-3.1.0-Linux-x86_64.tar.xz";
 			$exe = "$bdir/lambda.tar.xz";
 			getS2($lmdD,$exe);
-			system("tar -xf $exe -C $bdir\nmv $bdir/lambda3-3.0.0-Linux-x86_64/bin/lambda3 $bdir/lambda3;rm -rf $bdir/lambda3-3.0.0-Linux-x86_64/");
+			system("tar -xf $exe -C $bdir\nmv $bdir/lambda3-3.1.0-Linux-x86_64/bin/lambda3 $bdir/lambda3;rm -rf $bdir/lambda3-3*");
 
 		}else{
 			my $lmdD = "https://github.com/seqan/lambda/releases/download/lambda-v3.1.0/lambda3-3.1.0-Darwin-x86_64.zip";
 			$exe = "$bdir/lambda.zip";
 			getS2($lmdD,$exe);
-			system("unzip -q -o -d $bdir $exe \nmv $bdir/lambda3-3.0.0-Darwin-x86_64/bin/lambda3 $bdir/lambda3;rm -rf $bdir/lambda3-3.0.0-Darwin-x86_64/");
+			system("unzip -q -o -d $bdir $exe \nmv $bdir/lambda3-3.1.0-Darwin-x86_64/bin/lambda3 $bdir/lambda3;rm -rf $bdir/lambda3-3*");
 		}
 
 		unlink($exe);
