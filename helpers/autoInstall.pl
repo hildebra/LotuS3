@@ -221,9 +221,12 @@ if ($condaDBinstall){
 ###################   R packages ... #########################
 
 if ($install_dada) {
-  print("Install dada2 and other R packages \n");
-  my $r_output = `Rscript bin/R/autoInstall.R 2>&1`;
-  print($r_output);
+	print("Install dada2 and other R packages \n");
+	my $r_output = `Rscript bin/R/autoInstall.R 2>&1`;
+	print($r_output);
+	if ($r_output =~ m/(Package .* could not be installed. Please install it manually in your R environment.)/){
+		$finalWarning .= $1;
+	}
 }
 
 
@@ -568,14 +571,22 @@ sub getKSGP($){
 	my @txt = @{$aref};
 	my $DB = "$ddir/KSGP_v2.0";
 	system "rm -f ${DB}*";
-	print "Downloading KSGP 2024 release..\n";
-	my $tarUTN = "$ddir/KSGPv2.gz";
-	my $tarUTNtax = "$ddir/KSGPv2.tax.gz";
-	
-	getS2("http://lotus2.earlham.ac.uk/lotus/packs/DB/KSGPv2/KSGP_v2.fasta.gz",$tarUTN);
-	getS2("http://lotus2.earlham.ac.uk/lotus/packs/DB/KSGPv2/KSGP_LCA_v2.tax.gz",$tarUTNtax);
+
+
+	print "Downloading KSGP v3 2025 release..\n";
+	my $tarUTN = "$ddir/KSGPv3.gz";	my $tarUTNtax = "$ddir/KSGPv3.tax.gz";
+	getS2("http://lotus2.earlham.ac.uk/lotus/packs/DB/KSGPv3/KSGP_v3.fasta.gz",$tarUTN);
+	getS2("http://lotus2.earlham.ac.uk/lotus/packs/DB/KSGPv3/KSGP_v3.tax.gz",$tarUTNtax);
 	system("gunzip -c $tarUTN > $DB.fasta");system("gunzip -c $tarUTNtax > $DB.tax");
 	system("rm -f $tarUTN $tarUTNtax");
+
+
+#	print "Downloading KSGP 2024 release..\n";
+#	my $tarUTN = "$ddir/KSGPv2.gz";	my $tarUTNtax = "$ddir/KSGPv2.tax.gz";
+#	getS2("http://lotus2.earlham.ac.uk/lotus/packs/DB/KSGPv2/KSGP_v2.fasta.gz",$tarUTN);
+#	getS2("http://lotus2.earlham.ac.uk/lotus/packs/DB/KSGPv2/KSGP_LCA_v2.tax.gz",$tarUTNtax);
+#	system("gunzip -c $tarUTN > $DB.fasta");system("gunzip -c $tarUTNtax > $DB.tax");
+#	system("rm -f $tarUTN $tarUTNtax");
 	
 	
 	#getS2("https://ksgp.earlham.ac.uk/downloads/v1.0/KSGP_v1.0.tar.gz",$tarUTN);
