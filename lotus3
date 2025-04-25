@@ -1,6 +1,6 @@
 #!/usr/bin/env perl
-# lOTUs3 - less OTU scripts
-# Copyright (C) 2024 Falk Hildebrand
+# LotuS3 - less OTU scripts
+# Copyright (C) 2025 Falk Hildebrand
 
 #This program is free software: you can redistribute it and/or modify
 #it under the terms of the GNU General Public License as published by
@@ -47,13 +47,7 @@ sub makeAbundTable2; sub readOTUmat;
 sub annotateFaProTax;
 
 #versioning
-#2.29: added Lambda3, replaces lamdba < 3
-#2.30: UNITE v9
-#2.31: 19.12.23: autoInstall can download lambda3 index files
-#2.32: 15.1.24: bug fix num cores pigz, copying files
-#2.33: 21.5.24: sdm 2.17
-#2.34: 2.8.24: sdm 2.18 (AVITI support), usearch v12 added, LULU fix, -platform AVITI added
-#2.35: 14.9.24: updated PR2 to version 5.0
+
 #3.0: 29.9.24: started new LotuS branch - version 3.0 - with new additions to long read amplicons
 #3.01: 31.10.24: code clean up, additional checks
 #3.02: 18.11.24: integrated GA, minimap v update, autoInstall.pl moved to helpers
