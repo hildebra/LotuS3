@@ -302,6 +302,7 @@ GetOptions(
 	"saveDemultiplex=i"     => \$saveDemulti,        #1=yes, 0=not, 2=yes,unfiltered
 	"rdp_thr=f"             => \$RDPCONF,
 	"ITSx|itsextraction=i"  => \$doITSx,
+#	"chimera=i"             => \$doChimeraCheck, #0=deactivate, 1=u/chime -> redundant with -deactivateChimeraCheck
 	"VXtr=i"                => \$doVXTR,
 	"lulu=i"                => \$doLULU,
 	"asvPostClust=i"        => \$ASVpostClust,

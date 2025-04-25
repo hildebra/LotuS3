@@ -569,20 +569,28 @@ sub getGG($){
 sub getKSGP($){
 	my ($aref) = @_;
 	my @txt = @{$aref};
-	my $DB = "$ddir/KSGP_v2.0";
-	system "rm -f ${DB}*";
+	
 
 
-	print "Downloading KSGP v3 2025 release..\n";
-	my $tarUTN = "$ddir/KSGPv3.gz";	my $tarUTNtax = "$ddir/KSGPv3.tax.gz";
-	getS2("http://lotus2.earlham.ac.uk/lotus/packs/DB/KSGPv3/KSGP_v3.fasta.gz",$tarUTN);
-	getS2("http://lotus2.earlham.ac.uk/lotus/packs/DB/KSGPv3/KSGP_v3.tax.gz",$tarUTNtax);
+	my $DB = "$ddir/KSGP_v3.1";system "rm -f ${DB}*";
+	print "Downloading KSGP v3.1 2025 release..\n";
+	my $tarUTN = "$ddir/KSGPv3.1.gz";	my $tarUTNtax = "$ddir/KSGPv3.1.tax.gz";
+	getS2("http://lotus2.earlham.ac.uk/lotus/packs/DB/KSGPv3.1/KSGP.fasta.gz",$tarUTN);
+	getS2("http://lotus2.earlham.ac.uk/lotus/packs/DB/KSGPv3.1/KSGP.tax.gz",$tarUTNtax);
 	system("gunzip -c $tarUTN > $DB.fasta");system("gunzip -c $tarUTNtax > $DB.tax");
 	system("rm -f $tarUTN $tarUTNtax");
+	getS2("http://lotus2.earlham.ac.uk/lotus/packs/DB/KSGPv3.1//KSGP_v3.1.fasta.lba.gz","$DB.fasta.lba.gz") if ($downloadLmbdIdx);
+
+#	my $DB = "$ddir/KSGP_v2.0";system "rm -f ${DB}*"; print "Downloading KSGP v3 2025 release..\n";
+#	my $tarUTN = "$ddir/KSGPv3.gz";	my $tarUTNtax = "$ddir/KSGPv3.tax.gz";
+#	getS2("http://lotus2.earlham.ac.uk/lotus/packs/DB/KSGPv3/KSGP_v3.fasta.gz",$tarUTN);
+#	getS2("http://lotus2.earlham.ac.uk/lotus/packs/DB/KSGPv3/KSGP_v3.tax.gz",$tarUTNtax);
+#	system("gunzip -c $tarUTN > $DB.fasta");system("gunzip -c $tarUTNtax > $DB.tax");
+#	system("rm -f $tarUTN $tarUTNtax");
 
 
 #	print "Downloading KSGP 2024 release..\n";
-#	my $tarUTN = "$ddir/KSGPv2.gz";	my $tarUTNtax = "$ddir/KSGPv2.tax.gz";
+#	my $DB = "$ddir/KSGP_v2.0";system "rm -f ${DB}*"; my $tarUTN = "$ddir/KSGPv2.gz";	my $tarUTNtax = "$ddir/KSGPv2.tax.gz";
 #	getS2("http://lotus2.earlham.ac.uk/lotus/packs/DB/KSGPv2/KSGP_v2.fasta.gz",$tarUTN);
 #	getS2("http://lotus2.earlham.ac.uk/lotus/packs/DB/KSGPv2/KSGP_LCA_v2.tax.gz",$tarUTNtax);
 #	system("gunzip -c $tarUTN > $DB.fasta");system("gunzip -c $tarUTNtax > $DB.tax");
@@ -590,7 +598,7 @@ sub getKSGP($){
 	
 	
 	#getS2("https://ksgp.earlham.ac.uk/downloads/v1.0/KSGP_v1.0.tar.gz",$tarUTN);
-	getS2("http://lotus2.earlham.ac.uk/lotus/packs/DB/KSGPv2//KSGP_v2.0.fasta.lba.gz","$DB.fasta.lba.gz") if ($downloadLmbdIdx);
+	#getS2("http://lotus2.earlham.ac.uk/lotus/packs/DB/KSGPv2//KSGP_v2.0.fasta.lba.gz","$DB.fasta.lba.gz") if ($downloadLmbdIdx);
 	#system "tar -xzf $tarUTN -C $ddir;rm -f $tarUTN";
 	@txt = addInfoLtS("TAX_RANK_KSGP","$DB.tax",\@txt,1);
 	@txt = addInfoLtS("TAX_REFDB_KSGP","$DB.fasta",\@txt,1);
