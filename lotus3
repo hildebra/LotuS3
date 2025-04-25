@@ -5300,7 +5300,10 @@ sub doDBblasting($ $ $) {
         #$cmd .= "sort $tmptaxblastf > $taxblastf;rm -f $tmptaxblastf";
 
         if ( !-s $query ) { $cmd = "rm -f $taxblastf;touch $taxblastf\n"; }
-        else { $citations .= "Lambda taxonomic similarity search: Hauswedell H, Singer J, Reinert K. 2014. Lambda: the local aligner for massive biological data. Bioinformatics 30: i349-i355\n" unless ( $citations =~ m/Lambda taxonomic similarity search:/ );
+        else { 
+		$citations .= "Lambda3 taxonomic similarity search:  Hauswedell, H. et al. Lambda3: homology search for protein, nucleotide, and bisulfite-converted sequences. Bioinformatics 40, btae097 (2024).\n" unless ( $citations =~ m/Lambda3 taxonomic similarity search:/ );
+		#old lambda2
+		#$citations .= "Lambda taxonomic similarity search: Hauswedell H, Singer J, Reinert K. 2014. Lambda: the local aligner for massive biological data. Bioinformatics 30: i349-i355\n" unless ( $citations =~ m/Lambda taxonomic similarity search:/ );
         }
         $simMethod = "LAMBDA3";
 
