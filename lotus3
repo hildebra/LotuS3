@@ -518,9 +518,9 @@ if ( $exec == 0 && $onlyTaxRedo == 0 && $TaxOnly eq "0" ) {
 		$sdmcmd = "$sdmBin $sdmIn $sdmOut2 $upVer $mainMapping -paired $numInput -sample_sep $sep_smplID -map $cpMapFile -options $sdmOpt $qualOffset $mergeOptions -mergedPairs $didMerge -log $logDir/SeedExtensionStats.txt -OTU_fallback $tmpOTU -otu_matrix $OTUmFile -ucAdditionalCounts $ucFinalFile[1] -ucAdditionalCounts1 $ucFinalFile[3] $mapRestr -count_chimeras $chimCnt $refClusSDM ";
 	}
 	#some specific demulti treatment for DADA2 specifically (faster to leave files non-gz till here)
-	if ($ClusterPipe == 7 && ( $saveDemulti == 1 || $saveDemulti == 2 ) ) {    #gzip stuff
+	if ($ClusterPipe == 7 && ( $saveDemulti == 1 || $saveDemulti == 2 )  && glob("$sdmDemultiDir/*.fq")>0 ) {    #gzip stuff
 		printL "Zipping demultiplex output..\n";
-		systemL "$gzipC $sdmDemultiDir/*.fq;";
+		systemL "$gzipC $sdmDemultiDir/*.fq;" ;
 	}
 
 	my $status = 0;
@@ -982,7 +982,7 @@ sub sdmStep1{
 			@allOuts = split /,/, $filterOutAdd;
 			foreach (@allOuts) {
 				$_ =~ m/\/([^\/]+$)/;
-				systemL "$gzipC -c $_.singl* > $outdir/demultiplexed/$1.gz; rm -f $_.singl*;" if (-e "$_.singl");
+				systemL "$gzipC -c $_.singl* > $outdir/demultiplexed/$1.gz; rm -f $_.singl*;" if (glob( "$_.singl*") > 0);
 				systemL "$gzipC -c $_* > $outdir/demultiplexed/$1.gz; rm -f $_*;" if (-e "$_");
 			}
 			@allOuts = split /,/, $filterOut;
@@ -998,7 +998,7 @@ sub sdmStep1{
 	#			systemL "gzip -c $_* > $outdir/demultiplexed/$fn.gz; rm -f $_*";
 				#die "DEBUG new singl filenames\n";
 				#print "$fn\n$fdir\n$fns\n";
-				systemL "$gzipC -c $_.singl* > $outdir/demultiplexed/$fn.singl.gz; rm -f $_.singl*;" if (-e "$_");
+				systemL "$gzipC -c $_.singl* > $outdir/demultiplexed/$fn.singl.gz; rm -f $_.singl*;" if (glob( "$_.singl*") > 0);
 				systemL "$gzipC -c $_* > $outdir/demultiplexed/$fn.gz; rm -f $_*;" if (-e "$_");
 			}
 		}
@@ -2759,7 +2759,10 @@ sub announce_options{
 	printL "Output      $outdir\n";    #InputFileNum=$numInput\n
 	printL "SDM options $sdmOpt\n";
 	if ( $barcodefile ne "" ) {
-		printL("Barcodes= $barcodefile\n",0);
+		printL("Barcodes    $barcodefile\n",0);
+	}
+	if ($saveDemulti){
+		printL "saveDemulti ($saveDemulti): $outdir/demultiplexed/\n";
 	}
 	my $tmpXtra = "";
 	$tmpXtra = " (-keepTmpFiles 1)" if ($keepTmpFiles);
