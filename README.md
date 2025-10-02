@@ -24,7 +24,7 @@ conda activate LotuS3
 Alternatively, often the github contains pre-release versions and can be installed via:
 ```{sh}
 git clone https://github.com/hildebra/LotuS3.git
-perl autoInstall.pl
+perl helpers/autoInstall.pl
 ```
 
 All required software will be downloaded and installed in this directory.
@@ -63,7 +63,7 @@ Building the lambda formatted SILVA reference database will take a long time the
 
 There are >60 flags with which you can further customize each LotuS3 run, but we try to optimize LotuS3 to work pretty well with just default options. Please run ./lotus3 to see these options.
 
-### Coustom Reference Database
+### Custom Reference Database
 To use your own reference database for LotuS3, you can employ the flags -refDB and -tax4refDB to supply a fasta formated reference database and tab-delimited taxonomy file, respectively. The format of these is the same as in the database already installed with the LotuS3 autoinstall, e.g. have a look at DB/SLV_138_SSU.fasta and DB/SLV_138_LSU.tax for examples. In the \*.tax file, the levels are fixed to 7 levels (kingdom, phylum, class, order, family, genus, species). These are demarked by tags k__; p__ ; etc and separated by a ";" character. In case tax information is missing, use "?" to inset this information, for example:
 
 FJ588878	k__Eukaryota; p__Phragmoplastophyta; c__?; o__?; f__?; g__?; s__Osyris wightiana
@@ -113,6 +113,25 @@ So to summarize, maybe create your copy of the default **configs/sdm_PacBio_ITS.
 ./lotus3 -i /my/PacBioDir/  -s configs/sdm_PacBio_my_copy.txt  -m PacBioDir/my_PacBio.map -o /my/PacBio/LotuS3 -p PacBio -id 0.97 -CL cdhit -refDB SLV  -forwardPrimer XYZ -reversePrimer XYZ ...
 ```
 
+## Troubleshooting
+
+### Troubleshooting the Installation
+
+If you install from github, lotus3 has an autoinstall script - running `perl helpers/autoInstall.pl` should be enough after you have cloned the repository. 
+But listed below are some problems you might run into (some are similar to the issues from the Troubleshooting section of [Lotus2](https://lotus2.earlham.ac.uk/main.php?site=documentation)). 
+
+ - Warning about RScript: you need a working version of R and RScript.
+ - Warning about no java (or openjdk): you need a working version of java for the RDP classifier / Postfilter.
+ - Can't locate FindBin.pm in @INC: this is a perl error telling you that perl can't find a module that should be in `PERL5LIB`. Run `perl -e 'print join(":", @INC), "\n"'
+` when perl is working as expected to find what `PERL5LIB` is meant to be. Then make sure any export statements (such as in your .bashrc) e.g. `export PERL5LIB=<new list of paths>` includes the expected path for lotus3.
+ - Error from RScript in the LULU.R file: R may try to download some packages at this point, and if you don't have an internet connection the first time you run this, it will not work.
+ - DADA2: From previous experience (see Lotus2 documentation) this is easier to install manually rather than through the autoinstaller. E.g. `mamba install -c conda-forge -c bioconda bioconductor-dada2` if you are working in a conda environment. 
+
+The Lotus3 autoinstaller works well inside a conda environment so you may choose to create an environment, run the autoinstaller, and possibly then manually troubleshoot the remaining parts of the installation. Re-running the autoinstall script is quite safe; if the autoinstaller hits a problem that you manually fix, re-running the autoinstaller should continue from the point that was left off. 
+
+### Troubleshooting the Example
+
+ - You may need approximately 4GB of memory, else you will get an OOM error and the program will halt. 
 
 ## Publications related to LotuS3
 LotuS2: https://www.biorxiv.org/content/10.1101/2021.12.24.474111v1
