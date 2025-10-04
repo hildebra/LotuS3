@@ -345,6 +345,7 @@ GetOptions(
 ) or usage();
 #die "$refDBwanted\n";
 
+#!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
 #routines that are external of a proper 16S run
 if ($versionOut){
 	print "$selfID\n";
@@ -363,9 +364,11 @@ if ($create_map ne ""){
 if ($installUsearch ne ""){
 	print "Will only install usearch into LotuS3 and exist afterwards.\nProvided path to usearch binary was $installUsearch\n";
 	die "Can't find file at $installUsearch\n" unless (-f $installUsearch);
-	system "perl $RealBin/autoInstall.pl -link_usearch $installUsearch";
+	system "perl $RealBin/helpers/autoInstall.pl -link_usearch $installUsearch";
 	exit(0);
 }
+#!!!!!!!!!!!!!!!!!!!!!!!!!!
+#end external routines..
 
 
 if ($outdir eq "" || !defined($outdir)){
@@ -1601,7 +1604,7 @@ sub checkXtalk($ $) {
 		printL "Cross talk check only avaialable with usearch installed\n";
 		return \%ret;
 	}
-	if ( $usearchVer < 11 || $usearchVer > 11) {
+	if ($doXtalk && ( $usearchVer < 11 || $usearchVer > 11) ) {
         printL "cannot check for cross-talk in your usearch version ($usearchVer), as only implemented in usearch version 11\n",83;
     }
 	
@@ -2510,7 +2513,7 @@ sub readPaths {    #read tax databases and setup correct usage
     }
     close I;
     if ( !-e $usBin && !-e $rdpjar && !-e $sdmBin ) {
-        printL "\nWARNING:: Several essential auxiliary programs are missing: you can always install these and configure into your lotus installation by excecuting ./autoinstall.pl\n\n", 0;
+        printL "\nWARNING:: Several essential auxiliary programs are missing: you can always install these and configure into your lotus installation by excecuting \"helpers/autoinstall.pl\"\n\n", 0;
     }
 
     $UCHIME_REFDB = $UCHIME_REFssu;
@@ -2898,9 +2901,9 @@ sub checkProgVersions{
 	if ( $usearchVer > 12 ) {
 		printL "Usearch ver $usearchVer is not supported.\n", 55;
 	}elsif ( $usearchVer >= 8 && $usearchVer < 9 ) {
-		printL"Usearch ver 8 is outdated, it is recommended to install ver 9.\nDownload from http://drive5.com/ and execute \n\"./autoInstall.pl -link_usearch [path to usearch9]\"\n",0;
+		printL"Usearch ver 8 is outdated, it is recommended to install ver 9.\nDownload from http://drive5.com/ and execute \n\"helpers/autoInstall.pl -link_usearch [path to usearch9]\"\n",0;
 	}elsif ( $usearchVer < 8&& $usearchVer > 0) {
-		printL "Usearch ver 7 is outdated, it is recommended to install ver 9.\nDownload from http://drive5.com/ and execute \n\"./autoInstall.pl -link_usearch [path to usearch9]\"\n",0;
+		printL "Usearch ver 7 is outdated, it is recommended to install ver 9.\nDownload from http://drive5.com/ and execute \n\"helpers/autoInstall.pl -link_usearch [path to usearch9]\"\n",0;
 	}
 	#safety for vsearch
 	if ($usearchVer == 0 && $VSused ){
@@ -3341,6 +3344,11 @@ sub prepLtsOptions{
 	if ( $saveDemulti < 0 || $saveDemulti > 3 ) {
 		printL "option \"-saveDemultiplex\" has to be between 0 and 3\n", 46;
 	}
+	
+	if ($doXtalk && ( $usearchVer < 11 || $usearchVer > 11) ) {
+        printL "cannot check for cross-talk in your usearch version ($usearchVer), as only implemented in usearch version 11\n",83;
+    }
+
 	
 	
 #		print "\n\n$doBlasting\n\n";	die;
@@ -4814,7 +4822,7 @@ sub checkLtsVer($) {
 
     if ( $hadMsg || $updates ne "" ) {
         printL
-"New LotuS updates discovered (10s wait).\nIf you want to install updates\n  (1) Press \"Ctrl-c\"\n  (2) perl autoInstall.pl\n\n";
+"New LotuS updates discovered (10s wait).\nIf you want to install updates\n  (1) Press \"Ctrl-c\"\n  (2) perl helpers/autoInstall.pl\n\n";
         printL
 "To deactivate, open $sdmOpt and change \"CheckForUpdates\" to \"0\"\n";
         sleep(10);
