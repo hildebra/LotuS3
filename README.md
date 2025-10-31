@@ -7,8 +7,15 @@ LotuS3 is a amplicon sequencing pipeline, that is programmed to be lightweight, 
 Full documentation on http://lotus2.earlham.ac.uk/
 
 ### REQUIREMENTS
-LotuS3 requires a perl installation and sdm requires a fairly recent C++ compiler (like gcc or clang) that supports C++11.
-Lambda currently only works under linux, the option to use lambda is not available on mac os. Instead, Blast, vsearch or usearch can be used.
+- Perl 5 (should be available on most linux distributions)
+- C++ compiler supporting C++17
+- R
+- java
+
+These can be installed via 
+```{sh}
+conda install -c bioconda r-base usearch wget perl rdp_classifier
+```
 
 ### INSTALL LotuS3
 LotuS3 can be installed via conda https://anaconda.org/bioconda/LotuS3 
@@ -53,7 +60,7 @@ To test your installation, run a minimal example using test files distributed wi
 ./lotus3 -i Example/ -m Example/miSeqMap.sm.txt -o myTestRun
 ```
 
-Note that you should have seen a warning that no PCR primers were provided. LotuS3 will try to choose default options, like using RDPclassifier for taxonomic annotations. While RDP is great in our opinion, it does not assign species level annotations, for that we need a similarity based comparison to a reference database.
+Note that you should have seen a warning that no PCR primers were provided - this is expected. LotuS3 will try to choose default options, like using RDPclassifier for taxonomic annotations. While RDP is great in our opinion, it does not assign species level annotations, for that we need a similarity based comparison to a reference database.
 
 In the next example, we will explicitly configure the read filtering by providing sdm_miSeq2.txt, explicitly defining this to be 16S data from an illumina miSeq machine, to remove PCR primers used in this experiment, to use DADA2 instead of UPARSE clustering algorithm, to use alginments of ASVs against SILVA reference database instead of RDPclassifier taxonomic annotations:
 ```{sh}
