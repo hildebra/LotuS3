@@ -20,7 +20,7 @@ conda install -c bioconda r-base usearch wget perl rdp_classifier
 ### INSTALL LotuS3
 LotuS3 can be installed via conda https://anaconda.org/bioconda/LotuS3 
 ```{sh}
-conda install -c bioconda LotuS3
+conda install -c conda-forge -c bioconda LotuS3
 ```
 If there should be problems with the conda solver, try:
 ```{sh}
@@ -31,6 +31,7 @@ conda activate LotuS3
 Alternatively, often the github contains pre-release versions and can be installed via:
 ```{sh}
 git clone https://github.com/hildebra/LotuS3.git
+cd LotuS3
 perl helpers/autoInstall.pl
 ```
 
