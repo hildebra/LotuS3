@@ -224,6 +224,7 @@ my $useVsearch = -1; # 1(vsearch) or 0(usearch) for chim check are being used, s
 my $installUsearch = "";
 my $chimera_absskew = 2;      # Abundance skew for de novo chimera filtering # 2
 my $id_OTU          = 0.97;    # Id threshold for OTU clustering  #Default: .97
+my $vsearch_iddef	= 0; 	   #vsearch iddef for clustering and chimera checking; Values 0 to 4 . Check vsearch documenation for details. Default is 0
 my $backMapID       = -1.; #0.97; #min cutoff for backmapping mid qual etc reads onto OTUs/ASVs..
 my $swarmClus_d     = 1;
 my $id_OTU_noise =
@@ -343,6 +344,7 @@ GetOptions(
 	"useMini4map=i"         => \$useMini4map,
 	"GAmaxAmpli=i"          => \$GAmaxAmpli,
 	"GAminAmpli=i"          => \$GAminAmpli,
+	"vsearch_iddef=i"       => \$vsearch_iddef,
 
     # "flashAvgLength" => \$flashLength,
     #"flashAvgLengthSD" => \$flashSD,
@@ -3435,6 +3437,7 @@ my $clustering_heading = "Clustering Options";
 my %clustering_options = (
   '-CL|-clustering <uparse|swarm|cdhit|unoise|dada2|vsearch>', 'Sequence clustering algorithm: (1) UPARSE, (2) swarm, (3) cd-hit, (6) unoise3, (7) dada2, (8) VSEARCH. Short keyword or number can be used to indicate clustering (Default: UPARSE)',
   '-id <0-1>', 'Clustering threshold for OTUs. (Default: 0.97)',
+  '-vsearch_iddef  <0-4>', 'VSEARCH iddef parameter for clustering and chimera checking. (Default: 0) . 0: CD-HIT definition: (matching columns) / (shortest sequence length). 1: edit distance: (matching columns) / (alignment length). 2: edit distance excluding terminal gaps (same as --id). 3: Marine Biological Lab definition counting each gap opening . 4:BLAST definition, equivalent to --iddef 1 in a context of global pairwise alignment.',
   '-swarm_distance <1,2,3,..> ', 'Clustering distance for OTUs when using swarm clustering. (Default: 1)',
   '-chim_skew <num>', 'Skew in chimeric fragment abundance (uchime option). (Default: 2)',
   '-count_chimeras<T/F>', 'Add chimeras to count up OTUs/ASVs. (Default: F)',
@@ -6486,7 +6489,7 @@ sub buildOTUs($) {
 		$citations .= "swarm v2 ${OTU_prefix} clustering: Mahé F, Rognes T, Quince C, de Vargas C, Dunthorn M. 2015. Swarm v2: highly-scalable and high-resolution amplicon clustering. PeerJ. DOI: 10.7717/peerj.1420\n";
 	} elsif ($ClusterPipe == 8){ #vsearch
 		$entrMessage = "VSEARCH ${OTU_prefix} clustering\n Cluster at ". 100 * $id_OTU ;
-		$cmd = "$VSBin --cluster_size $derepl --id $id_OTU --sizein --strand both --consout $OTUfastaTmp --sizeout --uc $finalClustMap;";
+		$cmd = "$VSBin --cluster_size $derepl --id $id_OTU --iddef $vsearch_iddef --sizein --strand both --consout $OTUfastaTmp --sizeout --uc $finalClustMap;";
 		$citations .= "VSEARCH v$vsearchVer OTU clustering: Rognes T, Flouri T, Nichols B, Quince C, Mahé F. 2016. VSEARCH: A versatile open source tool for metagenomics. PeerJ 2016:1–22.\n";
 	} elsif ( $ClusterPipe == 3 ) {
 		if ( !-e $cdhitBin ) {printL "No valid CD-Hit binary found at $cdhitBin\n", 88;}
@@ -6537,6 +6540,7 @@ sub buildOTUs($) {
 	#actual excecution
     if ( $exec == 0 ) {
 		printL(frame($entrMessage,1,2),0);
+		printL("Executing clustering command: $cmd\n", 0);
         if ( systemL($cmd) != 0 ) {
             printL( "Failed core ${OTU_prefix} clustering command:\n$cmd\n", 1 );
         }
