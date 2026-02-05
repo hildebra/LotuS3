@@ -45,6 +45,7 @@ sub clean_otu_mat; sub contamination_rem; sub lulu;sub checkXtalk;sub chimera_re
 sub ITSxOTUs; sub vfxtractor;
 sub makeAbundTable2; sub readOTUmat;
 sub annotateFaProTax;
+sub checkOS;
 
 #versioning
 
@@ -52,8 +53,11 @@ sub annotateFaProTax;
 #3.01: 31.10.24: code clean up, additional checks
 #3.02: 18.11.24: integrated GA, minimap v update, autoInstall.pl moved to helpers
 #3.03: 20.11.24: added min/maxGAampli options
-my $selfID = "LotuS 3.03"; 
+#3.04: 3.2.26: OS check included 
+my $selfID = "LotuS 3.04"; 
 
+
+checkOS();
 
 
 #keep track of time
@@ -6246,8 +6250,90 @@ sub convertFastqs2fna($ $){
 	close Ofas;
 }
 
+
+
+#eg. $CONT_REFDB_PHIX
+#removes all seqs from otusFA, that match at 95% to refDB
+sub derepBash($) {
+
+    #SWARM derep way
+    my ($filtered) = @_;
+    die("DERPRECATED bash derep\n");
+    my $derepCmd = 'grep -v "^>" ' . $filtered . ' | \
+	grep -v [^ACGTacgt] | sort -d | uniq -c | \
+	while read abundance sequence ; do
+		hash=$(printf "${sequence}" | sha1sum)
+		hash=${hash:0:40}
+		printf ">%s_%d_%s\n" "${hash}" "${abundance}" "${sequence}"
+	done | sort -t "_" -k2,2nr -k1.2,1d | \
+	sed -e \'s/\_/\n/2\' > ' . "$lotus_tempDir/derep.fa";    #amplicons_linearized_dereplicated.fasta
+    die $derepCmd . "\n";
+    open( CMD, $derepCmd ) || printL( "Can't derep in swarm:\n$derepCmd\n", 1 );
+    close CMD;
+    return ("$lotus_tempDir/derep.fa");
+}
+
+sub swarmClust($) {
+    my ($outfile) = @_;
+    die("DEPRECATED swarm function\n");
+
+    my $swarmThreads = $uthreads;
+    my $swPath       = "/home/falhil/bin/swarm-dev/";
+    my $swarmBin     = "$swPath/swarm";
+
+    #my $swarmBreakBin = "python $swPath/scripts/swarm_breaker.py";
+    my @UCguide = ( "$lotus_tempDir/finalOTU.uc", 2 );    #,"$lotus_tempDir/otus.uc",1);
+    if ( $exec == 1 ) { return ( \@UCguide ); }
+
+    my $filtered = $filterOut;
+    my $derepl   = "$lotus_tempDir/derep.fas";            #,$totSeqs,$arL)
+    if ( !-f $derepl || -z $derepl ) {
+        printL "The sdm dereplicated output file was either empty or not existant, aborting lotus.\n$derepl\n", 1;
+    }
+
+    my ( $totSeqs, $SeqLength ) = parseSDMlog("$logDir/demulti.log");
+    my @lotsFiles = ($filtered);
+    my $dcnt      = 1;
+    while ( -f $filtered . "." . $dcnt ) {
+        push( @lotsFiles, $filtered . "." . $dcnt );
+        $dcnt++;
+    }
+    if ( !$sdmDerepDo ) {
+        my ($dereplFi) = usearchDerepSort($filtered);
+        onelinerSWM($derepl);
+        $derepl = $dereplFi;
+    }
+
+    return ( \@UCguide );
+}
+
+sub annotateFaProTax{
+	my ($hir,$FaPr) = @_;
+	return unless (defined($FaPr));
+	
+	 $citations .= 	"FaProTax (functional abundances based on OTUs): Louca, S., Parfrey, L.W., Doebeli, M. (2016) - Decoupling function and taxonomy in the global ocean microbiome. Science 353:1272-1277\n";
+	
+}
+
+
+
+sub checkOS{
+	my $osname = $^O;
+	my $OSn="";
+	if( $osname =~ m/MSWin/i ){
+		$OSn = "Windows OS";
+	}
+	if( $osname =~ m/darwin/i ){
+		$OSn = "MacOS";
+	}
+	if ($OSn ne ""){
+		die "$OSn ($osname) detected. Please note that $selfID does only support Unix OSs\nExiting...\n";
+	}
+}
+
+
 ##################################################
-# Core cluster routing on quality filtered files #
+# Core cluster routine on quality filtered reads  #
 ##################################################
 sub buildOTUs($) {
 
@@ -6489,7 +6575,8 @@ sub buildOTUs($) {
     }
 
 #------------------ 2nd part: --------------------
-    #backmap reads to OTUs/ASVs/zOTUs
+##------------------ backmap reads to OTUs/ASVs/zOTUs --------------------
+
     my $cnt = 0;
     my @allUCs;
     my $userachDffOpt = "--maxhits 1 --query_cov 0.8 --maxrejects 200 -top_hits_only -strand both -id $backMapID -threads $uthreads";
@@ -6544,13 +6631,12 @@ sub buildOTUs($) {
 				#$cmd .= "rm -f $derepl;cat $dereplPre.*.fas > $derepl;" ;
 				convertFastqs2fna(["$dereplPre.*.fas"],$derepl);
 			}
-			$finalClustMap =~ s/\.uc/\.paf/ if ($useMini4map == 1);
 			#die "$finalClustMap \t $useMini4map\n";
 			$cmd .= "rm -f $finalClustMap;";
 			if ($useMini4map == 0){
 				$cmd .= "$VSBin --usearch_global ". $derepl. " -db $outfile -uc $finalClustMap $userachDffOpt $vsearchSpcfcOpt;";    #-threads  $BlastCores";
 			} else {
-				
+				$finalClustMap =~ s/\.uc/\.paf/;
 				$cmd .= "$mini2Bin $mini2RdPreset  -t $uthreads -o $finalClustMap  $outfile $derepl;";
 			}
 			
@@ -6570,11 +6656,15 @@ sub buildOTUs($) {
 		}
 		my @lotsFiles = ($filtered);
 		my $dcnt      = 1;
-		while ( -f $filtered . "." . $dcnt ) {
-			push( @lotsFiles, $filtered . "." . $dcnt );
+		while ( -f ($filtered . "." . $dcnt) ) {
+			push( @lotsFiles, ($filtered . "." . $dcnt ) );
 			$dcnt++;
 		}
+		my %checkDblLotsFiles;
 		foreach my $fil (@lotsFiles) {
+			if (exists($checkDblLotsFiles{$fil})){
+				printL "\@lotsFiles contains doubles: @lotsFiles\n.. aborting", 925;
+			}
 			my $tmpUC = "$lotus_tempDir/tmpUCs.$cnt.uct";
 			push( @allUCs, $tmpUC );
 			
@@ -6598,44 +6688,40 @@ sub buildOTUs($) {
     #backmap derep & mid qual reads
     foreach my $subF (@lotsFiles) {
 		#print "$subF\n";
-		if ( -f $subF && !-z $subF ) {
-			#make sure there's at least 2 lines
-			open T, "<", $subF;
-			my $lcnt = 0;
-			while (<T>) { $lcnt++; last if ( $lcnt > 5 ); }
-			close T;
-			if ( $lcnt > 2 ) {    #file contains reads, so map
-				#printL frame("Searching with mid qual reads..\n"), 0;
-				my $tmpUC = "$lotus_tempDir/add.uc";
-				$tmpUC = "$lotus_tempDir/add.paf" if ($useMini4map);
-				if ($useMini4map == 0){
-					$cmd .="$VSBin -usearch_global $subF -db $OTUfastaTmp -uc ". $tmpUC. " $userachDffOpt $vsearchSpcfcOpt;"; #-threads  $BlastCores";
-				} else {
-					$cmd .= "$mini2Bin $mini2RdPreset -t $uthreads -o $tmpUC $OTUfastaTmp $subF ;";
-				}
-				#die "$cmd\n";
-				if ( -s $OTUfastaTmp ) {
-					if ( systemL($cmd) != 0 ) { printL( "Failed: $cmd\n", 1 ); }
-				} else { systemL("touch $tmpUC"); }
-				
-				
-				$backMapRep .= "Backmapping  mid qual reads: ".parseLastVUsearch($progOutPut)."\n"; 
-				systemL( "cat $tmpUC >> " . $finalAddMap);
-				unlink $tmpUC;
+		$cmd="";
+		#check input non-empty
+		next if ( !-f $subF || -z $subF );
+		#make sure there's at least 2 lines
+		open T, "<", $subF;my $lcnt = 0;while (<T>) { $lcnt++; last if ( $lcnt > 5 ); }close T;
+		next if ( $lcnt <= 2 ); #skip file..
+		#file contains reads, so map
+		#printL frame("Searching with mid qual reads..\n"), 0;
+		my $tmpUC = "$lotus_tempDir/add.uc";
+		$tmpUC = "$lotus_tempDir/add.paf" if ($useMini4map);
+		$backMapRep .= "Backmapping  mid qual reads: ".parseLastVUsearch($progOutPut)."\n"; 
+		if ($useMini4map == 0){
+			$cmd ="$VSBin -usearch_global $subF -db $OTUfastaTmp -uc ". $tmpUC. " $userachDffOpt $vsearchSpcfcOpt;"; #-threads  $BlastCores";
+		} else {
+			$cmd = "$mini2Bin $mini2RdPreset -t $uthreads -o $tmpUC $OTUfastaTmp $subF ;";
+		}
+		#die "$cmd\n";
+		if ( -s $OTUfastaTmp ) {
+			if ( systemL($cmd) != 0 ) { printL( "Failed: $cmd\n", 1 ); }
+		} else { systemL("touch $tmpUC"); }
+		systemL( "cat $tmpUC >>  $finalAddMap;"); #and save in more persistent object..
+		unlink $tmpUC;
 
-				#any ref DB to map onto??backMapID
-				if ( ($REFflag) && -s "$OTUfastaTmp.ref" ) {
-					if ($useMini4map == 0){
-						$cmd = "$VSBin -usearch_global $subF -db $OTUfastaTmp.ref -uc ". $tmpUC . " $userachDffOpt $vsearchSpcfcOpt;";    #-threads  $BlastCores";
-					} else {
-						$cmd = "$mini2Bin $mini2RdPreset -t $uthreads -o $tmpUC  $OTUfastaTmp.ref $subF;";
-					}
-					if ( systemL($cmd) != 0 ) { printL( "Failed: $cmd\n", 1 ); }
-					systemL( "cat $tmpUC >> " . $finalAddMapRef );
-					unlink $tmpUC;
-				}
+		#any ref DB to map onto??backMapID
+		if ( ($REFflag) && -s "$OTUfastaTmp.ref" ) {
+			if ($useMini4map == 0){
+				$cmd = "$VSBin -usearch_global $subF -db $OTUfastaTmp.ref -uc ". $tmpUC . " $userachDffOpt $vsearchSpcfcOpt;";    #-threads  $BlastCores";
+			} else {
+				$cmd = "$mini2Bin $mini2RdPreset -t $uthreads -o $tmpUC  $OTUfastaTmp.ref $subF;";
 			}
-        }
+			if ( systemL($cmd) != 0 ) { printL( "Failed: $cmd\n", 1 ); }
+			systemL( "cat $tmpUC >> " . $finalAddMapRef );
+			unlink $tmpUC;
+		}
     }
 	$cmd="";
 	#die;
@@ -6644,7 +6730,6 @@ sub buildOTUs($) {
 #push(@lotsFiles,$derepl.".rest"); #these are sdm "uniques" that were too small to map
 #my @lotsFiles2 = ($derepl,$derepl.".rest");
         my $restUC = "$lotus_tempDir/rests.uc";
-		
 		$cmd .= "$sdmBin -i $derepl.rest -o_fna $derepl.rest1;rm -f $derepl.rest;mv $derepl.rest1 $derepl.rest;" if ($VSused);
 		#die $cmd;
 		if ($useMini4map == 0){
@@ -6681,66 +6766,4 @@ sub buildOTUs($) {
     return ( $finalClustMap ,$finalAddMap, $finalAddMapRef, $finalRestMap, $finalRestMapRef );
 }
 
-#eg. $CONT_REFDB_PHIX
-#removes all seqs from otusFA, that match at 95% to refDB
-sub derepBash($) {
-
-    #SWARM derep way
-    my ($filtered) = @_;
-    die("DERPRECATED bash derep\n");
-    my $derepCmd = 'grep -v "^>" ' . $filtered . ' | \
-	grep -v [^ACGTacgt] | sort -d | uniq -c | \
-	while read abundance sequence ; do
-		hash=$(printf "${sequence}" | sha1sum)
-		hash=${hash:0:40}
-		printf ">%s_%d_%s\n" "${hash}" "${abundance}" "${sequence}"
-	done | sort -t "_" -k2,2nr -k1.2,1d | \
-	sed -e \'s/\_/\n/2\' > ' . "$lotus_tempDir/derep.fa";    #amplicons_linearized_dereplicated.fasta
-    die $derepCmd . "\n";
-    open( CMD, $derepCmd ) || printL( "Can't derep in swarm:\n$derepCmd\n", 1 );
-    close CMD;
-    return ("$lotus_tempDir/derep.fa");
-}
-
-sub swarmClust($) {
-    my ($outfile) = @_;
-    die("DEPRECATED swarm function\n");
-
-    my $swarmThreads = $uthreads;
-    my $swPath       = "/home/falhil/bin/swarm-dev/";
-    my $swarmBin     = "$swPath/swarm";
-
-    #my $swarmBreakBin = "python $swPath/scripts/swarm_breaker.py";
-    my @UCguide = ( "$lotus_tempDir/finalOTU.uc", 2 );    #,"$lotus_tempDir/otus.uc",1);
-    if ( $exec == 1 ) { return ( \@UCguide ); }
-
-    my $filtered = $filterOut;
-    my $derepl   = "$lotus_tempDir/derep.fas";            #,$totSeqs,$arL)
-    if ( !-f $derepl || -z $derepl ) {
-        printL "The sdm dereplicated output file was either empty or not existant, aborting lotus.\n$derepl\n", 1;
-    }
-
-    my ( $totSeqs, $SeqLength ) = parseSDMlog("$logDir/demulti.log");
-    my @lotsFiles = ($filtered);
-    my $dcnt      = 1;
-    while ( -f $filtered . "." . $dcnt ) {
-        push( @lotsFiles, $filtered . "." . $dcnt );
-        $dcnt++;
-    }
-    if ( !$sdmDerepDo ) {
-        my ($dereplFi) = usearchDerepSort($filtered);
-        onelinerSWM($derepl);
-        $derepl = $dereplFi;
-    }
-
-    return ( \@UCguide );
-}
-
-sub annotateFaProTax{
-	my ($hir,$FaPr) = @_;
-	return unless (defined($FaPr));
-	
-	 $citations .= 	"FaProTax (functional abundances based on OTUs): Louca, S., Parfrey, L.W., Doebeli, M. (2016) - Decoupling function and taxonomy in the global ocean microbiome. Science 353:1272-1277\n";
-	
-}
 

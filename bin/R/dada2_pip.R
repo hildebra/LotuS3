@@ -426,7 +426,10 @@ if (length(args)>5){
 	close(fileUC); close (fileFNA);
 	#write unique sequences
 	cat(paste0("Found ",length(ASVseq)," ASVs, summing to ",sum(ASVab)," reads (dada2)\n"));
+	
+	#exit dada2 here from new loop
 	q("no");
+	
 }
 
 cat("Wrong branch\n")
