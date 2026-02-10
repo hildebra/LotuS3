@@ -3423,7 +3423,7 @@ my %taxonomy_options = (
   '-sintax_thr <0-1>', 'Confidence thresshold for SINTAX. (Default: 0.8)',
   '-useBestBlastHitOnly <0|1>', '(1) do not use LCA (lowest common ancestor) to determine most likely taxonomic level (not recommended), instead just use the best blast hit. (0) LCA algorithm. (Default: 0)',
   '-LCA_cover <0-1>', 'Min horizontal coverage of an OTU sequence against ref DB. (Default: 0.5)',
-  '-LCA_frac <0-1>', 'Min fraction of database hits at taxlevel, with identical taxonomy. (Default: 0.9)',
+  '-LCA_frac <0-1>', 'Min fraction of database hits at taxlevel, with identical taxonomy. (Default: 0.8)',
   '-LCA_idthresh <97,95,93,91,88,78>','6 numbers, comma separated, that are min %id of OTU/ASV fasta to ref database, to assign taxonomy to OTU/ASV at this taxonomic level',
   '-taxExcludeGrep <string>', 'Exclude taxonomic group, these OTUs will be assigned as unknown instead. E.g. -taxExcludeGrep Chloroplast|Mitochondria (Default: )',
   '-greengenesSpecies <0|1>', '(1) Create greengenes output labels instead of OTU (to be used with greengenes specific programs such as BugBase). (Default: 0)',
