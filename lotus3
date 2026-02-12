@@ -990,24 +990,25 @@ sub sdmStep1{
 			my @allOuts;
 			@allOuts = split /,/, $filterOutAdd;
 			foreach (@allOuts) {
+				my $globRes = glob( "$_.singl*");if (!defined($globRes)){$globRes = 0};
 				$_ =~ m/\/([^\/]+$)/;
-				systemL "$gzipC -c $_.singl* > $outdir/demultiplexed/$1.gz; rm -f $_.singl*;" if (glob( "$_.singl*") > 0);
+				systemL "$gzipC -c $_.singl* > $outdir/demultiplexed/$1.gz; rm -f $_.singl*;" if ($globRes > 0);
 				systemL "$gzipC -c $_* > $outdir/demultiplexed/$1.gz; rm -f $_*;" if (-e "$_");
 			}
 			@allOuts = split /,/, $filterOut;
 			foreach (@allOuts) {
-				
-					$_ =~ m/(^.*)\/([^\/]+$)/;
-					my $fn  = $2;
-					#my $fdir = $1;
-					#my $fns = $fn;
-					#$fns =~ s/\.(f[^\.]+)$/\.singl\.$1/; 
+				my $globRes = glob( "$_.singl*"); if (!defined($globRes)){$globRes = 0};
+				$_ =~ m/(^.*)\/([^\/]+$)/;
+				my $fn  = $2;
+				#my $fdir = $1;
+				#my $fns = $fn;
+				#$fns =~ s/\.(f[^\.]+)$/\.singl\.$1/; 
 #					systemL "gzip -c $fdir/$fns > $outdir/demultiplexed/$fn.singl.gz; rm -f $fdir/$fns;" if (-e "$fdir/$fns");
 	#			systemL "gzip -c $_*.singl > $outdir/demultiplexed/$fn.singl.gz; rm -f $_*.singl";
 	#			systemL "gzip -c $_* > $outdir/demultiplexed/$fn.gz; rm -f $_*";
 				#die "DEBUG new singl filenames\n";
 				#print "$fn\n$fdir\n$fns\n";
-				systemL "$gzipC -c $_.singl* > $outdir/demultiplexed/$fn.singl.gz; rm -f $_.singl*;" if (glob( "$_.singl*") > 0);
+				systemL "$gzipC -c $_.singl* > $outdir/demultiplexed/$fn.singl.gz; rm -f $_.singl*;" if ($globRes > 0);
 				systemL "$gzipC -c $_* > $outdir/demultiplexed/$fn.gz; rm -f $_*;" if (-e "$_");
 			}
 		}
@@ -1656,14 +1657,15 @@ sub lulu{
 	
 	systemL $cmd,"LULU Rscript",1;
 	system "$gzipC $logDir/lulu.log* 2> /dev/null ";
-	my $rmLst = `cat $lotus_tempDir/lulu_match_list.txt.rm`;
-	chomp $rmLst;
 	my $LULUcnt=0;
-	foreach my $x (split /\n/,$rmLst){
-		$ret{$x} = 1;
-		$LULUcnt ++;
+	if (-s "$lotus_tempDir/lulu_match_list.txt.rm"){
+		my $rmLst = `cat $lotus_tempDir/lulu_match_list.txt.rm`;
+		chomp $rmLst;
+		foreach my $x (split /\n/,$rmLst){
+			$ret{$x} = 1;
+			$LULUcnt ++;
+		}
 	}
-	
 	printL(frame( "$LULUcnt ${OTU_prefix}'s removed with LULU\n"),0);
 
 	$citations .= "LULU multicopy rRNA removal: Frøslev, T. G., Kjøller, R., Bruun, H. H., Ejrnæs, R., Brunbjerg, A. K., Pietroni, C., & Hansen, A. J. (2017). Algorithm for post-clustering curation of DNA amplicon data yields reliable biodiversity estimates. Nature Communications, 8(1), 1188.\n";

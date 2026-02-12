@@ -1155,13 +1155,21 @@ sub get_DBs{
 		#system("unzip -q -o $tarUN -d $ddir/UNITE/;rm -rf $ddir/UNITE/__MACOSX/");
 		#@txt = addInfoLtS("TAX_RANK_ITS_UNITE","$ddir/UNITE/sh_taxonomy_qiime_ver8_99_s_all_02.02.2019.txt",\@txt,1);
 		my $tarUN = "$ddir/qITSfa.gz";
-		getS2("https://lotus2.earlham.ac.uk/lotus/packs/UNITE/v9_Dec23/sh_general_release_dynamic_all_25.07.2023.fasta.gz",$tarUN);
+		#my $dlUNITE = "https://lotus2.earlham.ac.uk/lotus/packs/UNITE/v9_Dec23/sh_general_release_dynamic_all_25.07.2023.fasta.gz";
+		my $dlUNITE = "https://lotus2.earlham.ac.uk/lotus/packs/DB/UNITE/sh_general_release_dynamic_s_all_19.02.2025.fasta.gz";
+		getS2($dlUNITE,$tarUN);
 
-		my $UNITEdb = "$ddir/UNITE/sh_refs_v9_25.07.2023";
-		getS2("https://lotus2.earlham.ac.uk/lambdaDBs/v3.0/sh_refs_v9_25.07.2023.fasta.lba.gz","$UNITEdb.fasta.lba.gz") if ($downloadLmbdIdx);
+#		my $UNITEdb = "$ddir/UNITE/sh_refs_v9_25.07.2023";
+		my $UNITEdb = "$ddir/UNITE/sh_refs_v10_19.02.2025";
+		
 		system("rm -fr $ddir/UNITE/;mkdir -p $ddir/UNITE/; gunzip -c $tarUN > $UNITEdb.fasta.tmp");
 		extrTaxFromFasta("$UNITEdb.fasta.tmp","$UNITEdb.fasta","$UNITEdb.tax");
 		system "rm $UNITEdb.fasta.tmp";
+		
+		
+		#index creation/download
+		#getS2("https://lotus2.earlham.ac.uk/lambdaDBs/v3.0/sh_refs_v9_25.07.2023.fasta.lba.gz","$UNITEdb.fasta.lba.gz") if ($downloadLmbdIdx);
+		getS2("https://lotus2.earlham.ac.uk/packs/DB/UNITE/Lambda3/sh_refs_v10_19.02.2025.fasta.lba.gz","$UNITEdb.fasta.lba.gz") if ($downloadLmbdIdx);
 		buildIndex($UNITEdb);
 		
 		@txt = addInfoLtS("TAX_REFDB_ITS_UNITE","$UNITEdb.fasta",\@txt,1);
@@ -1171,15 +1179,20 @@ sub get_DBs{
 	}
 	
 	if ($ITSready){#ITS chimera check ref DB
-		my $itsDB = "http://lotus2.earlham.ac.uk/lotus/packs/DB/uchime_reference_dataset_11.03.2015.zip";
+		#my $itsDB = "http://lotus2.earlham.ac.uk/lotus/packs/DB/uchime_reference_dataset_11.03.2015.zip";
+		my $itsDB = "http://lotus2.earlham.ac.uk/lotus/packs/DB/UNITE/uchime/uchime_UNITE_16_10_22.zip";
 		getS2($itsDB,"$ddir/uchITS.zip");
-		system "rm -fr $ddir/ITS_chimera/";
-		if (system("unzip -q -o $ddir/uchITS.zip -d $ddir/ITS_chimera") != 0){ die "Failed to unzip $ddir/uchITS.zip";}
+		system "rm -fr $ddir/ITS_chimera/  $ddir/2022_10_26_chimera_reference_release/";
+		my $uchimeD = "$ddir/ITS_chimera22/";
+		if (system("unzip -q -o $ddir/uchITS.zip -d $uchimeD") != 0){ die "Failed to unzip $ddir/uchITS.zip";}
 		unlink("$ddir/uchITS.zip");
-		#die "$ddir/ITS_chimera/uchime_sh_refs_dynamic_original_985_11.03.2015.fasta";
-		@txt = addInfoLtS("UCHIME_REFDB_ITS","$ddir/ITS_chimera/uchime_sh_refs_dynamic_original_985_11.03.2015.fasta",\@txt,1);
-		@txt = addInfoLtS("UCHIME_REFDB_ITS1","$ddir/ITS_chimera/ITS1_ITS2_datasets/uchime_sh_refs_dynamic_develop_985_11.03.2015.ITS1.fasta",\@txt,1);
-		@txt = addInfoLtS("UCHIME_REFDB_ITS2","$ddir/ITS_chimera/ITS1_ITS2_datasets/uchime_sh_refs_dynamic_develop_985_11.03.2015.ITS2.fasta",\@txt,1);
+		$uchimeD .= "/2022_10_26_chimera_reference_release/";
+		#die "$uchimeD/uchime_sh_refs_dynamic_original_985_11.03.2015.fasta";
+		@txt = addInfoLtS("UCHIME_REFDB_ITS","$uchimeD/uchime_reference_dataset_16_10_2022.fasta",\@txt,1);
+#		@txt = addInfoLtS("UCHIME_REFDB_ITS1","$uchimeD/ITS1_ITS2_datasets/uchime_sh_refs_dynamic_develop_985_11.03.2015.ITS1.fasta",\@txt,1);
+#		@txt = addInfoLtS("UCHIME_REFDB_ITS2","$uchimeD/ITS1_ITS2_datasets/uchime_sh_refs_dynamic_develop_985_11.03.2015.ITS2.fasta",\@txt,1);
+		@txt = addInfoLtS("UCHIME_REFDB_ITS1","$uchimeD/ITS1_ITS2_datasets/uchime_reference_dataset_16_20_2022_ITS1.fasta",\@txt,1);
+		@txt = addInfoLtS("UCHIME_REFDB_ITS2","$uchimeD/ITS1_ITS2_datasets/uchime_reference_dataset_16_20_2022_ITS2.fasta",\@txt,1);
 	}
 
 	#-------------- install chimera check DBs
