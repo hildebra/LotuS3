@@ -14,7 +14,7 @@ maxAmbiguousNT	2
 *maxAmbiguousNT	3
 
 #sequence is discarded if a homonucleotide run in sequence is longer
-maxHomonucleotide	16
+maxHomonucleotide	18
 
 #Filter whole sequence if one window of quality scores is below average
 QualWindowWidth	50
