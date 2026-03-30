@@ -2288,6 +2288,8 @@ sub readPaths_aligners($) {
 			$usBin = truePath($1);
 		} elsif ( $line =~ m/^dada2R\s+(\S+)/ ) {
 			$dada2Scr = truePath $1;
+			#fix to ease transition..
+			if (!-f $dada2Scr && $dada2Scr =~ m/dada2_pip.R/){$dada2Scr =~ s/dada2_pip.R/dada2_pip_v2.R/}
 		} elsif ( $line =~ m/^phyloLnk\s+(\S+)/ ) {
 			$phyloLnk = truePath $1;
 		} elsif ( $line =~ m/^LULUR\s+(\S+)/ ) {
