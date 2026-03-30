@@ -10,7 +10,7 @@ LCA bin/LCA
 #rarefaction toolkit
 rtk bin/rtk
 #R helper scripts
-dada2R bin/R/dada2_pip.R
+dada2R bin/R/dada2_pip_v2.R
 phyloLnk bin/R/l2phyloseq.R
 LULUR bin/R/LULU.R
 ASVcl bin/R/ASV_clustering.R
