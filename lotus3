@@ -54,7 +54,8 @@ sub checkOS;
 #3.02: 18.11.24: integrated GA, minimap v update, autoInstall.pl moved to helpers
 #3.03: 20.11.24: added min/maxGAampli options
 #3.04: 3.2.26: OS check included 
-my $selfID = "LotuS 3.04"; 
+#3.10: 29.3.26: major refactor of sdm v3.25 and LCA v0.26
+my $selfID = "LotuS 3.10"; 
 
 
 checkOS();
@@ -237,7 +238,7 @@ my $ASVpostClust = 0;
 my $doXtalk             = -1;    #check for cross talk in OTU tables
 my $usearchVer          = 0; my $usearchsubV = 0; my $vsearchVer = 0;
 my $REFflag = 0;#reference based OTU clustering requested?
-my $mini2RdPreset = " -x sr --sr -u b --secondary=no -N 0 -c "; #minimap2 general parameters
+my $mini2RdPreset = " -x sr --sr -u b --secondary=no -c "; #minimap2 general parameters
 my $useMini4map = 1; #use minimap (1) or u/vsearch (2) for mapping
 
 #flash control
@@ -384,11 +385,12 @@ if ($outdir eq "" || !defined($outdir)){
 #die "\"$outdir\"\n";
 
 #declare global vars
+my $xtra = ""; $xtra = ".TO" unless ($TaxOnly eq "0");
 my $logDir       = $outdir . "/LotuSLogS/";
 my $extendedLogD = $outdir . "/ExtraFiles/";
-$mainLogFile = $logDir . "LotuS_run.log";
-my $cmdLogFile = $logDir . "LotuS_cmds.log";
-my $progOutPut = $logDir . "LotuS_progout.log";
+$mainLogFile = $logDir . "LotuS_run$xtra.log";
+my $cmdLogFile = $logDir . "LotuS_cmds$xtra.log";
+my $progOutPut = $logDir . "LotuS_progout$xtra.log";
 
 my $highLvlDir   = $outdir . "/higherLvl/";
 my $FunctOutDir = $outdir . "/derrivedFunctions/";
@@ -522,9 +524,9 @@ if ( $exec == 0 && $onlyTaxRedo == 0 && $TaxOnly eq "0" ) {
 		$sdmIn = "-i_fastq $derepOutHQ";
 		#$finalClustMap $finalAddMap $finalAddMapRef $finalRestMap $finalRestMapRef
 		if ( $numInput == 2 ) { $sdmIn = "-i_fastq $derepOutHQ,$derepOutHQ2"; }
-		$sdmcmd ="$sdmBin $sdmIn $sdmOut2 $upVer $mainMapping -paired $numInput -sample_sep $sep_smplID -derep_map $derepOutMap -options $sdmOpt $mergeOptions $qualOffset -mergedPairs $didMerge -log $logDir/SeedExtensionStats.txt  -OTU_fallback $tmpOTU -ucAdditionalCounts $ucFinalFile[1] -ucAdditionalCounts1 $ucFinalFile[3] -otu_matrix $OTUmFile $mapRestr -count_chimeras $chimCnt $refClusSDM ";
+		$sdmcmd ="$sdmBin $sdmIn $sdmOut2 $upVer $mainMapping -paired $numInput -sample_sep $sep_smplID -derep_map $derepOutMap -options $sdmOpt $mergeOptions $qualOffset -mergedPairs $didMerge -log $logDir/SeedExtensionStats.log  -OTU_fallback $tmpOTU -ucAdditionalCounts $ucFinalFile[1] -ucAdditionalCounts1 $ucFinalFile[3] -otu_matrix $OTUmFile $mapRestr -count_chimeras $chimCnt $refClusSDM ";
 	} else {
-		$sdmcmd = "$sdmBin $sdmIn $sdmOut2 $upVer $mainMapping -paired $numInput -sample_sep $sep_smplID -map $cpMapFile -options $sdmOpt $qualOffset $mergeOptions -mergedPairs $didMerge -log $logDir/SeedExtensionStats.txt -OTU_fallback $tmpOTU -otu_matrix $OTUmFile -ucAdditionalCounts $ucFinalFile[1] -ucAdditionalCounts1 $ucFinalFile[3] $mapRestr -count_chimeras $chimCnt $refClusSDM ";
+		$sdmcmd = "$sdmBin $sdmIn $sdmOut2 $upVer $mainMapping -paired $numInput -sample_sep $sep_smplID -map $cpMapFile -options $sdmOpt $qualOffset $mergeOptions -mergedPairs $didMerge -log $logDir/SeedExtensionStats.log -OTU_fallback $tmpOTU -otu_matrix $OTUmFile -ucAdditionalCounts $ucFinalFile[1] -ucAdditionalCounts1 $ucFinalFile[3] $mapRestr -count_chimeras $chimCnt $refClusSDM ";
 	}
 	#some specific demulti treatment for DADA2 specifically (faster to leave files non-gz till here)
 	if ($ClusterPipe == 7 && ( $saveDemulti == 1 || $saveDemulti == 2 )  && glob("$sdmDemultiDir/*.fq")>0 ) {    #gzip stuff
@@ -3188,7 +3190,7 @@ sub prepLtsOptions{
 		}
 	} elsif ( $platform eq "pacbio" || $platform eq "pacbio_ga") {
 		$dereplicate_minsize_def = 0;
-		$mini2RdPreset = "-x map-pb -u b --secondary=no -N 0 -c ";
+		$mini2RdPreset = "-x map-pb -u b --secondary=no -c ";
 		$ClusterPipe_pre = "CDHIT" if ($ClusterPipe_pre eq "?");
 		if ($sdmOpt eq ""){
 			$sdmOpt = $sdmPacBioOpt ;
