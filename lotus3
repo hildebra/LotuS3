@@ -6337,7 +6337,7 @@ sub checkOS{
 		$OSn = "MacOS";
 	}
 	if ($OSn ne ""){
-		die "$OSn ($osname) detected. Please note that $selfID does only support Unix OSs\nExiting...\n";
+		printL (frame("$OSn ($osname) detected. Please note that $selfID does only support Unix OSs\nContinue at your own risk...\n"),"w");
 	}
 }
 
