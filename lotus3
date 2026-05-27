@@ -960,7 +960,7 @@ sub sdmStep1{
 		#DEREP: TODO: get from different SR blocks derep output
 		if (defined $readSdmDereLog && $readSdmDereLog ne ""){
 			my @dere1; my @dere2;
-			while ($readSdmDereLog =~ m/(Dereplication: .*counts\))/g){
+			while ($readSdmDereLog =~ m/(Dereplication: .*counts.*\))/g){
 				push(@dere1,$1);
 			}
 			while ($readSdmDereLog =~ m/([\d,]+\/[\d,]+ not passing derep.*counts; \d+\))/g){
@@ -6212,15 +6212,19 @@ sub parseLastVUsearch($){
 	my ($tarF) = @_;
 	
 	#only works for vsearch
-	my $d2rep="";
-	if ($VSused == 1){
-		$d2rep = `tail $progOutPut | grep 'Matching unique query sequence' `;
-		$d2rep =~ s/.*Matching unique query sequences: //; chomp $d2rep;
-	} else {
-		$d2rep = `tail $progOutPut | grep '\% Searching ' `;
-		$d2rep =~ s/.*\% Searching .*,//; chomp $d2rep;
+	my $d2rep = `tail -n20 $progOutPut `;
+	if ($d2rep =~ m/Matching unique query sequences: (\d+)/){#$VSused == 1){
+		return $1;
+	} elsif ($d2rep =~ m/.*\% Searching .*, (\d+)/) {
+		return $1;
+		#$d2rep = `tail -n20 $progOutPut | grep '\% Searching ' `;
+		#$d2rep =~ m/.*\% Searching .*,//; chomp $d2rep;
+	} elsif ($d2rep =~ m/worker_pipeline::.*mapped (\d+) sequences/){
+		return $1;
 	}
-	return $d2rep;
+	
+	#worker_pipeline
+	return "Unknown";
 }
 
 sub convertFastqs2fna($ $){
@@ -6462,12 +6466,12 @@ sub buildOTUs($) {
 	}
 	elsif ( $ClusterPipe == 7 ) { #dada2
 		die "incorrect dada2 script defined" unless (-f $dada2Scr);
-		$cmd = "$Rscript $defRscriptOpt $dada2Scr $sdmDemultiDir $lotus_tempDir $dada2Seed $uthreads $cpMapFile $derepl;";
+		$cmd = "$Rscript $defRscriptOpt $dada2Scr $sdmDemultiDir $lotus_tempDir $dada2Seed $uthreads $cpMapFile $derepl; ";
 		#cleanup of important dada2 files
-		$cmd .= "mv -f $lotus_tempDir/*.pdf $logDir;";
+		$cmd .= "mv -f $lotus_tempDir/*.pdf $logDir; ";
 		
-		$cmd .= "cp $lotus_tempDir/dada2.uc $finalClustMap;";
-		$cmd .= "rm -f $OTUfastaTmp;cp $lotus_tempDir/uniqueSeqs.fna $OTUfastaTmp;";
+		$cmd .= "cp $lotus_tempDir/dada2.uc $finalClustMap; ";
+		$cmd .= "rm -f $OTUfastaTmp;cp $lotus_tempDir/uniqueSeqs.fna $OTUfastaTmp; ";
 		#$cmd .= "cp $sdmDemultiDir/uniqueSeqs.fna $outdir/primary/;gzip $outdir/primary//uniqueSeqs.fna;";
 		$cmd .= "rm -rf $sdmDemultiDir;" if ($saveDemulti==0);
 		#die "$cmd\n";
@@ -6552,7 +6556,7 @@ sub buildOTUs($) {
 	#actual excecution
     if ( $exec == 0 ) {
 		printL(frame($entrMessage,1,2),0);
-		printL("Executing clustering command: $cmd\n", 0);
+		#printL("Executing clustering command: $cmd\n", 0);
         if ( systemL($cmd) != 0 ) {
             printL( "Failed core ${OTU_prefix} clustering command:\n$cmd\n", 1 );
         }
