@@ -572,7 +572,7 @@ if ( $numInput == 2 ) {
     #TODO : $sdmIn
 }
 my $upVer = "";
-$upVer = "-uparseVer $usearchVer " if ($ClusterPipe == 1 || ( $ClusterPipe == 7 && !$useBackmap4dada2 )); #use same format for .uc file in uparse and dada2 mode
+$upVer = "-uparseVer $usearchVer " if ($ClusterPipe == 1 || ( $ClusterPipe == 7 && !$useBackmap4dada2 ) || $ClusterPipe == 9); #use same format for .uc file in uparse, dada2 and savont mode (savont .uc mirrors dada2)
 $upVer = "-uparseVer N11 "if ($ClusterPipe == 6);
 $upVer = "-uparseVer cdhit " if ($ClusterPipe == 3);
 $upVer = "-uparseVer vsearch " if ($ClusterPipe == 8);
@@ -2994,9 +2994,6 @@ sub setClusterAlgo{
 		${OTU_prefix} = "ASV";
 		if ( !-e $savontBin ) {
 			printL "No valid savont binary found at $savontBin\n (set 'savont <path>' in lOTUs.cfg)\n", 88;
-		}
-		if ( !-e $savont2ucScr ) {
-			printL "savont2uc.pl helper not found at $savont2ucScr\n", 88;
 		}
 	} else {#default pipeline
 		$ClusterPipe = 1; $clusteringNameStr = "UPARSE";
@@ -7417,30 +7414,32 @@ sub buildOTUs($) {
 		$citations .= "CD-HIT v$1 ${OTU_prefix} clustering: Fu L, Niu B, Zhu Z, Wu S, Li W. 2012. CD-HIT: Accelerated for clustering the next-generation sequencing data. Bioinformatics 28: 3150–3152.\n";
 		
 	}elsif ( $ClusterPipe == 9 ) { #savont (ONT long-read ASVs)
-		#savont is the ONT ASV caller (analogous to dada2): it consumes the demultiplexed,
-		#primer-trimmed, NON-dereplicated per-sample reads (sdm wrote them to $sdmDemultiDir),
-		#does its own quality filtering + clustering + consensus + chimera removal, and emits
-		#final_asvs.fasta + temp/read_to_asv_mappings.tsv. savont2uc.pl then reshapes those into
-		#the DADA2-style .uc (read->ASV) + uniqueSeqs.fna that sdm tallies into the per-sample matrix.
+		#savont is the ONT ASV caller: it consumes the demultiplexed, primer-trimmed,
+		#NON-dereplicated per-sample reads (sdm wrote them to $sdmDemultiDir), and does its own
+		#quality filtering + clustering + consensus + chimera removal, emitting final_asvs.fasta.
+		#Option B: we use savont ONLY to produce the ASV sequences; LotuS3 then backmaps the
+		#(dereplicated) reads onto these ASVs via minimap2 (-x map-ont) to build the .uc + per-sample
+		#matrix, exactly as DADA2-default does. This keeps abundance estimation consistent with the
+		#other clusterers (fair for benchmarking) and reuses the tested backmap path.
 		die "savont binary not found at $savontBin\n" unless (-e $savontBin);
-		die "savont2uc.pl helper not found at $savont2ucScr\n" unless (-e $savont2ucScr);
 		my $savontTmp = "$lotus_tempDir/savont_out";
 		my $savontIn  = "$lotus_tempDir/savont_in.fq";
 		#ONT-tuned savont defaults (validated on R10.4 16S). Hardcoded for now; expose as
 		#LotuS3 flags in a follow-up. Loosened quality cutoffs vs savont defaults because sdm
 		#already removed primers/barcodes and we want savont to keep borderline-Q reads.
+		#ONT-tuned savont defaults. Empirically: cutoff 98 (savont's default) flags all consensi
+		#low-quality -> 0 ASVs on typical R10.4 16S (~97-98% read accuracy); 95/15 recovers the
+		#correct community on adequate-depth data. Tune via savont directly if your reads are
+		#cleaner. (Exposing these as LotuS3 flags is a planned follow-up.)
 		my $savontOpt = "--single-strand --quality-value-cutoff 95 --minimum-base-quality 15";
 		$entrMessage = "savont ${OTU_prefix} clustering (ONT)\ncheck progress at $progOutPut";
 		#concatenate all demultiplexed per-sample fq into one input (savont concatenates inputs anyway)
 		$cmd  = "rm -rf $savontTmp; cat $sdmDemultiDir/*.fq > $savontIn 2>/dev/null; ";
 		$cmd .= "$savontBin asv $savontIn -o $savontTmp -t $uthreads $savontOpt; ";
-		#convert savont output -> DADA2-style .uc + uniqueSeqs.fna
-		$cmd .= "perl $savont2ucScr --asvs $savontTmp/final_asvs.fasta ";
-		$cmd .= "--map $savontTmp/temp/read_to_asv_mappings.tsv ";
-		$cmd .= "--ucout $lotus_tempDir/savont.uc --fnaout $lotus_tempDir/savont_uniqueSeqs.fna --verbose; ";
-		#place outputs where the rest of the pipeline expects them (mirrors dada2 block)
-		$cmd .= "cp $lotus_tempDir/savont.uc $finalClustMap; ";
-		$cmd .= "rm -f $OTUfastaTmp; cp $lotus_tempDir/savont_uniqueSeqs.fna $OTUfastaTmp; ";
+		#savont's verbose headers (>final_consensus_N_depth_M debug_id:K ...) confuse sdm's OTU
+		#naming. We copy the raw fasta here, then renumber headers to clean >${OTU_prefix}N in Perl
+		#(via numberOTUs) right after this command runs - doing it in-shell with awk hits quoting issues.
+		$cmd .= "rm -f $OTUfastaTmp.savontraw; cp $savontTmp/final_asvs.fasta $OTUfastaTmp.savontraw; ";
 		$cmd .= "rm -f $savontIn; ";
 		$cmd .= "rm -rf $sdmDemultiDir;" if ($saveDemulti==0);
 		$citations .= "savont ASV clustering (ONT): Shaw J, et al. savont: accurate amplicon sequence variants from Nanopore reads. https://github.com/bluenote-1577/savont\n";
@@ -7483,6 +7482,16 @@ sub buildOTUs($) {
 			}
 			$exitMsg = "$d2rep";
 		}
+		if ( $ClusterPipe == 9 ) {#savont: renumber raw ASV headers -> clean ${OTU_prefix}N (Perl, avoids awk quoting)
+			my $savontRaw = "$OTUfastaTmp.savontraw";
+			if ( -e $savontRaw && !-z $savontRaw ) {
+				numberOTUs( $savontRaw, $OTUfastaTmp, ${OTU_prefix} );
+				my $nASVsav = `grep -c '^>' $OTUfastaTmp`; chomp $nASVsav;
+				$exitMsg = "Found $nASVsav ASVs (savont)";
+			} else {
+				printL "savont produced no ASVs ($savontRaw missing/empty)\n", 1;
+			}
+		}
 		printL(frame($exitMsg,1,3),0);
 		#die "$progOutPut\n$d2rep\n";
     }
@@ -7522,7 +7531,8 @@ sub buildOTUs($) {
 	if ($sdmDerepDo){
 		if (   ( $usearchVer < 8 && $ClusterPipe == 1 )
             || $ClusterPipe == 2 || $ClusterPipe == 6  #|| $ClusterPipe == 3 #2=swarm, 3=cdhit, 6=unoise
-			||( $ClusterPipe == 7 && $useBackmap4dada2) ) #dada2
+			||( $ClusterPipe == 7 && $useBackmap4dada2) #dada2
+			|| $ClusterPipe == 9 ) #savont: backmap reads onto ASVs (Option B), like dada2-default
 		{  
 			$backMapDerep = 1;
 		}
