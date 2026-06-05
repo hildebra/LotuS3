@@ -87,6 +87,7 @@ my $VSused      = 1;
 my $internalMapper = "V/USEARCH";
 my $cdhitBin    = "";
 my $dnaclustBin = "";
+my $savontBin   = ""; #absolute path to savont binary (ONT ASV caller)
 my $mini2Bin    = "";
 my $mjar = ""; #RDP multiclassifier java archieve (e.g. /YY/MultiClassifier.jar)
 my $rdpjar = ""
@@ -145,6 +146,7 @@ my $sdmHiseqOpt = "$RealBin/configs/sdm_hiSeq.txt";
 my $sdmPacBioOpt = "$RealBin/configs/sdm_PacBio_LSSU.txt";
 my $sdmPacBioITSOpt = "$RealBin/configs/sdm_PacBio_ITS.txt";
 my $sdmONTsavontOpt = "$RealBin/configs/sdm_ONT_savont.txt"; #ONT path: sdm demux+primer-trim only, savont owns QC
+my $savont2ucScr = "$RealBin/bin/savont2uc.pl"; #helper: converts savont ASV output to DADA2-style .uc
 
 my $ClusterPipe_pre = "?"; #default is unknown..
 my $ClusterPipe     = 1; #use UPARSE (1) or otupipe(0) or SWARM (2) or cd-hit(3), dnaclust (4), micca (5), unoise (6), dada2(7), vsearch (8)
@@ -843,7 +845,7 @@ sub sdmStep1{
 
 	my $sdmDemultiDir = "";
 	my $sdmOptStr     = "-options $sdmOpt ";
-	if ( $saveDemulti == 2 || $saveDemulti == 1 || $ClusterPipe == 7 ) { #dada2 also requires filtered raw reads
+	if ( $saveDemulti == 2 || $saveDemulti == 1 || $ClusterPipe == 7 || $ClusterPipe == 9 ) { #dada2 & savont also require filtered raw reads
 		$sdmDemultiDir = "$outdir/demultiplexed/";
 		if ( $saveDemulti == 1 ) { 
 			printL frame("Demultiplexed input files into single samples, no quality filtering done\nWill abort after demultiplexing (mode \"1\" is only for preparing publication ready, raw sequences)!\n"),0;
@@ -853,9 +855,14 @@ sub sdmStep1{
 		#for valid paired output, need to keep them together..
 		$sdmOptStr .= "-pairedDemulti 1 " if ($paired > 1);
 
-		$sdmOptStr .= "-o_demultiplex_gz 1 " if ($ClusterPipe != 7 || $saveDemulti == 1);#for dada2 leave files.. (saveDemulti==1 exits before clustering)
+		#leave demux files non-gzipped for dada2 and savont (both read per-sample files directly; saveDemulti==1 exits before clustering)
+		$sdmOptStr .= "-o_demultiplex_gz 1 " if (($ClusterPipe != 7 && $ClusterPipe != 9) || $saveDemulti == 1);
 		if ($ClusterPipe == 7){ #dada2.. no rd pair info in head!
 			$sdmOptStr .= "-pairedRD_HD_out 0 -derep_format fq -derepPerSR 1 -DemultiBPperSR 1e8 ";
+			$sdmDemultiDir = "$lotus_tempDir/demultiplexed/" if ($saveDemulti == 0);
+		}
+		if ($ClusterPipe == 9){ #savont: single-end long reads, needs full (non-dereplicated) per-sample fq
+			$sdmOptStr .= "-derep_format fq -DemultiBPperSR 1e9 ";
 			$sdmDemultiDir = "$lotus_tempDir/demultiplexed/" if ($saveDemulti == 0);
 		}
 	}
@@ -1499,8 +1506,8 @@ sub addSize2OTUfna($ $){
 
 sub chimera_denovo($){
 	my ($OTUfa) = @_;
-	#uparse, unoise, dada2 have their own chimera checks
-    if ($ClusterPipe == 1 ||$ClusterPipe == 7||$ClusterPipe == 6 || !-e $OTUfa || $noChimChk == 1 || $noChimChk == 2 ){
+	#uparse, unoise, dada2, savont have their own chimera checks
+    if ($ClusterPipe == 1 ||$ClusterPipe == 7||$ClusterPipe == 6 || $ClusterPipe == 9 || !-e $OTUfa || $noChimChk == 1 || $noChimChk == 2 ){
 		return $OTUfa;
 	}
 	my $iniEntries = cntFastaEntrs($OTUfa);
@@ -2344,6 +2351,9 @@ sub readPaths_aligners($) {
 		elsif ( $line =~ m/^dnaclust\s+(\S+)/ ) {
 			$dnaclustBin = truePath($1);
 		}
+		elsif ( $line =~ m/^savont\s+(\S+)/ ) {
+			$savontBin = truePath($1);
+		}
 		elsif ( $line =~ m/^minimap2\s+(\S+)/ ) {
 			$mini2Bin = truePath($1);
 		#}elsif ( $line =~ m/^lambda\s+(\S+)/ ) {
@@ -2984,6 +2994,15 @@ sub setClusterAlgo{
 		$ClusterPipe = 4; $clusteringNameStr = "DNACLUST";
 		if ( !-e $dnaclustBin ) {
 			printL "No valid DNA clust binary found at $dnaclustBin\n", 88;
+		}
+	}elsif ( $ClusterPipe_pre eq "SAVONT" || $ClusterPipe_pre eq "9" ) {
+		$ClusterPipe = 9; $clusteringNameStr = "savont";
+		${OTU_prefix} = "ASV";
+		if ( !-e $savontBin ) {
+			printL "No valid savont binary found at $savontBin\n (set 'savont <path>' in lOTUs.cfg)\n", 88;
+		}
+		if ( !-e $savont2ucScr ) {
+			printL "savont2uc.pl helper not found at $savont2ucScr\n", 88;
 		}
 	} else {#default pipeline
 		$ClusterPipe = 1; $clusteringNameStr = "UPARSE";
@@ -6540,6 +6559,34 @@ sub buildOTUs($) {
 		$verchk =~ m/CD-HIT version ([\d\.]+ )/;
 		$citations .= "CD-HIT v$1 ${OTU_prefix} clustering: Fu L, Niu B, Zhu Z, Wu S, Li W. 2012. CD-HIT: Accelerated for clustering the next-generation sequencing data. Bioinformatics 28: 3150–3152.\n";
 		
+	}elsif ( $ClusterPipe == 9 ) { #savont (ONT long-read ASVs)
+		#savont is the ONT ASV caller (analogous to dada2): it consumes the demultiplexed,
+		#primer-trimmed, NON-dereplicated per-sample reads (sdm wrote them to $sdmDemultiDir),
+		#does its own quality filtering + clustering + consensus + chimera removal, and emits
+		#final_asvs.fasta + temp/read_to_asv_mappings.tsv. savont2uc.pl then reshapes those into
+		#the DADA2-style .uc (read->ASV) + uniqueSeqs.fna that sdm tallies into the per-sample matrix.
+		die "savont binary not found at $savontBin\n" unless (-e $savontBin);
+		die "savont2uc.pl helper not found at $savont2ucScr\n" unless (-e $savont2ucScr);
+		my $savontTmp = "$lotus_tempDir/savont_out";
+		my $savontIn  = "$lotus_tempDir/savont_in.fq";
+		#ONT-tuned savont defaults (validated on R10.4 16S). Hardcoded for now; expose as
+		#LotuS3 flags in a follow-up. Loosened quality cutoffs vs savont defaults because sdm
+		#already removed primers/barcodes and we want savont to keep borderline-Q reads.
+		my $savontOpt = "--single-strand --quality-value-cutoff 95 --minimum-base-quality 15";
+		$entrMessage = "savont ${OTU_prefix} clustering (ONT)\ncheck progress at $progOutPut";
+		#concatenate all demultiplexed per-sample fq into one input (savont concatenates inputs anyway)
+		$cmd  = "rm -rf $savontTmp; cat $sdmDemultiDir/*.fq > $savontIn 2>/dev/null; ";
+		$cmd .= "$savontBin asv $savontIn -o $savontTmp -t $uthreads $savontOpt; ";
+		#convert savont output -> DADA2-style .uc + uniqueSeqs.fna
+		$cmd .= "perl $savont2ucScr --asvs $savontTmp/final_asvs.fasta ";
+		$cmd .= "--map $savontTmp/temp/read_to_asv_mappings.tsv ";
+		$cmd .= "--ucout $lotus_tempDir/savont.uc --fnaout $lotus_tempDir/savont_uniqueSeqs.fna --verbose; ";
+		#place outputs where the rest of the pipeline expects them (mirrors dada2 block)
+		$cmd .= "cp $lotus_tempDir/savont.uc $finalClustMap; ";
+		$cmd .= "rm -f $OTUfastaTmp; cp $lotus_tempDir/savont_uniqueSeqs.fna $OTUfastaTmp; ";
+		$cmd .= "rm -f $savontIn; ";
+		$cmd .= "rm -rf $sdmDemultiDir;" if ($saveDemulti==0);
+		$citations .= "savont ASV clustering (ONT): Shaw J, et al. savont: accurate amplicon sequence variants from Nanopore reads. https://github.com/bluenote-1577/savont\n";
 	}elsif ( $ClusterPipe == 4 ) {    #dnaclust-ref
 		my $dnaClOpt = "";
 		if ($REFflag) {
