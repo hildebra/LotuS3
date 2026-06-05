@@ -144,6 +144,7 @@ my $sdm454CDHITOpt = "$RealBin/configs/sdm_454_cdhit.txt";
 my $sdmHiseqOpt = "$RealBin/configs/sdm_hiSeq.txt";
 my $sdmPacBioOpt = "$RealBin/configs/sdm_PacBio_LSSU.txt";
 my $sdmPacBioITSOpt = "$RealBin/configs/sdm_PacBio_ITS.txt";
+my $sdmONTsavontOpt = "$RealBin/configs/sdm_ONT_savont.txt"; #ONT path: sdm demux+primer-trim only, savont owns QC
 
 my $ClusterPipe_pre = "?"; #default is unknown..
 my $ClusterPipe     = 1; #use UPARSE (1) or otupipe(0) or SWARM (2) or cd-hit(3), dnaclust (4), micca (5), unoise (6), dada2(7), vsearch (8)
@@ -3201,6 +3202,14 @@ sub prepLtsOptions{
 		}
 	} elsif ($platform eq "aviti"){
 		$sdmOpt =$sdmAVITIOpt;
+	} elsif ($platform eq "ont"){
+		#ONT long-read amplicons: demux+primer-trim via sdm, ASVs via savont.
+		$dereplicate_minsize_def = 0;
+		$mini2RdPreset = "-x map-ont -u b --secondary=no -c ";
+		$ClusterPipe_pre = "SAVONT" if ($ClusterPipe_pre eq "?");#default, user can override with -CL
+		if ($sdmOpt eq ""){
+			$sdmOpt = $sdmONTsavontOpt;
+		}
 	}
 	
 	
@@ -3394,7 +3403,7 @@ my %further_options = (
   '-barcode|-MID <file>', 'Filepath to fastq formated file with barcodes (this is a processed mi/hiSeq format). The complementary option in a mapping file would be the column "MIDfqFile". (Default: "")',
   '-s|sdmopt <file>', 'SDM option file, defaults to "configs/sdm_miSeq.txt" in current dir. (Default: miSeq)',
   '-c <file>', 'LotuS.cfg, config file with program paths. (Default: <LotuS3_dir>/lOTUs.cfg)',
-  '-p <454/miSeq/hiSeq/PacBio>', 'sequencing platform: PacBio, PacBio_GA, 454, AVITI, miSeq or hiSeq. (Default: miSeq)',
+  '-p <454/miSeq/hiSeq/PacBio/ONT>', 'sequencing platform: PacBio, PacBio_GA, ONT, 454, AVITI, miSeq or hiSeq. (Default: miSeq)',
   '-t|-threads <num>', 'number of threads to be used. (Default: 1)',
   '-tmp|-tmpDir <dir>', 'temporary directory used to save intermediate results. (Default: <outputDir>/tmpDir)'
 );
