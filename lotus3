@@ -104,6 +104,7 @@ my $internalMapper = "V/USEARCH";
 my $cdhitBin    = "";
 my $dnaclustBin = "";
 my $savontBin   = ""; #absolute path to savont binary (ONT ASV caller)
+my $barbellBin  = ""; #absolute path to barbell binary (ONT demultiplexer)
 my $mini2Bin    = "";
 my $mjar = ""; #RDP multiclassifier java archieve (e.g. /YY/MultiClassifier.jar)
 my $rdpjar = ""
@@ -165,6 +166,12 @@ my $sdmPacBioOpt = "$RealBin/configs/sdm_PacBio_LSSU.txt";
 my $sdmPacBioITSOpt = "$RealBin/configs/sdm_PacBio_ITS.txt";
 my $sdmONTsavontOpt = "$RealBin/configs/sdm_ONT_savont.txt"; #ONT path: sdm demux+primer-trim only, savont owns QC
 my $savont2ucScr = "$RealBin/bin/savont2uc.pl"; #helper: converts savont ASV output to DADA2-style .uc
+my $sdmONTprimersOpt = "$RealBin/configs/sdm_ONT_primersonly.txt"; #ONT+barbell path: sdm strips primers only (barbell already demuxed; savont owns QC)
+my $ontDemux      = "0";          #ONT demultiplexer: "0"=off (input already per-sample), "barbell"=run barbell first
+my $ontKit        = "";           #barbell kit, e.g. SQK-RBK114-96 (required when -ontDemux barbell)
+my $ontBarcodeCol = "ONTBarcode"; #mapping-file column holding the per-sample barcode LABEL (e.g. BC38)
+my $ontMinReads   = 0;            #drop a declared barcode if barbell yields < this many reads (0 = keep all)
+my $ontWriteFastqCol = 1;         #write a fastqFile column into cpMapFile so sdm matches per-sample files (defensive; set 0 if sdm matches by filename)
 
 my $ClusterPipe_pre = "?"; #default is unknown..
 my $ClusterPipe     = 1; #use UPARSE (1) or otupipe(0) or SWARM (2) or cd-hit(3), dnaclust (4), micca (5), unoise (6), dada2(7), vsearch (8)
@@ -356,6 +363,11 @@ GetOptions(
 	"LCA_idthresh=s"        => \$idThreshs,
 	"chim_skew=f"           => \$chimera_absskew,		
 	"p|platform=s"          => \$platform,		#miSeq,hiSeq,pacbio,pacbio_GA
+	"ontDemux=s"            => \$ontDemux,        #ONT: "barbell" to demultiplex a raw multiplexed FASTQ before sdm
+	"ontKit=s"              => \$ontKit,          #ONT: barbell kit name (e.g. SQK-RBK114-96)
+	"ontBarcodeCol=s"       => \$ontBarcodeCol,   #ONT: mapping-file column holding the per-sample barcode label
+	"ontMinReads=i"         => \$ontMinReads,     #ONT: min reads/barcode to keep a demuxed sample (0=keep all)
+	"ontWriteFastqCol=i"    => \$ontWriteFastqCol,#ONT: write fastqFile column into the working map (default 1)
 	"tolerateCorruptFq=i"   => \$damagedFQ,
 	"keepUnclassified=i"    => \$keepUnclassified,
 	"keepOfftargets=i"      => \$keepOfftargets,
@@ -488,6 +500,10 @@ if ($dryRun) {
 safe_remove_tree($lotus_tempDir, "temporary directory") if ( $exec == 0 );
 ensure_dir($lotus_tempDir) unless ( -d $lotus_tempDir );
 die( "Failed to make tmp dir or doesn't exist: \"" . $lotus_tempDir . "\"\n" ) if ( !-d $lotus_tempDir );
+
+#ONT pre-step: if requested, demultiplex the raw multiplexed FASTQ with barbell BEFORE
+#sdm runs, then route the resulting per-sample files into the normal per-sample-file path.
+ontBarbellDemux();
 
 
 
@@ -859,6 +875,100 @@ close LOG; close cmdLOG;
 #--------------------------############################----------------------------------###########################
 
 
+
+#--------------------------------------------------------------------------
+# ONT pre-step: barbell demultiplexing (-ontDemux barbell)
+# barbell turns ONE multiplexed FASTQ into per-barcode, barcode-trimmed read files.
+# We keep ONLY the barcodes declared in the mapping file's $ontBarcodeCol column
+# (this drops barbell's bleed/noise barcodes), rename each kept file to <SampleID>.fq,
+# repoint the pipeline input at that directory, and (defensively) write a fastqFile
+# column into cpMapFile. The normal per-sample-file (-i_path) route then carries on:
+# sdm strips 16S primers per sample, savont builds ASVs, reads are backmapped for
+# abundances. This mirrors the pre-demultiplexed PacBio input model.
+#--------------------------------------------------------------------------
+sub ontBarbellDemux {
+	return if ($ontDemux eq "0");
+	return if ($exec != 0 || $onlyTaxRedo || $TaxOnly ne "0");   #skip in redo / tax-only modes
+	printL "Unknown -ontDemux value \"$ontDemux\" (only \"barbell\" is supported)\n",55 if ($ontDemux ne "barbell");
+	printL "barbell binary not found at \"$barbellBin\"\n (set 'barbell <path>' in lOTUs.cfg)\n",88 unless (-e $barbellBin);
+	printL "-ontKit must be set when -ontDemux barbell (e.g. -ontKit SQK-RBK114-96)\n",55 if ($ontKit eq "");
+	printL "barbell demux expects a single multiplexed FASTQ via -i, but got $numInput input file(s)\n",55 if ($numInput != 1);
+	printL "barbell demux input file not found: $inputArray[0]\n",42 unless (-e $inputArray[0]);
+
+	#--- 1) read barcode-label -> SampleID from cpMapFile (written by readMap) ---
+	my %bc2smpl;
+	open my $MF, "<", $cpMapFile or printL "ontBarbellDemux: can't read $cpMapFile: $!\n",3;
+	my @ml = <$MF>; close $MF;
+	my ($idCol,$bcCol) = (-1,-1); my $first = 1;
+	foreach my $l (@ml){
+		$l =~ s/\r//g; chomp $l;
+		my @c = split /\t/, $l, -1;
+		if ($first){
+			$first = 0;
+			for (my $i=0;$i<@c;$i++){ $idCol=$i if ($c[$i] eq "#SampleID"); $bcCol=$i if ($c[$i] eq $ontBarcodeCol); }
+			printL "ontBarbellDemux: mapping file needs a \"$ontBarcodeCol\" column (per-sample barcode label, e.g. BC38)\n",65 if ($bcCol < 0);
+			next;
+		}
+		next if (@c==0 || $c[0] eq "" || $c[0] =~ m/^#/);
+		next if (@c <= $bcCol);
+		my $bc = $c[$bcCol]; $bc =~ s/^\s+|\s+$//g;
+		next if ($bc eq "" || $bc eq "NA");
+		printL "ontBarbellDemux: barcode \"$bc\" assigned to more than one sample in the map\n",65 if (exists $bc2smpl{$bc});
+		$bc2smpl{$bc} = $c[$idCol];
+	}
+	printL "ontBarbellDemux: no usable \"$ontBarcodeCol\" entries found in $cpMapFile\n",65 unless (keys %bc2smpl);
+
+	#--- 2) run barbell on the single multiplexed FASTQ ---
+	my $bbRaw = "$lotus_tempDir/barbell_raw";
+	my $bbDmx = "$lotus_tempDir/ont_demux";
+	systemL "rm -rf $bbRaw $bbDmx; mkdir -p $bbDmx;";
+	printL frame("ONT demultiplexing with barbell (kit $ontKit), this may take a while..\n",1,2),0;
+	my $bbCmd = "$barbellBin kit -k $ontKit -i $inputArray[0] -o $bbRaw --maximize -t $uthreads";
+	if ( systemL($bbCmd) != 0 ){ printL "FAILED barbell demultiplexing step: $bbCmd\n",4; }
+
+	#--- 3) keep ONLY declared barcodes; rename <BC>.trimmed.fastq -> <SampleID>.fq ---
+	my %smpl2file; my $kept = 0; my @missing;
+	foreach my $bc (sort keys %bc2smpl){
+		my $sid = $bc2smpl{$bc};
+		my $src = "$bbRaw/$bc.trimmed.fastq";
+		unless ( -e $src && !-z $src ){ push @missing, "$bc->$sid (no file)"; next; }
+		my $nr = `wc -l < $src`; chomp $nr; $nr = int($nr/4);
+		if ($ontMinReads > 0 && $nr < $ontMinReads){ push @missing, "$bc->$sid ($nr<$ontMinReads reads)"; next; }
+		systemL "cp $src $bbDmx/$sid.fq;";
+		$smpl2file{$sid} = "$sid.fq"; $kept++;
+	}
+	printL "barbell: kept $kept of ".scalar(keys %bc2smpl)." declared barcode(s); dropped all undeclared (bleed) barcodes.\n",0;
+	printL "barbell: WARNING - declared barcode(s) with no/low reads, dropped: ".join("; ",@missing)."\n","w" if (@missing);
+	printL "barbell demux produced no usable per-sample files (check -ontKit and the \"$ontBarcodeCol\" labels)\n",4 unless ($kept);
+
+	#--- 4) repoint pipeline input at the per-sample directory -> existing -i_path route ---
+	$input = $bbDmx; @inputArray = ($input); $numInput = 1;
+
+	#--- 5) write a fastqFile column into cpMapFile so sdm matches files<->samples, and
+	#       drop map rows whose barcode produced no reads (keeps the working map consistent) ---
+	if ($ontWriteFastqCol){
+		my @out; my $fqIdx = -1; my $hdrDone = 0;
+		foreach my $l (@ml){
+			$l =~ s/\r//g; chomp $l;
+			my @c = split /\t/, $l, -1;
+			if (!$hdrDone){
+				$hdrDone = 1;
+				for (my $i=0;$i<@c;$i++){ $fqIdx=$i if ($c[$i] eq "fastqFile"); }
+				if ($fqIdx < 0){ push @c,"fastqFile"; $fqIdx = $#c; }
+				push @out, join("\t",@c); next;
+			}
+			next if (@c==0 || $c[0] eq "" || $c[0] =~ m/^#/);
+			my $sid = $c[0];
+			next unless (exists $smpl2file{$sid});      #drop samples we did not keep
+			while ($#c < $fqIdx){ push @c,""; }          #pad short rows up to the fastqFile slot
+			$c[$fqIdx] = $smpl2file{$sid};
+			push @out, join("\t",@c);
+		}
+		open my $OUT, ">", $cpMapFile or printL "ontBarbellDemux: can't rewrite $cpMapFile: $!\n",3;
+		print $OUT join("\n",@out)."\n"; close $OUT;
+		printL "barbell: wrote fastqFile column into working map ($cpMapFile)\n",0;
+	}
+}
 
 sub sdmStep1{
 	my $sdmcmd       = "";
@@ -2342,6 +2452,9 @@ sub readPaths_aligners($) {
 		elsif ( $line =~ m/^savont\s+(.+?)\s*$/ ) {
 			$savontBin = truePath($1);
 		}
+		elsif ( $line =~ m/^barbell\s+(.+?)\s*$/ ) {
+			$barbellBin = truePath($1);
+		}
 		elsif ( $line =~ m/^minimap2\s+(.+?)\s*$/ ) {
 			$mini2Bin = truePath($1);
 		#}elsif ( $line =~ m/^lambda\s+(.+?)\s*$/ ) {
@@ -3219,13 +3332,16 @@ sub prepLtsOptions{
 		$sdmOpt =$sdmAVITIOpt;
 	} elsif ($platform eq "ont"){
 		#ONT long-read amplicons: demux+primer-trim via sdm, ASVs via savont.
+		#  -ontDemux barbell: barbell does demux+barcode-trim first, so sdm strips
+		#  16S primers ONLY (primers-only config); otherwise sdm does demux+primer-trim.
 		$dereplicate_minsize_def = 0;
 		$mini2RdPreset = "-x map-ont -u b --secondary=no -c ";
 		$ClusterPipe_pre = "SAVONT" if ($ClusterPipe_pre eq "?");#default, user can override with -CL
 		if ($sdmOpt eq ""){
-			$sdmOpt = $sdmONTsavontOpt;
+			$sdmOpt = ($ontDemux eq "barbell") ? $sdmONTprimersOpt : $sdmONTsavontOpt;
 		}
 	}
+	die "Option -ontDemux \"$ontDemux\" only applies to the ONT long-read path; it requires -p ONT.\n" if ($ontDemux ne "0" && $platform ne "ont");
 	
 	
 	if (  $dereplicate_minsize eq "-1" ){
