@@ -1,0 +1,94 @@
+#sdm options file for the ONT + barbell + savont LotuS3 path (-ontDemux barbell).
+#DIVISION OF LABOUR (differs from sdm_ONT_savont.txt): here BARBELL has already done
+#demultiplexing AND barcode trimming on the raw multiplexed FASTQ, producing one
+#primer-bearing read file per sample. sdm therefore performs ONLY 16S primer detection
+#and removal - it does NOT demultiplex and it does NOT trim barcodes (there are none
+#left in the reads). As in the savont path, quality filtering / clustering / consensus /
+#chimera removal are all done by savont downstream, so every quality-based filter below
+#is deliberately opened wide (pass-through). Do NOT tighten the quality options - that
+#would double-filter and starve savont of the reads it needs.
+#* indicates alternative quality filtering options, saved in *.add.fna etc. files separately
+
+#--- length bounds: kept permissive; savont applies its own --min/--max-read-length ---
+minSeqLength	500
+maxSeqLength	5000
+*minSeqLength	500
+
+#--- QUALITY FILTERS: all neutralised (pass-through) - savont owns quality filtering ---
+#minimum average quality across the read; 0 = accept anything
+minAvgQuality	0
+*minAvgQuality	0
+#truncate total Sequence length to X (set to -1 to deactivate)
+TruncateSequenceLength	-1
+
+#Ambiguous bases in Sequence - high ceiling so nothing is dropped here
+maxAmbiguousNT	100
+*maxAmbiguousNT	100
+
+#homonucleotide run filter - high ceiling so nothing is dropped here
+maxHomonucleotide	100
+
+#sliding-window average-quality whole-sequence filter - deactivated (-1 threshold)
+QualWindowWidth	50
+QualWindowThreshhold	-1
+
+#trailing-end quality trim - deactivated (-1 threshold)
+TrimWindowWidth	20
+TrimWindowThreshhold	-1
+
+#probabilistic accumulated-error truncation - deactivated (-1)
+maxAccumulatedError	-1
+*maxAccumulatedError	-1
+
+
+#--- BARCODE handling: NOT used in this path (barbell already demultiplexed + trimmed
+#    barcodes). No BarcodeSequence column is expected in the mapping file; per-sample
+#    files are supplied directly. These are left at harmless values. ---
+maxBarcodeErrs	0
+#keep Barcode Sequence in output (irrelevant here; no barcodes present) - off
+keepBarcodeSeq	0
+
+#--- PRIMER handling: ACTIVE. This is sdm's only job in this path: strip the 16S
+#    primers so savont receives clean, primer-trimmed amplicon sequence. ---
+#Max Primer Errors (tolerant; ONT reads are noisier than Illumina)
+maxPrimerErrs	2
+#keep Primer Sequence in the output fasta - off so savont gets primer-trimmed sequence
+keepPrimerSeq	0
+
+
+#set fastqVersion to 1 if you use Sanger, Illumina 1.8+ or NCBI SRA files.
+fastqVersion	1
+
+#if one or more files have a technical adapter still included this can be removed here
+TechnicalAdapter	
+
+#delete X NTs from start (e.g. if the first bases are known to have biases)
+TrimStartNTs	0
+
+#PE header format (auto-detected); irrelevant for single-end ONT
+PEheaderPairFmt	1
+
+#reject reads without reverse primer (T=reject). Kept strict: savont expects amplicons
+#that actually contain the target, with primers removed.
+RejectSeqWithoutRevPrim	T
+*RejectSeqWithoutRevPrim	F
+
+#reject reads without forward primer (T=reject). Kept strict, as above.
+RejectSeqWithoutFwdPrim	T
+*RejectSeqWithoutFwdPrim	T
+
+
+#checks if pair1 and pair2 were switched (ignore for single-end ONT)
+CheckForMixedPairs	T
+#checks if whole amplicon was reverse-complement sequenced - useful for long reads that
+#can come off the pore in either orientation
+CheckForReversedSeqs	T
+
+#allow primer detection/removal on long single-end reads (also used to remove fwd and
+#rev primer from long PacBio/ONT sequences)
+AmpliconShortPE	T
+
+
+#check if the reverse primer occurs more than once on a read; if yes, cut to first
+#fwd-rev primer pairing. Useful for long reads with concatemers/artefacts.
+ExtensivePrimerChecks	T
