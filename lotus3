@@ -172,6 +172,10 @@ my $ontKit        = "";           #barbell kit, e.g. SQK-RBK114-96 (required whe
 my $ontBarcodeCol = "ONTBarcode"; #mapping-file column holding the per-sample barcode LABEL (e.g. BC38)
 my $ontMinReads   = 0;            #drop a declared barcode if barbell yields < this many reads (0 = keep all)
 my $ontWriteFastqCol = 1;         #write a fastqFile column into cpMapFile so sdm matches per-sample files (defensive; set 0 if sdm matches by filename)
+my $savontSingleStrand  = 0;   #0=both-strand (default for raw ONT); 1=forward-only (pre-oriented data)
+my $savontQualCutoff    = 80;  #min estimated read accuracy % (savont --quality-value-cutoff)
+my $savontMinBaseQual   = 15;  #min base Q for SNPmer detection (savont --minimum-base-quality)
+my $savontChimeraErrors = 0;   #allowable errors in chimera detection (0=strict; 1=savont default)
 
 my $ClusterPipe_pre = "?"; #default is unknown..
 my $ClusterPipe     = 1; #use UPARSE (1) or otupipe(0) or SWARM (2) or cd-hit(3), dnaclust (4), micca (5), unoise (6), dada2(7), vsearch (8)
@@ -367,7 +371,11 @@ GetOptions(
 	"ontKit=s"              => \$ontKit,          #ONT: barbell kit name (e.g. SQK-RBK114-96)
 	"ontBarcodeCol=s"       => \$ontBarcodeCol,   #ONT: mapping-file column holding the per-sample barcode label
 	"ontMinReads=i"         => \$ontMinReads,     #ONT: min reads/barcode to keep a demuxed sample (0=keep all)
-	"ontWriteFastqCol=i"    => \$ontWriteFastqCol,#ONT: write fastqFile column into the working map (default 1)
+	"ontWriteFastqCol=i"    => \$ontWriteFastqCol,
+	"savontSingleStrand=i"  => \$savontSingleStrand,
+	"savontQualCutoff=f"    => \$savontQualCutoff,
+	"savontMinBaseQual=i"   => \$savontMinBaseQual,
+	"savontChimeraErrors=i" => \$savontChimeraErrors,
 	"tolerateCorruptFq=i"   => \$damagedFQ,
 	"keepUnclassified=i"    => \$keepUnclassified,
 	"keepOfftargets=i"      => \$keepOfftargets,
@@ -7547,7 +7555,11 @@ sub buildOTUs($) {
 		#low-quality -> 0 ASVs on typical R10.4 16S (~97-98% read accuracy); 95/15 recovers the
 		#correct community on adequate-depth data. Tune via savont directly if your reads are
 		#cleaner. (Exposing these as LotuS3 flags is a planned follow-up.)
-		my $savontOpt = "--single-strand --quality-value-cutoff 80 --minimum-base-quality 15";
+		my $savontOpt = "";
+		$savontOpt .= "--single-strand " if ($savontSingleStrand);
+		$savontOpt .= "--quality-value-cutoff $savontQualCutoff ";
+		$savontOpt .= "--minimum-base-quality $savontMinBaseQual ";
+		$savontOpt .= "--chimera-allowable-errors $savontChimeraErrors ";
 		$entrMessage = "savont ${OTU_prefix} clustering (ONT)\ncheck progress at $progOutPut";
 		#concatenate all demultiplexed per-sample fq into one input (savont concatenates inputs anyway)
 		$cmd  = "rm -rf $savontTmp; cat $sdmDemultiDir/*.fq > $savontIn 2>/dev/null; ";
