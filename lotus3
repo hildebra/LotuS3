@@ -855,6 +855,7 @@ sub sdmStep1{
 		$sdmOptStr .= "-o_demultiplex_gz 1 " if ($ClusterPipe != 7 || $saveDemulti == 1);#for dada2 leave files.. (saveDemulti==1 exits before clustering)
 		if ($ClusterPipe == 7){ #dada2.. no rd pair info in head!
 			$sdmOptStr .= "-pairedRD_HD_out 0 -derep_format fq -derepPerSR 1 -DemultiBPperSR 1e8 ";
+			$sdmOptStr .= "-onlyCanonicalNTs 1 ";
 			$sdmDemultiDir = "$lotus_tempDir/demultiplexed/" if ($saveDemulti == 0);
 		}
 	}
