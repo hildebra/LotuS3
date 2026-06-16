@@ -55,7 +55,8 @@ sub checkOS;
 #3.03: 20.11.24: added min/maxGAampli options
 #3.04: 3.2.26: OS check included 
 #3.10: 29.3.26: major refactor of sdm v3.25 and LCA v0.26
-my $selfID = "LotuS 3.10"; 
+#3.11: 16.6.26: sdm v 3.37 (faster, less mem, more controlled outputs). KSGP v4.0 added to installer.
+my $selfID = "LotuS 3.11"; 
 
 
 checkOS();
