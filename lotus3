@@ -1853,9 +1853,14 @@ $Lreport .= "After filtering $nonChim ${OTU_prefix}'s ($nonChimRds reads) remain
 	return \%ORDL2;
 }
 
-sub forceMerge_fq2fna($ $ $ $ $) {
-    my ( $ifq1, $ifq2, $mfq, $sdms, $out ) = @_; #not merged1, not m2, merged, sdm sing, SEEDFNA
+sub forceMerge_fq2fna($ $ $) {
+    # Assembles the seed FASTA ($out) from two sources, in order:
+    #   1. Merged reads ($mfq)  — pairs that SDM successfully merged.
+    #   2. SDM singles ($sdms)  — single-end reads processed by SDM.
+    my ( $mfq, $sdms, $out ) = @_;
 	my $seedCnt = 0;
+    my $cntMerged  = 0;  # reads written from the merged-pairs file
+    my $cntSingles = 0;  # reads written from the SDM singles file
     #print $mfq."\n";
     open O, ">", $out or die "Can't open seedFNA $out\n";
     my $hd    = "";
@@ -1883,8 +1888,8 @@ sub forceMerge_fq2fna($ $ $ $ $) {
 			if ( $line =~ m/^@/ && $lnCnt == 0 ) {
 				$line =~ s/^@/>/;
 				$line =~ s/\.\d$// if ($line =~ m/[OTUASV]+_\d+\.\d+/);
-				print O $line . "\n"; $seedCnt++;
-				#print $line . "\n"; 
+				print O $line . "\n"; $seedCnt++; $cntMerged++;
+				#print $line . "\n";
 			}
 			if ( $lnCnt == 1 ) {
 				$line =~ s/$endRmvs// if ($check4endStr);
@@ -1895,34 +1900,7 @@ sub forceMerge_fq2fna($ $ $ $ $) {
 		}
 		close I;
 	}
-
-    #merge two unmerged reads
-    $lnCnt = 0;
-	#die "XX  $mfq\n";
-
-    #print $ifq1."\n";
-	if (-s $ifq1){
-		open I,  "<", $ifq1;
-		while ( my $line = <I> ) {
-			chomp $line;
-			if ( $line =~ m/^@/ && $lnCnt == 0 ) {
-				$line =~ s/^@/>/;
-				$line =~ s/\.\d$//;
-
-				#print $line."\n";
-				print O $line . "\n"; $seedCnt++;
-			}
-			if ( $lnCnt == 1 ) {
-				$line =~ s/$endRmvs// if ($check4endStr);
-				print O $line . "\n";    #."NNNN".$line2."\n";
-			}
-			$lnCnt++;
-			$lnCnt = 0 if ( $lnCnt == 4 );
-		}
-		close I;
-		#close I2;
-	}
-    if ( -f $sdms ) { 
+    if ( -f $sdms ) {
 	#print "sdms $sdms\n";
 		open I, "<", $sdms;
 		$lnCnt = 0;
@@ -1932,7 +1910,7 @@ sub forceMerge_fq2fna($ $ $ $ $) {
 				$line =~ s/$endRmvs// if ($check4endStr);
 				$line =~ s/^@/>/;
 				$line =~ s/\.\d$//;
-				print O $line . "\n";$seedCnt++;
+				print O $line . "\n"; $seedCnt++; $cntSingles++;
 			}
 			if ( $lnCnt == 1 ) {
 				print O $line . "\n";
@@ -1943,74 +1921,14 @@ sub forceMerge_fq2fna($ $ $ $ $) {
 		close I;
 	}
     close O;
-	printL frame("Found $seedCnt fasta seed sequences based on seed extension and read merging\n"),0;
+	printL frame("Found $seedCnt fasta seed sequences based on seed extension and read merging\n  ($cntMerged from merged pairs, $cntSingles from SDM singles)\n"),0;
 }
 
 sub mergeRds{
 	return if ($numInput != 2 );
-	my $single1  = "";my $single2  = "";
-	#print "mergeOptions  $mergeOptions\n";
-	my $mergeFile = "";
-	if($mergeOptions eq ""){#non-sdm merge, use external programs
-		my $key = "merged";
-		#$mergeFile = "$lotus_tempDir/$key";
-		$mergeFile   = "$lotus_tempDir/$key.extendedFrags.fastq";
-		$single1 = "$lotus_tempDir/$key.notCombined_1.fastq";
-		$single2 = "$lotus_tempDir/$key.notCombined_2.fastq";
-		if (@preMergeSeedsFiles > 0 && -s $preMergeSeedsFiles[0] > 0 #check that file even exists..
-				&& (-f $VSBin || -f $flashBin) #as well as the alignment programs
-				&& $otuRefDB ne "ref_closed" && $onlyTaxRedo == 0  && $TaxOnly eq "0" ) #and otherwise also wanted step..
-		{
-			my $mergCmd = "";
-			
-			#switch to vsearch for lotus2
-			if (-f $VSBin){
-				$mergCmd = "$VSBin  -fastq_mergepairs $preMergeSeedsFiles[0]  -reverse  $preMergeSeedsFiles[1] --fastqout $mergeFile --fastqout_notmerged_fwd $single1 --fastqout_notmerged_rev $single2 --threads $BlastCores;";
-				if ($VSused == 1){
-					$citations .= "VSEARCH v$vsearchVer  read pair merging: Rognes T, Flouri T, Nichols B, Quince C, Mahé F. (2016) VSEARCH: a versatile open source tool for metagenomics. PeerJ 4:e2584. doi: 10.7717/peerj.2584\n";
-				}else{
-					$citations .= "USEARCH v$usearchVer  read pair merging: R.C. Edgar (2010), Search and clustering orders of magnitude faster than BLAST, Bioinformatics 26(19) 2460-2461\n";
-				}
-				#die "$mergCmd\n"; #find out what the unmerged reads are..
-			} elsif ( -f $flashBin ) {
-				my $flOvOption = "-m 10 -M $maxReadOverlap ";
-				if ( $flashCustom ne "" ) {
-
-					#$flOvOption = "-r $flashLength -s $flashSD";
-					$flashCustom =~ s/\"//g;
-					$flOvOption = " $flashCustom ";
-				}
-				$mergCmd = "$flashBin $flOvOption -o $key -d $lotus_tempDir -t $BlastCores "
-				  . $preMergeSeedsFiles[0] . " " . $preMergeSeedsFiles[1];
-				$mergCmd .= "cp $lotus_tempDir/$key.hist $logDir/FlashPairedSeedsMerges.hist";
-				$citations .="Flash read pair merging: Magoc T, Salzberg SL. 2011. FLASH: fast length adjustment of short reads to improve genome assemblies. Bioinformatics 27: 2957-63\n";
-			} 
-
-			#print $mergCmd."\n";
-			if ( $exec == 0 ) {
-				#die $mergCmd."\n".$flashCustom."\n";
-				printL (frame("Merging ${OTU_prefix} seed paired reads"), 0);
-				if ( !systemL($mergCmd) == 0 ) {
-					printL( "Merge command failed: \n$mergCmd\n", 3 );
-				}
-			}
-			$didMerge = 1;
-		} elsif ( $onlyTaxRedo && $numInput == 2 ) {
-			printL "Skipping paired end merging step\n", 0;
-		}
-	} elsif ($numInput == 2) { #so this is from the sdm merge
-#		$single1  = $preMergeSeedsFiles[0]; $single2  = $preMergeSeedsFiles[1];
-		$single1  =""; $single2  = "";
-		$mergeFile = $preMergeSeedsFiles[0];
-		$mergeFile =~ s/\.1\.fq$/\.merg\.fq/;
-	}
-	
-	#needs to be run in any case for paired input, just to make sure all reads are correctly listed in $OTUSEED
-	#die "$single1, $single2, $input,$mergeSeedsFilesSing[0], $OTUSEED\n";
-	#TODO: add option to sdm to give out unmerged r1
-	
-	#die "$single1, $single2, $mergeFile\n";
-	forceMerge_fq2fna( $single1, $single2, $mergeFile , $mergeSeedsFilesSing[0], $OTUSEED );
+	my $mergeFile = $preMergeSeedsFiles[0];
+	$mergeFile =~ s/\.1\.fq$/\.merg\.fq/;
+	forceMerge_fq2fna( $mergeFile, $mergeSeedsFilesSing[0], $OTUSEED );
 }
 
 sub readTaxIn($ $ $ $ ) {
