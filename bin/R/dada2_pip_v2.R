@@ -431,7 +431,11 @@ if (length(args)>5){
 		mergedData=TRUE
 	}
 }
-
+if (!mergedData) {
+	cat("NOTE: dada2 running in forward-read-only mode (R1 only).\n")
+} else {
+	cat("NOTE: dada2 running in merged-read mode.\n")
+}
 
 #double check all relevant files
 for (i in names(tSuSe)){
