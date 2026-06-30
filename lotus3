@@ -1571,7 +1571,7 @@ sub chimera_ref_rem($) {
 	my $iniEntries = cntFastaEntrs($otusFA);
 	my $progUsed = ""; my $cmd="";
 	my $outfile = $otusFA.".tmp.fa";
-    if ( $noChimChk == 1 || $UCHIME_REFDB eq "" || !-f $UCHIME_REFDB ||
+    if ( $noChimChk == 1 || $noChimChk == 3 || $UCHIME_REFDB eq "" || !-f $UCHIME_REFDB ||
          ( ($ClusterPipe == 1 || $ClusterPipe == 7) && $forceRefChim == 0 ) ){
 		printL "No ref based chimera detection\n";
 		return $chimOut;
