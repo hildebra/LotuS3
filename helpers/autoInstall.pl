@@ -222,7 +222,7 @@ if ($condaDBinstall){
 
 if ($install_dada) {
 	print("Install dada2 and other R packages \n");
-	my $r_output = `Rscript bin/R/autoInstall.R 2>&1`;
+	my $r_output = `Rscript helpers/autoInstall.R 2>&1`;
 	print($r_output);
 	if ($r_output =~ m/(Package .* could not be installed. Please install it manually in your R environment.)/){
 		$finalWarning .= $1;
