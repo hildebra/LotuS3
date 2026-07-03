@@ -22,6 +22,63 @@ learnErrorsSafe <- function(files, nbases, ncores) {
 	return(err)
 }
 
+# Returns TRUE for fastq files that exist AND contain at least one read.
+# Empty (0-read) demultiplexed files - e.g. a barcode that matched no reads,
+# producing an empty <sample>.1.fq - otherwise reach dada2::learnErrors and
+# crash inside derepFastq -> qtables2 ("Execution halted"). They must be
+# dropped before error learning. Handles both plain and gzipped fastq.
+nonEmptyFastq <- function(fs) {
+	vapply(fs, function(f) {
+		if (!file.exists(f)) return(FALSE)
+		sz <- file.info(f)$size
+		if (is.na(sz) || sz == 0) return(FALSE)            # 0-byte (plain empty)
+		con <- tryCatch(
+			if (grepl("\\.gz$", f)) gzfile(f, "rt") else file(f, "rt"),
+			error = function(e) NULL)
+		if (is.null(con)) return(FALSE)
+		on.exit(close(con))
+		line <- tryCatch(readLines(con, n = 1L), error = function(e) character(0))
+		length(line) > 0L                                  # >=1 record (covers empty .gz)
+	}, logical(1), USE.NAMES = FALSE)
+}
+
+# When dada2/ShortRead aborts with an opaque "invalid character" error, scan the
+# offending file and report exactly where the bad bytes are. Valid FASTQ bytes
+# are printable ASCII (0x20-0x7E) plus tab; anything else (high-bit/control
+# bytes, e.g. corrupt sdm quality strings) is flagged with line, record field,
+# column and hex value. Only runs on failure, so clean runs are unaffected.
+reportFastqBadChars <- function(fl, maxReport = 10) {
+	if (!file.exists(fl)) { cat("    (file not found: ", fl, ")\n", sep=""); return(invisible(NULL)) }
+	con <- if (grepl("\\.gz$", fl)) gzfile(fl, "rb") else file(fl, "rb")
+	on.exit(close(con))
+	codes <- as.integer(readBin(con, "raw", n = file.info(fl)$size))
+	nl <- which(codes == 0x0A)
+	starts <- c(1L, head(nl, -1) + 1L)
+	ends   <- c(nl - 1L, length(codes))
+	reported <- 0L; badLineCount <- 0L
+	for (L in seq_along(starts)) {
+		if (ends[L] < starts[L]) next
+		seg <- codes[starts[L]:ends[L]]
+		valid <- (seg >= 0x20 & seg <= 0x7E) | seg == 0x09
+		if (all(valid)) next
+		badLineCount <- badLineCount + 1L
+		if (reported < maxReport) {
+			cols <- which(!valid)
+			kind <- c("header","sequence","plus","quality")[((L - 1L) %% 4L) + 1L]
+			cat(sprintf("    line %d (%s): %d bad byte(s) at col(s) %s [%s]\n",
+						L, kind, length(cols),
+						paste(head(cols, 8), collapse = ","),
+						paste(sprintf("0x%02X", seg[head(cols, 8)]), collapse = " ")))
+			reported <- reported + 1L
+		}
+	}
+	if (badLineCount == 0)
+		cat("    No invalid bytes found - problem may be structural (truncated/empty record).\n")
+	else if (badLineCount > reported)
+		cat(sprintf("    ... and %d more affected line(s)\n", badLineCount - reported))
+	invisible(badLineCount)
+}
+
 resolveFastq <- function(f) {
 	if (file.exists(f)) {
 		return(f)
@@ -374,7 +431,11 @@ if (length(args)>5){
 		mergedData=TRUE
 	}
 }
-
+if (!mergedData) {
+	cat("NOTE: dada2 running in forward-read-only mode (R1 only).\n")
+} else {
+	cat("NOTE: dada2 running in merged-read mode.\n")
+}
 
 #double check all relevant files
 for (i in names(tSuSe)){
@@ -406,6 +467,9 @@ for (i in sort(names(tSuSe))){
 	if (mergedData){
 		defMergeFile = listM[[i]][0]
 		filtMs <- file.path(listM[[i]]);	names(filtMs) <- sampleNames;filtMs = filtMs[file.exists(filtMs)]
+		keepM = nonEmptyFastq(filtMs)
+		if (any(!keepM)) cat(paste0("  Skipping ",sum(!keepM)," empty/0-read sample(s) for error learning: ",paste(names(filtMs)[!keepM],collapse=", "),"\n"))
+		filtMs = filtMs[keepM]
 		if (length(filtMs) == 0){
 			stop(paste0("Can't find derep for block ",i," expected\n",defMergeFile,"\n\nAborting dada2 run\n"))
 		}
@@ -424,6 +488,12 @@ for (i in sort(names(tSuSe))){
 	} 
 	if (!mergedData){
 		filtFs <- file.path(listF[[i]]);	names(filtFs) <- sampleNames;filtFs = filtFs[file.exists(filtFs)]
+		keepF = nonEmptyFastq(filtFs)
+		if (any(!keepF)) cat(paste0("  Skipping ",sum(!keepF)," empty/0-read sample(s) for error learning: ",paste(names(filtFs)[!keepF],collapse=", "),"\n"))
+		filtFs = filtFs[keepF]
+		if (length(filtFs) == 0){
+			stop(paste0("All forward files empty/0-read for block ",i,"\n\nAborting dada2 run\n"))
+		}
 		cat(paste0("Learning error profiles for the forward reads:\n"));
 		errF <- learnErrorsSafe(filtFs, bp4error, ncores)
 
@@ -475,7 +545,16 @@ if (length(args)>5){
 	for (i in sort(names(tSuSe))){
 		derepFile = paste0(derePref,".",i,".",derePost)
 		cat("Running dada on derep fastq ",cnt,"/",length(tSuSe),"(",derepFile,")\n")
-		tDerep[[i]] = derepFastqRead(derepFile)
+		tDerep[[i]] = tryCatch(
+			derepFastqRead(derepFile),
+			error = function(e) {
+				cat(sprintf("\nERROR reading derep file for block '%s':\n  %s\n  file: %s\n",
+							i, conditionMessage(e), derepFile))
+				cat("  Scanning input for invalid characters (FASTQ quality must be 0x21-0x7E):\n")
+				reportFastqBadChars(derepFile)
+				stop(sprintf("dada2 aborted on block '%s': invalid input in %s (see scan above). Bad bytes in the quality string usually indicate corrupt sdm output.", i, derepFile))
+			}
+		)
 		ldada[[i]]=NULL
 		if (!length(tDerep[[i]]$IDs) == 0){
 			if (mergedData){
