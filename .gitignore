@@ -2,8 +2,8 @@
 runs
 runs/*
 sqLOGs
-myTestRun
-myTestRun2
+.lotus3*
+LotuS3_selftest*
 myTestRun*
 DB
 test/

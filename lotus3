@@ -20,7 +20,15 @@
 
 use strict;
 use warnings;
-use Getopt::Long qw( GetOptions );
+use Getopt::Long qw( GetOptions Configure );
+Configure(qw(no_ignore_case no_auto_abbrev));
+use Cwd qw(abs_path);
+use File::Path qw(make_path remove_tree);
+use File::Spec;
+use File::Basename qw(dirname basename);
+use File::Copy qw(copy move);
+use Fcntl qw(:flock);
+use POSIX qw(strftime);
 
 
 #use threads;
@@ -30,6 +38,10 @@ use FindBin qw($RealBin);
 
 
 sub systemL; sub uniq; sub printL;sub frame;
+sub command_exists; sub detect_available_cpus; sub ensure_dir; sub safe_remove_tree; sub split_shell_commands; sub shell_quote;
+sub acquire_output_lock; sub release_output_lock; sub atomic_write_text; sub file_signature;
+sub dependency_report; sub validate_reference_databases; sub validate_option_combinations; sub write_repro_manifest;
+sub run_self_test; sub selftest_run_case; sub selftest_validate_output; sub selftest_count_fasta; sub selftest_count_table_rows;
 sub checkLtsVer; sub announce_options;sub announce_self;sub prepLtsOptions; sub usage;
 sub printWarnings; 
 sub readMap; 
@@ -260,10 +272,18 @@ my $UPARSEfilter = 0; #use additional quality filter from uparse (1) or use sdm 
 
 my $input = "";
 my $outdir = "";
+my $outdirCreatedMarker = "";
 my $inq         = "";
 my $barcodefile = "";
 my $mapFile;
 my $exec       = 0;    #my $highmem = 0;
+my $dryRun     = 0;    # log commands but do not execute external tools
+my $selfTest   = 0;    # run built-in example-based self tests and exit
+my $strictMode = 1;    # fail early on inconsistent inputs/dependencies
+my $depReportFile = "";
+my $manifestFile  = "";
+my $outputLockFH;
+my $outputLockFile = "";
 my $sdmDerepDo = 2;
 if ( !@ARGV ) {
     usage();
@@ -271,7 +291,7 @@ if ( !@ARGV ) {
 }
 
 GetOptions(
-	"help|?"                => \&help,
+	"h|help|?"              => \&help,
 	"i=s"                   => \$input,
 	"o=s"                   => \$outdir,
 	"barcode|MID=s"         => \$barcodefile,
@@ -286,6 +306,9 @@ GetOptions(
 	"T|tmp|tmpDir=s"        => \$lotus_tempDir,
 	"c|config=s"            => \$lotusCfg,
 	"exe|executionMode=i"   => \$exec,
+	"dry-run|dryRun!"       => \$dryRun,
+	"self-test|selfTest!"    => \$selfTest,
+	"strict!"               => \$strictMode,
 	"keepTmpFiles=i"        => \$keepTmpFiles,
 	"extendedLogs=i"        => \$extendedLogs,
 	"cl|CL|clustering|UP|UPARSE=s" => \$ClusterPipe_pre,
@@ -347,6 +370,8 @@ GetOptions(
 	"GAmaxAmpli=i"          => \$GAmaxAmpli,
 	"GAminAmpli=i"          => \$GAminAmpli,
 	"vsearch_iddef=i"       => \$vsearch_iddef,
+	"dependencyReport=s"    => \$depReportFile,
+	"manifest=s"            => \$manifestFile,
 
     # "flashAvgLength" => \$flashLength,
     #"flashAvgLengthSD" => \$flashSD,
@@ -372,12 +397,17 @@ if ($create_map ne ""){
 if ($installUsearch ne ""){
 	print "Will only install usearch into LotuS3 and exist afterwards.\nProvided path to usearch binary was $installUsearch\n";
 	die "Can't find file at $installUsearch\n" unless (-f $installUsearch);
-	system "perl $RealBin/helpers/autoInstall.pl -link_usearch $installUsearch";
+	system($^X, "$RealBin/helpers/autoInstall.pl", "-link_usearch", $installUsearch) == 0
+		or die "Failed to link usearch via autoInstall.pl (exit status: $?)\n";
 	exit(0);
 }
 #!!!!!!!!!!!!!!!!!!!!!!!!!!
 #end external routines..
 
+if ($selfTest) {
+    my $status = run_self_test();
+    exit($status);
+}
 
 if ($outdir eq "" || !defined($outdir)){
 	die "outdir (-o) undefined! Aborting LotuS3 run!\n";
@@ -387,11 +417,13 @@ if ($outdir eq "" || !defined($outdir)){
 
 #declare global vars
 my $xtra = ""; $xtra = ".TO" unless ($TaxOnly eq "0");
+$exec = 1 if ($dryRun);
 my $logDir       = $outdir . "/LotuSLogS/";
 my $extendedLogD = $outdir . "/ExtraFiles/";
 $mainLogFile = $logDir . "LotuS_run$xtra.log";
 my $cmdLogFile = $logDir . "LotuS_cmds$xtra.log";
 my $progOutPut = $logDir . "LotuS_progout$xtra.log";
+$outdirCreatedMarker = "$outdir/.lotus3_created_by_this_run";
 
 my $highLvlDir   = $outdir . "/higherLvl/";
 my $FunctOutDir = $outdir . "/derrivedFunctions/";
@@ -419,9 +451,16 @@ if ( $TaxOnly eq "0" ) {
 	%mapH = %{$mapHref};
 }
 
+if ($dryRun) {
+	write_repro_manifest();
+	printL(frame("Dry-run validation complete. Commands were not executed. Dependency report and manifest were written to $logDir"), 0);
+	release_output_lock();
+	close LOG; close cmdLOG;
+	exit(0);
+}
 
-systemL("rm -f -r $lotus_tempDir;") if ( $exec == 0 );
-systemL("mkdir -p $lotus_tempDir;") unless ( -d $lotus_tempDir );
+safe_remove_tree($lotus_tempDir, "temporary directory") if ( $exec == 0 );
+ensure_dir($lotus_tempDir) unless ( -d $lotus_tempDir );
 die( "Failed to make tmp dir or doesn't exist: \"" . $lotus_tempDir . "\"\n" ) if ( !-d $lotus_tempDir );
 
 
@@ -538,7 +577,7 @@ if ( $exec == 0 && $onlyTaxRedo == 0 && $TaxOnly eq "0" ) {
 	my $status = 0;
 	my $mrgSentence = ""; $mrgSentence = "and merging pairs of " if ($mergeOptions ne "");
     printL (frame("Extending ${mrgSentence}${OTU_prefix} Seeds"), 0);
-    $status = systemL($sdmcmd); #actual sdm derep step
+    $status = systemL($sdmcmd, "Seed extension", 0); #actual sdm derep step; recoverable fallback on failure
 	if ($status) {
 		printL "Failed $sdmcmd\n",                    0;
 		printL "Fallback to ${OTU_prefix} median sequences.\n", 0;
@@ -656,7 +695,7 @@ if ( !$doBlasting && substr( $ampliconType, 0, 3 ) eq "ITS" ) {
 if ($TaxOnly ne "0") {
     my $hier = assignTaxOnly( $OTUfa, $outdir );
 	if ($rmOutDir){
-		systemL("rm -rf $outdir;"); #online in extreme cases, keep well defined & controlled
+		safe_remove_tree($outdir, "output directory") if (-e $outdirCreatedMarker); # controlled cleanup of this run only
 		printL frame("Taxonomy for \n$TaxOnly\n has been assigned to \n$hier"),0;
 	} else {
 		printL frame("Taxonomy has been assigned to $input, output in \n$outdir\n"), 0;
@@ -727,14 +766,13 @@ my $treeF = "";
 $treeF = buildTree( $OTUfa, $outdir );
 
 #citations file
-open O, ">$logDir/citations.txt" or printL" Failed opening $logDir/citations.txt\n",0;
-print O $citations;
-close O;
+atomic_write_text("$logDir/citations.txt", $citations);
 
 my $phyloseqCreated=runPhyloObj($treeF);
+write_repro_manifest();
 
-systemL("rm -rf $lotus_tempDir;") if ($exec == 0 && !$keepTmpFiles);  #printL "Delete temp dir $lotus_tempDir\n", 0; }
-systemL("rm -rf $outdir;") if ($rmOutDir); #online in extreme cases, keep well defined & controlled
+safe_remove_tree($lotus_tempDir, "temporary directory") if ($exec == 0 && !$keepTmpFiles);  #printL "Delete temp dir $lotus_tempDir\n", 0; }
+safe_remove_tree($outdir, "output directory") if ($rmOutDir && -e $outdirCreatedMarker); # controlled cleanup of this run only
 #printL(    frame(    ),0);
 my $finiMsg = "LotuS3 finished. Output in:\n$outdir\n";
 #Next steps: you can use the rtk program in this pipeline, to generate rarefaction curves and diversity estimates of your samples.\n
@@ -746,6 +784,7 @@ my $nxtSteps = "$finiMsg          Next steps:          \n$phyloHlp$nwkOut- .biom
 printL(frame($nxtSteps));
 printWarnings();
 
+release_output_lock();
 close LOG; close cmdLOG;
 
 
@@ -905,14 +944,17 @@ sub sdmStep1{
 		if ( $paired == 1 ) {
 			$sdmIn = " -i_fna $inputArray[0] -i_qual $inqArray[0]";
 		} elsif ( $paired == 2 ) {
+			printL "Could not find second fasta/quality file in input, but paired sequencing reads were requested",25
+				unless (@inputArray >= 2 && @inqArray >= 2 && -f $inputArray[1] && -f $inqArray[1]);
 			$sdmIn = " -i_fna $inputArray[0],$inputArray[1] -i_qual $inqArray[0],$inqArray[1]";
 		}
 	} elsif (-f $inputArray[0]) {
 		if ( $paired == 1 ) {
 			$sdmIn = " -i_fastq $inputArray[0]";
 		} elsif ( $paired == 2 ) {
+			printL "Could not find second file in input, but required paired sequencing reads as input files",25
+				unless (@inputArray >= 2 && -f $inputArray[1]);
 			$sdmIn = " -i_fastq $inputArray[0],$inputArray[1]";
-			printL "Could not find second file in input, but required paired sequencing reads as input files",25 if (@inputArray < 2);
 		}
 	} else {
 		printL "Could not find input file on system, aborting. Please check the input is either a directory or file.",42;
@@ -2172,9 +2214,7 @@ sub biomFmt($ $ $ $ $) {
     }
 
     $biomo .= "]\n}";
-    open O, ">", $bioOut;
-    print O $biomo;
-    close O;
+    atomic_write_text($bioOut, $biomo);
     #printL frame("biom file created: $bioOut"), 0;
 
 #die;
@@ -2204,79 +2244,79 @@ sub readPaths_aligners($) {
 		next if ( $line =~ m/^#/ );
 		next if ( length($line) < 5 );    #skip empty lines
 		$line =~ s/\"//g;
-		if ( $line =~ m/^usearch\s(\S+)/ ) {
+		if ( $line =~ m/^usearch\s+(.+?)\s*$/ ) {
 			$usBin = truePath($1);
-		} elsif ( $line =~ m/^dada2R\s+(\S+)/ ) {
+		} elsif ( $line =~ m/^dada2R\s+(.+?)\s*$/ ) {
 			$dada2Scr = $1;
 			#fix for lotus 3.10, to ease transition..
 			if ( $dada2Scr =~ m/dada2_pip\.R/){$dada2Scr =~ s/dada2_pip\.R/dada2_pip_v2\.R/;}
 			$dada2Scr = truePath($dada2Scr);
-		} elsif ( $line =~ m/^phyloLnk\s+(\S+)/ ) {
+		} elsif ( $line =~ m/^phyloLnk\s+(.+?)\s*$/ ) {
 			$phyloLnk = truePath $1;
-		} elsif ( $line =~ m/^LULUR\s+(\S+)/ ) {
+		} elsif ( $line =~ m/^LULUR\s+(.+?)\s*$/ ) {
 			$LULUscript = truePath $1;
-		} elsif ( $line =~ m/^ASVcl\s+(\S+)/ ) {
+		} elsif ( $line =~ m/^ASVcl\s+(.+?)\s*$/ ) {
 			$ASVclscript = truePath $1;
-		} elsif ( $line =~ m/^vsearch\s+(\S+)/ ) {
+		} elsif ( $line =~ m/^vsearch\s+(.+?)\s*$/ ) {
 			$VSBin = truePath($1);
 			$VSBinOri = $VSBin;  #deactivate default vsearch again.. prob with chimera finder.
 		}
-		elsif ( $line =~ m/^LCA\s+(\S+)/ ) {
+		elsif ( $line =~ m/^LCA\s+(.+?)\s*$/ ) {
 			$LCABin = truePath($1);
 		}
-		elsif ( $line =~ m/^multiRDPjar\s+(\S+)/ ) {
+		elsif ( $line =~ m/^multiRDPjar\s+(.+?)\s*$/ ) {
 			$mjar = truePath($1);
 		}
-		elsif ( $line =~ m/^RDPjar\s+(\S+)/ ) {
+		elsif ( $line =~ m/^RDPjar\s+(.+?)\s*$/ ) {
 			$rdpjar = truePath($1);
 		}
-		elsif ( $line =~ m/^blastn\s+(\S+)/ ) {
+		elsif ( $line =~ m/^blastn\s+(.+?)\s*$/ ) {
 			$blastBin = truePath($1);
 		}
-		elsif ( $line =~ m/^makeBlastDB\s+(\S+)/ ) {
+		elsif ( $line =~ m/^makeBlastDB\s+(.+?)\s*$/ ) {
 			$mkBldbBin = truePath($1);
 		}
-		elsif ( $line =~ m/^mafft\s+(\S+)/ ) {
+		elsif ( $line =~ m/^mafft\s+(.+?)\s*$/ ) {
 			$mafftBin = truePath($1);
 		}
-		elsif ( $line =~ m/^clustalo\s+(\S+)/ ) {
+		elsif ( $line =~ m/^clustalo\s+(.+?)\s*$/ ) {
 			$clustaloBin = truePath($1);
 		}
-		elsif ( $line =~ m/^iqtree\s+(\S+)/ ) {
+		elsif ( $line =~ m/^iqtree\s+(.+?)\s*$/ ) {
 			$iqTreeBin = truePath($1);
 		}
-		elsif ( $line =~ m/^fasttree\s+(\S+)/ ) {
+		elsif ( $line =~ m/^fasttree\s+(.+?)\s*$/ ) {
 			$fasttreeBin = truePath($1);
 		}
-		elsif ( $line =~ m/^sdm\s+(\S+)/ ) {
+		elsif ( $line =~ m/^sdm\s+(.+?)\s*$/ ) {
 			$sdmBin = truePath($1);
 		}
-		elsif ( $line =~ m/^flashBin\s+(\S+)/ ) {
+		elsif ( $line =~ m/^flashBin\s+(.+?)\s*$/ ) {
 			$flashBin = truePath($1);
 		}
-		elsif ( $line =~ m/^swarm\s+(\S+)/ ) {
+		elsif ( $line =~ m/^swarm\s+(.+?)\s*$/ ) {
 			$swarmBin = truePath($1);
 		}
-		elsif ( $line =~ m/^cd-hit\s+(\S+)/ ) {
+		elsif ( $line =~ m/^cd-hit\s+(.+?)\s*$/ ) {
 			$cdhitBin = truePath($1);
 		}
-		elsif ( $line =~ m/^dnaclust\s+(\S+)/ ) {
+		elsif ( $line =~ m/^dnaclust\s+(.+?)\s*$/ ) {
 			$dnaclustBin = truePath($1);
 		}
-		elsif ( $line =~ m/^minimap2\s+(\S+)/ ) {
+		elsif ( $line =~ m/^minimap2\s+(.+?)\s*$/ ) {
 			$mini2Bin = truePath($1);
-		#}elsif ( $line =~ m/^lambda\s+(\S+)/ ) {
+		#}elsif ( $line =~ m/^lambda\s+(.+?)\s*$/ ) {
 		#	$lambdaBin = truePath($1);
-		}elsif ( $line =~ m/^lambda3\s+(\S+)/ ) {
+		}elsif ( $line =~ m/^lambda3\s+(.+?)\s*$/ ) {
 			$lambda3Bin = truePath($1);
 		
-		#}elsif ( $line =~ m/^lambda_index\s+(\S+)/ ) {
+		#}elsif ( $line =~ m/^lambda_index\s+(.+?)\s*$/ ) {
 		#	$lambdaIdxBin = truePath($1);
-		} elsif ( $line =~ m/^vxtractor\s+(\S+)/ ) {$vxtrBin = truePath($1);
-		} elsif ( $line =~ m/^vxtractorHMMs\s+(\S+)/ ) {$hmmsVX = $1;
-		} elsif ( $line =~ m/^itsx\s+(\S+)/ ) {$itsxBin = truePath($1);
-		} elsif ( $line =~ m/^hmmsearch\s+(\S+)/ ) { $hmmsrchBin = truePath($1);
-		} elsif ( $line =~ m/^CheckForUpdates\s+(\S+)/ ) {$checkForUpdates = $1;
+		} elsif ( $line =~ m/^vxtractor\s+(.+?)\s*$/ ) {$vxtrBin = truePath($1);
+		} elsif ( $line =~ m/^vxtractorHMMs\s+(.+?)\s*$/ ) {$hmmsVX = $1;
+		} elsif ( $line =~ m/^itsx\s+(.+?)\s*$/ ) {$itsxBin = truePath($1);
+		} elsif ( $line =~ m/^hmmsearch\s+(.+?)\s*$/ ) { $hmmsrchBin = truePath($1);
+		} elsif ( $line =~ m/^CheckForUpdates\s+(.+?)\s*$/ ) {$checkForUpdates = $1;
 		}
 	}
 
@@ -2286,7 +2326,7 @@ sub readPaths_aligners($) {
     }
     if ( -f $usBin && !-X $usBin ) {
         printL "It seems like your usearch binary is not executable, attempting to change this (needs sufficient user rights)\n",0;
-        printL "Failed \"chmod +x $usBin\"\n"  if ( systemL "chmod +x $usBin;" ), 33;
+        printL "Failed \"chmod +x $usBin\"\n", 33 if ( systemL("chmod +x " . shell_quote($usBin) . ";", "chmod usearch", 0) );
     }
 	if ($LCABin eq ""){
 		printL "Essential LCA program not found, please check that it is in the locations given in lOTUs.cfg\n",28;
@@ -2336,95 +2376,95 @@ sub readPaths {    #read tax databases and setup correct usage
 
         #databases
         #$UCHIME_REFits $TAX_RANK_ITS_UNITE $TAX_REFDB_ITS_UNITE
-        if ( $line =~ m/^UCHIME_REFDB\s+(\S+)/ ) {
+        if ( $line =~ m/^UCHIME_REFDB\s+(.+?)\s*$/ ) {
             $UCHIME_REFssu = $1;
         }
-        elsif ( $line =~ m/^UCHIME_REFDB_LSU\s+(\S+)/ ) {
+        elsif ( $line =~ m/^UCHIME_REFDB_LSU\s+(.+?)\s*$/ ) {
             $UCHIME_REFlsu = $1;
         }
-        elsif ( $line =~ m/^FAPROTAXDB\s+(\S+)/ ) {
+        elsif ( $line =~ m/^FAPROTAXDB\s+(.+?)\s*$/ ) {
             my $FaProTaxDBfile = $1;
 			$FaProTax = loadFaProTax($FaProTaxDBfile);
         }
-        elsif ( $line =~ m/^UCHIME_REFDB_ITS\s+(\S+)/ ) {
+        elsif ( $line =~ m/^UCHIME_REFDB_ITS\s+(.+?)\s*$/ ) {
             $UCHIME_REFits = $1;
         }
-        elsif ( $line =~ m/^UCHIME_REFDB_ITS1\s+(\S+)/ ) {
+        elsif ( $line =~ m/^UCHIME_REFDB_ITS1\s+(.+?)\s*$/ ) {
             $UCHIME_REFits1 = $1;
         }
-        elsif ( $line =~ m/^UCHIME_REFDB_ITS2\s+(\S+)/ ) {
+        elsif ( $line =~ m/^UCHIME_REFDB_ITS2\s+(.+?)\s*$/ ) {
             $UCHIME_REFits2 = $1;
         }
-        elsif ( $line =~ m/^TAX_REFDB_KSGP\s+(\S+)/ ) {
+        elsif ( $line =~ m/^TAX_REFDB_KSGP\s+(.+?)\s*$/ ) {
             $TAX_REFDB_SSU_KSGP = $1;
-        } elsif ( $line =~ m/^TAX_RANK_KSGP\s+(\S+)/ ) {
+        } elsif ( $line =~ m/^TAX_RANK_KSGP\s+(.+?)\s*$/ ) {
             $TAX_RANK_SSU_KSGP = $1;
 		}
-		elsif ( $line =~ m/^TAX_REFDB_GG2\s+(\S+)/ ) {
+		elsif ( $line =~ m/^TAX_REFDB_GG2\s+(.+?)\s*$/ ) {
             $TAX_REFDB_GG = $1;
-        } elsif ( $line =~ m/^TAX_RANK_GG2\s+(\S+)/ ) {
+        } elsif ( $line =~ m/^TAX_RANK_GG2\s+(.+?)\s*$/ ) {
             $GGinfile = $1;
         }
-        elsif ($line =~ m/^TAX_REFDB_SSU_SLV\s+(\S+)/
-            || $line =~ m/^TAX_REFDB_SLV\s+(\S+)/ )
+        elsif ($line =~ m/^TAX_REFDB_SSU_SLV\s+(.+?)\s*$/
+            || $line =~ m/^TAX_REFDB_SLV\s+(.+?)\s*$/ )
         {
             $TAX_REFDB_SLV = $1;
         }
-        elsif ($line =~ m/^TAX_RANK_SSU_SLV\s+(\S+)/
-            || $line =~ m/^TAX_RANK_SLV\s+(\S+)/ )
+        elsif ($line =~ m/^TAX_RANK_SSU_SLV\s+(.+?)\s*$/
+            || $line =~ m/^TAX_RANK_SLV\s+(.+?)\s*$/ )
         {
             $SLVinfile = $1;
         }
-        elsif ( $line =~ m/^TAX_REFDB_LSU_SLV\s+(\S+)/ ) {
+        elsif ( $line =~ m/^TAX_REFDB_LSU_SLV\s+(.+?)\s*$/ ) {
             $TAX_REFDB_SLV_LSU = $1;
         }
-        elsif ( $line =~ m/^TAX_RANK_LSU_SLV\s+(\S+)/ ) {
+        elsif ( $line =~ m/^TAX_RANK_LSU_SLV\s+(.+?)\s*$/ ) {
             $SLVinfile_LSU = $1;
         }
-        elsif ( $line =~ m/^TAX_REFDB_ITS_UNITE\s+(\S+)/ ) {
+        elsif ( $line =~ m/^TAX_REFDB_ITS_UNITE\s+(.+?)\s*$/ ) {
             $TAX_REFDB_ITS_UNITE = $1;
         }
-        elsif ( $line =~ m/^TAX_RANK_ITS_UNITE\s+(\S+)/ ) {
+        elsif ( $line =~ m/^TAX_RANK_ITS_UNITE\s+(.+?)\s*$/ ) {
             $TAX_RANK_ITS_UNITE = $1;
 
             #HITdb
         }
-        elsif ( $line =~ m/^TAX_RANK_HITdb\s+(\S+)/ ) {
+        elsif ( $line =~ m/^TAX_RANK_HITdb\s+(.+?)\s*$/ ) {
             $TAX_RANK_16S_HITdb = $1;
         }
-        elsif ( $line =~ m/^TAX_REFDB_HITdb\s+(\S+)/ ) {
+        elsif ( $line =~ m/^TAX_REFDB_HITdb\s+(.+?)\s*$/ ) {
             $TAX_REFDB_16S_HITdb = $1;
 
             #PR2
         }
-        elsif ( $line =~ m/^TAX_RANK_PR2\s+(\S+)/ ) {
+        elsif ( $line =~ m/^TAX_RANK_PR2\s+(.+?)\s*$/ ) {
             $TAX_RANK_16S_PR2 = $1;
         }
-        elsif ( $line =~ m/^TAX_REFDB_PR2\s+(\S+)/ ) {
+        elsif ( $line =~ m/^TAX_REFDB_PR2\s+(.+?)\s*$/ ) {
             $TAX_REFDB_16S_PR2 = $1;
 
             #bee tax
         }
-        elsif ( $line =~ m/^TAX_RANK_BEE\s+(\S+)/ ) {
+        elsif ( $line =~ m/^TAX_RANK_BEE\s+(.+?)\s*$/ ) {
             $TAX_RANK_16S_BT = $1;
         }
-        elsif ( $line =~ m/^TAX_REFDB_BEE\s+(\S+)/ ) {
+        elsif ( $line =~ m/^TAX_REFDB_BEE\s+(.+?)\s*$/ ) {
             $TAX_REFDB_BT = $1;
 
             #UTAX
         }
-        elsif ( $line =~ m/^TAX_REFDB_ITS_UTAX\s+(\S+)/ ) {
+        elsif ( $line =~ m/^TAX_REFDB_ITS_UTAX\s+(.+?)\s*$/ ) {
             $TAX_UTAX_ITS = $1;
         }
-        elsif ( $line =~ m/^TAX_REFDB_SSU_UTAX\s+(\S+)/ ) {
+        elsif ( $line =~ m/^TAX_REFDB_SSU_UTAX\s+(.+?)\s*$/ ) {
             $TAX_UTAX_16S = $1;
 
             #ref DB for PhiX conatminations
         }
-        elsif ( $line =~ m/^REFDB_PHIX\s+(\S+)/ ) {
+        elsif ( $line =~ m/^REFDB_PHIX\s+(.+?)\s*$/ ) {
             $CONT_REFDB_PHIX = $1;
         }
-        elsif ( $line =~ m/^IdentityThresholds\s+(\S+)/ && $idThreshs eq "-1") {
+        elsif ( $line =~ m/^IdentityThresholds\s+(.+?)\s*$/ && $idThreshs eq "-1") {
             my @spl = split( /,/, $1 );
             if ( scalar(@spl) == 6 ) {
                 push( @spl, 0 );
@@ -2572,8 +2612,8 @@ sub readPaths {    #read tax databases and setup correct usage
             }
 
             if ( $subrdbw =~ m/^BEETAX$/ ) {
-                if ( !-f $TAX_REFDB_GG || !-f $GGinfile ) {
-                    printL"Could not find greengenes DB files at \n$TAX_REFDB_GG\n$GGinfile\nPlease check that these files exist.\n",55;
+                if ( !-f $TAX_REFDB_BT || !-f $TAX_RANK_16S_BT ) {
+                    printL "Could not find BeeTax DB files at \n$TAX_REFDB_BT\n$TAX_RANK_16S_BT\nPlease check that these files exist.\n",55;
                 }
 
 #if (-f $TAX_REFDB_SLV && -f $SLVinfile){				#printL "Found both SILVA and greengenes databases. Using Greengenes for this run.\n",0;			}
@@ -2686,7 +2726,7 @@ sub announce_options{
 		systemL("mkdir -p $logDir;") unless ( -d $logDir );
 
 		if ($extendedLogs) {
-			systemL("mkdir -p $extendedLogD;") unless ( -d $extendedLogs );
+			ensure_dir($extendedLogD) unless ( -d $extendedLogD );
 		}
 
 	}
@@ -3005,9 +3045,10 @@ sub getDefAligner(){
 sub prepLtsOptions{
 	
 	#create dirs
+	my $resetOutdir = 0;
 	if ($TaxOnly eq "0" ){
-		system("rm -f -r $outdir") if ( $exec == 0 && $onlyTaxRedo == 0 );
-		system "rm -f $progOutPut\n"; #from here log systemL
+		$resetOutdir = ( $exec == 0 && $onlyTaxRedo == 0 ) ? 1 : 0;
+		unlink($progOutPut) if (-e $progOutPut); #from here log systemL
 		
 	} else {
 		unless (-d $outdir && -d $logDir){
@@ -3028,12 +3069,20 @@ sub prepLtsOptions{
 	
 	#reset logfile
 	#create output folders
-	system("mkdir -p $outdir/primary/;") unless ( -d "$outdir/primary" );
-	system("mkdir -p $outdir") unless ( -d $outdir );
-	system("mkdir -p $logDir") unless ( -d $logDir );
-	system("mkdir -p $extendedLogD;") if ( !-d $extendedLogs );	
+	ensure_dir($outdir) unless ( -d $outdir );
+	acquire_output_lock($outdir);
+	if ($resetOutdir) {
+		safe_remove_tree($outdir, "output directory");
+		ensure_dir($outdir);
+	}
+	if ($TaxOnly eq "0" && $exec == 0 && $onlyTaxRedo == 0) {
+		atomic_write_text($outdirCreatedMarker, "LotuS3 temporary ownership marker for this run\n");
+	}
+	ensure_dir("$outdir/primary/") unless ( -d "$outdir/primary" );
+	ensure_dir($logDir) unless ( -d $logDir );
+	ensure_dir($extendedLogD) if ($extendedLogs && !-d $extendedLogD);	
 	open LOG, ">", $mainLogFile or die "Can't open Logfile $mainLogFile\n";
-	open cmdLOG , ">$cmdLogFile" or die "Can't open cmd log $cmdLogFile\n";
+	open cmdLOG , ">", $cmdLogFile or die "Can't open cmd log $cmdLogFile\n";
 	
 	
 	#check and format input:
@@ -3050,17 +3099,12 @@ sub prepLtsOptions{
 	$clustMode = "reference closed" if ( $otuRefDB eq "ref_closed" );
 	$clustMode = "reference open"   if ( $otuRefDB eq "ref_open" );
 
-	#auto set num threads to max on system..
+	#auto set num threads to max currently available on this system/allocation.
 	if ($uthreads == -1){
-		my $tcres = `nproc`; chomp $tcres; $tcres+=0; $tcres=int($tcres);
-		if ($tcres > 0 && $tcres < 100){
-			$uthreads = $tcres ;
-		} else {
-			$uthreads = 1;
-		}
+		$uthreads = detect_available_cpus();
 	}
 	#check if pigz exists..
-	$gzipC = "pigz -p $uthreads " if (`sh -c 'command -v pigz'`);
+	$gzipC = "pigz -p $uthreads " if (command_exists("pigz"));
 	#die "$gzipC\n";
 
 	#tmp dir config
@@ -3214,6 +3258,9 @@ sub prepLtsOptions{
 	setMapperName();
 
 	readPaths($lotusCfg,$defDBset);
+	validate_reference_databases();
+	validate_option_combinations();
+	dependency_report();
 
 	#die "$refDBwanted\n";
 	if ( $doBlasting < 1 ) {
@@ -3292,7 +3339,14 @@ sub prepLtsOptions{
 
 sub help {
     my $opt_name = shift;
-    my $exit_code = $opt_name eq 'help' ? 0 : $opt_name;
+    my $exit_code = 1;
+    if (defined $opt_name) {
+        if ($opt_name eq 'help' || $opt_name eq 'h' || $opt_name eq '?') {
+            $exit_code = 0;
+        } elsif ($opt_name =~ /^\d+$/) {
+            $exit_code = $opt_name;
+        }
+    }
 	my $ver = 0;
 
 
@@ -3301,90 +3355,100 @@ sub help {
 #HELPPARSEBEGIN
 my $usage_string = "lotus3 -i <input fasta|fastq|dir> -o <output_dir> -m/-map <mapping_file>";
 my $usage_example = "./lotus3 -i Example/ -m Example/miSeqMap.sm.txt -o myTestRun -CL vsearch";
-my $basic_heading = "Basic Options";
-my %basic_options = (
-  '-i <file|dir>', 'In case that fastqFile or fnaFile and qualFile were specified in the mapping file, this has to be the directory with input files',
-  '-o <dir>', 'Warning: The output directory will be completely removed at the beginning of the LotuS3 run. Please ensure this is a new directory or contains only disposable data!',
-  '-m|-map <file>', 'Mapping file'
+
+my $basic_heading = "Required input/output options";
+my @basic_options = (
+  ['-i <file|dir>', 'Input FASTA/FASTQ file or directory. If fastqFile or fnaFile/qualFile are specified in the mapping file, this should be the directory containing those files.'],
+  ['-m|-map <file>', 'Mapping file describing samples and input files.'],
+  ['-o <dir>', 'Output directory. Prefer a new or empty directory. Existing directories are protected by a run lock and guarded cleanup; do not point this to a directory containing irreplaceable data.']
 );
 
-my $further_heading = "Further Options";
-my %further_options = (
-  '-q <file>', '.qual file associated to fasta file. This is an old format that was replaced by fastq format and is rarely used nowadays. (Default: "")', 
-  '-barcode|-MID <file>', 'Filepath to fastq formated file with barcodes (this is a processed mi/hiSeq format). The complementary option in a mapping file would be the column "MIDfqFile". (Default: "")',
-  '-s|sdmopt <file>', 'SDM option file, defaults to "configs/sdm_miSeq.txt" in current dir. (Default: miSeq)',
-  '-c <file>', 'LotuS.cfg, config file with program paths. (Default: <LotuS3_dir>/lOTUs.cfg)',
-  '-p <454/miSeq/hiSeq/PacBio>', 'sequencing platform: PacBio, PacBio_GA, 454, AVITI, miSeq or hiSeq. (Default: miSeq)',
-  '-t|-threads <num>', 'number of threads to be used. (Default: 1)',
-  '-tmp|-tmpDir <dir>', 'temporary directory used to save intermediate results. (Default: <outputDir>/tmpDir)'
+my $further_heading = "Input, platform, and execution options";
+my @further_options = (
+  ['-q <file>', 'QUAL file associated with FASTA input. This legacy format has mostly been replaced by FASTQ. Default: none.'],
+  ['-barcode|-MID <file>', 'FASTQ-formatted barcode/MID file. The equivalent mapping-file column is MIDfqFile. Default: none.'],
+  ['-s|-sdmopt <file>', 'SDM option file. Defaults to configs/sdm_miSeq.txt or a platform-specific preset.'],
+  ['-c|-config <file>', 'LotuS configuration file with program paths. Default: <LotuS3_dir>/lOTUs.cfg.'],
+  ['-p|-platform <454|miSeq|hiSeq|PacBio|PacBio_GA|AVITI>', 'Sequencing platform preset. Default: miSeq.'],
+  ['-t|-threads <num>', 'Number of threads to use. Default: 1, or auto-detected where supported.'],
+  ['-tmp|-tmpDir <dir>', 'Temporary directory for intermediate files. Default: <outputDir>/tmpDir.'],
+  ['-verbosity <0-3>', 'Logging verbosity: 0 minimal, 1 standard, 2 verbose, 3 include detailed command output. Default: 1.']
 );
 
-my $workflow_heading = "Workflow Options";
-my %workflow_options = (
-  '-forwardPrimer <string>','give the forward primer used to amplify DNA region (e.g. 16S primer fwd)',
-  '-reversePrimer <string>','give the reverse primer used to amplify DNA region (e.g. 16S primer rev)',
-  '-verbosity <0-3>', 'Level of verbosity from printing all program calls and program output (3) to not even printing errors (0). (Default: 1)',
-  '-backmap_id <0-1>', '%id cutoff for backmapping mid-qual reads onto OTUs/zOTUs/ASVs (Default: 0.97 or 0.99 for ASVs/zOTUs)',
-  '-saveDemultiplex <0|1|2|3>', '(1) Saves all demultiplexed reads (unfiltered) in the [outputdir]/demultiplexed folder, for easier data upload. (2) Only saves quality filtered demultiplexed reads and continues LotuS3 run subsequently. (3) Saves demultiplexed, filtered reads into a single fq, with sample ID in fastq/a header. (0) No demultiplexed reads are saved. (Default: 0)',
-  '-taxOnly <file>', 'Skip most of the lotus pipeline and only run a taxonomic classification on a fasta file. E.g. lotus3 -taxOnly <some16S.fna> -refDB SLV',
-  '-redoTaxOnly <0|1>', '(1) Only redo the taxonomic assignments (useful for replacing a DB used on a finished lotus run). (0) Normal lotus run. (Default: 0)',
-  '-offtargetDB <file>', 'Remove likely contaminant OTUs/ASVs based on alignment to provided fasta. This option is useful for low-bacterial biomass samples, to remove possible host genome contaminations (e.g. human/mouse genome)',
-  '-keepOfftargets <0|1>', '(0)?!?: keep offtarget hits against offtargetDB in output fasta and otu matrix. (Default 0)',
-  '-keepTmpFiles <0|1>', '(1) save extra tmp files like chimeric OTUs or the raw blast output in extra dir. (0) do not save these. (Default: 0)',
-  '-keepUnclassified <0|1>', '(1) Includes unclassified OTUs (no Phylum assignment) in OTU and taxa abundance matrix calculations. (0) does not report these potential contaminants. (Default: 1)',
-  '-intargetDB <file>', 'Keep all OTUs with good matches to this DB (.fa format). This option is useful if you have a set of known true positive 16S sequences, that might not be represented in your tax DB and would otherwise be removed through \"-keepUnclassified 1\".',
-  '-tolerateCorruptFq <0|1>', '(1) Continue reading fastq files, even if single entries are incomplete (e.g. half of qual values missing). (0) Abort lotus run, if fastq file is corrupt. (Default: 0)',
-  '-useVsearch <0|1>', '(0) Use usearch for internal tasks such as remapping reads on OTUs, chimera checks. (1) will use vsearch for these tasks. This option is independent of the -CL UPARSE/UNOISE option, and -taxAligner assignment usearch/vsearch options. (Default: 0)',
-  '-mergePreClusterReads <0|1>', '(0) no merging or reads pre OTU/ASV/zOTU seq clustering, BUT read merging after seq clustering (to get better representative sequence). (1) Merge reads prior to seq clustering. WARNING!! This will considerably reduce the number of valid read pairs, as additional quality filters will be applied, algorithm is still in development !! (Default: 0)'
+my $runtime_heading = "Runtime safety, validation, and reporting options";
+my @runtime_options = (
+  ['--dry-run|--dryRun', 'Validation-only mode. Checks options, dependencies, and selected reference databases, writes reports/manifests, then exits before running the biological pipeline.'],
+  ['--self-test|--selfTest', 'Run the built-in LotuS3 self tests based on Example/miSeqMap.sm.txt. Performs preflight checks, dry-run dependency/database validation, executes the standard and DADA2/Lambda example runs using the maximum CPU count currently available to the process/allocation, validates key outputs, writes a self-test report, and exits. Optional -o <dir> sets the self-test root directory.'],
+  ['--strict|--no-strict', 'Strict mode makes validation failures fatal. --no-strict reports validation problems as warnings where possible. Default: --strict.'],
+  ['--dependencyReport <file>', 'Write the dependency report to this file instead of <outputDir>/LotuSLogS/dependency_report.txt.'],
+  ['--manifest <file>', 'Write the reproducibility manifest to this file instead of <outputDir>/LotuSLogS/run_manifest.txt.'],
+  ['-exe|-executionMode <0|1>', 'Internal/developer execution control. For user-facing validation without execution, prefer --dry-run. Default: 0.'],
+  ['-keepTmpFiles <0|1>', '(1) keep additional intermediate files such as chimera candidates or raw alignment output. (0) remove routine temporary files. Default: 0.'],
+  ['-extendedLogs <0|1>', '(1) write additional logs and intermediate diagnostic files where available. Default: 0.']
 );
 
-my $taxonomy_heading = "Taxonomy Options";
-my %taxonomy_options = (
-  '-taxAligner <0|blast|lambda|utax|sintax|vsearch|usearch>', '(0) alginment deactivated, use RDPclassifier (this does not report species level taxonomies); (1) or (blast) use Blast; (2) or (lambda) use LAMBDA to search against a 16S reference database for taxonomic profiling of OTUs; (3) or (utax) or (sintax): use UTAX/SINTAX with custom databases; will use SINTAX if uparse ver >= 9 is found (4) or (vsearch) use VSEARCH to align OTUs to custom databases; (5) or (usearch) use USEARCH to align OTUs to custom databases. (Default: 0)',
-  '-refDB <KSGP|SLV|GG2|HITdb|PR2|UNITE|beetax>', '(SLV) Silva LSU (23/28S) or SSU (16/18S), (KSGP) Bacteria, Archaea, Eukaryotes SSU, (GG2) GreenGenes2 SSU, (HITdb) human gut specific SSU, (PR2) LSU spezialized on Ocean environmentas, (UNITE) ITS fungi specific, (beetax) bee gut specific SSU. Given that \"-amplicon_type \" was set to SSU or LSU, the appropriate DB in SLV would be used. \nDecide which reference DB will be used for a similarity based taxonomy annotation. Databases can be combined, with the first having the highest priority. E.g. "HITdb,SLV" would priority assign OTUs to PR2 taxonomy, but hits with a higher %id to SLV would be assigned to SLV. Can also be a custom fasta formatted database: in this case provide the path to the fasta file as well as the path to the taxonomy for the sequences using -tax4refDB. For custom databases QIIME2 file formats are compatible if the delimiter in the QIIME2 taxonomy file is changed from semicolon to tab. See also online help on how to create a custom DB. WARNING: combining databases with incompatible tax levels (e.g. PR2,SLV) will result in non sensical tax levels. (Default: none)',
-  '-tax4refDB <file>', 'In conjunction with a custom fasta file provided to argument -refDB, this file contains for each fasta entry in the reference DB a taxonomic annotation string, with the same number of taxonomic levels for each, tab separated.',
-  '-amplicon_type <SSU|LSU|ITS|ITS1|ITS2|custom>', '(SSU) small subunit (16S/18S), (LSU) large subunit (23S/28S) or internal transcribed spacer (ITS|ITS1|ITS2), (custom) for custom marker genes. These options will change default read qual filter parameters and activate ITS specific postfiltering steps. (Default: SSU)',
-  '-tax_group <bacteria|fungi|eukarya>', '(bacteria) bacterial 16S rDNA annnotation, (fungi) fungal 18S/23S/ITS annotation, (eukarya) eukaryotic (18S/23S) annotation. (Default: bacteria)',
-  '-recalcTaxDB <0,1>'  , "(1) recalc tax DB anew, even if exists (Default: 0)",
-  '-rdp_thr <0-1>', 'Confidence thresshold for RDP. (Default: 0.8)',
-  '-sintax_thr <0-1>', 'Confidence thresshold for SINTAX. (Default: 0.8)',
-  '-useBestBlastHitOnly <0|1>', '(1) do not use LCA (lowest common ancestor) to determine most likely taxonomic level (not recommended), instead just use the best blast hit. (0) LCA algorithm. (Default: 0)',
-  '-LCA_cover <0-1>', 'Min horizontal coverage of an OTU sequence against ref DB. (Default: 0.5)',
-  '-LCA_frac <0-1>', 'Min fraction of database hits at taxlevel, with identical taxonomy. (Default: 0.8)',
-  '-LCA_idthresh <97,95,93,91,88,78>','6 numbers, comma separated, that are min %id of OTU/ASV fasta to ref database, to assign taxonomy to OTU/ASV at this taxonomic level',
-  '-taxExcludeGrep <string>', 'Exclude taxonomic group, these OTUs will be assigned as unknown instead. E.g. -taxExcludeGrep Chloroplast|Mitochondria (Default: )',
-  '-greengenesSpecies <0|1>', '(1) Create greengenes output labels instead of OTU (to be used with greengenes specific programs such as BugBase). (Default: 0)',
-  '-ITSx <0|1>', '(1) use ITSx to only retain OTUs fitting to ITS1/ITS2 hmm models; (0) deactivate. (Default: 1)',
-  '-itsx_partial <0-100>', 'Parameters for ITSx to extract partial (%) ITS regions as well. (0) deactivate. (Default: 0)',
-  '-lulu <0|1>', '(1) use LULU (https://github.com/tobiasgf/lulu) to merge OTUs based on their occurrence. (Default: 1)',
-  '-buildPhylo <0,1,2,>','(0) do not build OTU phylogeny; (1) use fasttree2; (2) use IQ-TREE 2. (Default: 1). We recommend the cautious usage of the phylogenetic tree for ITS because high variation of ITS sequences may lead to erroneous trees. Phylogenetic trees can be of use for 16S data depending on the aim of the analysis.',
+my $workflow_heading = "Workflow options";
+my @workflow_options = (
+  ['-forwardPrimer <string>', 'Forward primer sequence used to amplify the target region.'],
+  ['-reversePrimer <string>', 'Reverse primer sequence used to amplify the target region.'],
+  ['-backmap_id <0-1>', 'Identity cutoff for backmapping reads onto OTUs/zOTUs/ASVs. Default: 0.97, or 0.99 for ASVs/zOTUs.'],
+  ['-saveDemultiplex <0|1|2|3>', '(1) save all unfiltered demultiplexed reads; (2) save quality-filtered demultiplexed reads and continue the run; (3) save demultiplexed, filtered reads into one FASTQ/FASTA with sample IDs in headers; (0) do not save demultiplexed reads. Default: 0.'],
+  ['-taxOnly <file>', 'Skip most of the pipeline and only run taxonomic classification on a FASTA file. Example: lotus3 -taxOnly reads.fna -refDB SLV.'],
+  ['-redoTaxOnly <0|1>', '(1) redo only taxonomic assignments for an existing LotuS run, useful for replacing a database. (0) normal LotuS run. Default: 0.'],
+  ['-offtargetDB <file>', 'Remove likely contaminant OTUs/ASVs based on alignment to a provided FASTA database, for example host genome contamination in low-biomass samples.'],
+  ['-keepOfftargets <0|1>', '(1) keep off-target hits in the output FASTA and count matrix. (0) remove off-target hits. Default: 0.'],
+  ['-keepUnclassified <0|1>', '(1) include unclassified OTUs in OTU and taxon abundance matrices. (0) suppress OTUs without phylum-level assignment. Default: 1.'],
+  ['-intargetDB <file>', 'Keep OTUs with good matches to this FASTA database, useful for known true-positive marker sequences not represented in the taxonomy DB.'],
+  ['-tolerateCorruptFq <0|1>', '(1) continue reading FASTQ files even if single records are incomplete. (0) abort on corrupt FASTQ input. Default: 0.'],
+  ['-useVsearch <0|1>', '(1) use VSEARCH for internal tasks such as remapping and chimera checks. (0) use USEARCH where configured. This is independent of -CL and -taxAligner. Default: 0.'],
+  ['-mergePreClusterReads <0|1>', '(1) merge paired reads before OTU/ASV/zOTU clustering. (0) cluster first and merge reads later to improve representative sequences. Pre-clustering merge is experimental and may reduce valid read pairs. Default: 0.']
 );
 
-my $clustering_heading = "Clustering Options";
-my %clustering_options = (
-  '-CL|-clustering <uparse|swarm|cdhit|unoise|dada2|vsearch>', 'Sequence clustering algorithm: (1) UPARSE, (2) swarm, (3) cd-hit, (6) unoise3, (7) dada2, (8) VSEARCH. Short keyword or number can be used to indicate clustering (Default: UPARSE)',
-  '-id <0-1>', 'Clustering threshold for OTUs. (Default: 0.97)',
-  '-vsearch_iddef  <0-4>', 'VSEARCH iddef parameter for clustering and chimera checking. 0: CD-HIT definition: (matching columns) / (shortest sequence length). 1: edit distance: (matching columns) / (alignment length). 2: edit distance excluding terminal gaps (same as --id). 3: Marine Biological Lab definition counting each gap opening . 4:BLAST definition, equivalent to --iddef 1 in a context of global pairwise alignment.',
-  '-swarm_distance <1,2,3,..> ', 'Clustering distance for OTUs when using swarm clustering. (Default: 1)',
-  '-chim_skew <num>', 'Skew in chimeric fragment abundance (uchime option). (Default: 2)',
-  '-count_chimeras<T/F>', 'Add chimeras to count up OTUs/ASVs. (Default: F)',
-  '-deactivateChimeraCheck <0|1|2|3>', '(0) do OTU chimera checks. (1) no chimera check at all. (2) Deactivate deNovo chimera check. (3) Deactivate ref based chimera check. (Default: 0)',
-  '-derepMin<num>','Minimum size of dereplicated clustered, one form of noise removal. Can also have a more complex syntax, see examples. (Default: 8:1,4:2,3:3)',
-  '-readOverlap <num>', 'The maximum number of basepairs that two reads are overlapping. (Default: 300)',
-  '-endRem <string>', 'DNA sequence, usually reverse primer or reverse adaptor; all sequence beyond this point will be removed from OTUs. This is redundant with the "ReversePrimer" option from the mapping file, but gives more control (e.g. there is a problem with adaptors in the OTU output). (Default: "")',
-  '-xtalk <0|1>', '(1) check for crosstalk. Note that this requires in most cases 64bit usearch. (Default: 0)'
+my $taxonomy_heading = "Taxonomy options";
+my @taxonomy_options = (
+  ['-taxAligner <0|blast|lambda|utax|sintax|vsearch|usearch>', '(0) deactivate similarity alignment and use RDP classifier where available; blast/lambda/vsearch/usearch use similarity searches against reference databases; utax/sintax use UTAX/SINTAX-style classifiers. Default: 0.'],
+  ['-refDB <KSGP|SLV|GG2|HITdb|PR2|UNITE|beetax|file>', 'Reference DB for similarity-based taxonomic annotation. Built-in choices include SLV, KSGP, GG2, HITdb, PR2, UNITE and beetax. Multiple DBs can be comma-separated, with earlier entries taking priority. A custom FASTA can be supplied with -tax4refDB. Avoid combining databases with incompatible taxonomic levels. Default: none.'],
+  ['-tax4refDB <file>', 'Taxonomy file for a custom FASTA reference database supplied via -refDB. The file should contain one taxonomy annotation per reference sequence, tab-separated from the sequence ID.'],
+  ['-amplicon_type <SSU|LSU|ITS|ITS1|ITS2|custom>', 'Marker type: SSU (16S/18S), LSU (23S/28S), ITS/ITS1/ITS2, or custom. This changes default quality filtering and activates marker-specific post-filtering. Default: SSU.'],
+  ['-tax_group <bacteria|fungi|eukarya>', 'Target taxonomic group for annotation. Default: bacteria.'],
+  ['-recalcTaxDB <0|1>', '(1) rebuild derived taxonomy database/index files even if they already exist. Default: 0.'],
+  ['-rdp_thr <0-1>', 'Confidence threshold for RDP classifier assignments. Default: 0.8.'],
+  ['-sintax_thr <0-1>', 'Confidence threshold for SINTAX/UTAX assignments. Default: 0.8.'],
+  ['-useBestBlastHitOnly <0|1>', '(1) assign taxonomy from the best similarity hit only. (0) use LCA-based assignment. Best-hit-only mode is not recommended for general use. Default: 0.'],
+  ['-LCA_cover <0-1>', 'Minimum horizontal coverage of an OTU/ASV sequence against the reference DB. Default: 0.5.'],
+  ['-LCA_frac <0-1>', 'Minimum fraction of database hits supporting the same taxonomy at a taxonomic level. Default: 0.8.'],
+  ['-LCA_idthresh <list>', 'Comma-separated identity thresholds for taxonomic levels, e.g. 97,95,93,91,88,78.'],
+  ['-taxExcludeGrep <string>', 'Taxonomic pattern to exclude; matching OTUs are assigned as unknown. Example: -taxExcludeGrep Chloroplast|Mitochondria.'],
+  ['-greengenesSpecies <0|1>', '(1) create GreenGenes-style output labels instead of OTU labels, for compatibility with tools such as BugBase. Default: 0.'],
+  ['-ITSx <0|1>', '(1) use ITSx to retain OTUs matching ITS1/ITS2 HMM models. (0) deactivate. Default: 1 for ITS modes.'],
+  ['-itsx_partial <0-100>', 'Allow partial ITS extraction up to the given percentage. (0) deactivate. Default: 0.'],
+  ['-lulu <0|1>', '(1) use LULU to merge likely erroneous OTUs based on occurrence patterns. Default: 1.'],
+  ['-buildPhylo <0|1|2>', '(0) do not build an OTU phylogeny; (1) use FastTree2; (2) use IQ-TREE 2. Default: 1. Use ITS phylogenies cautiously because high ITS variation can produce unreliable trees.']
 );
 
+my $clustering_heading = "Clustering and chimera options";
+my @clustering_options = (
+  ['-CL|-clustering <uparse|swarm|cdhit|unoise|dada2|vsearch>', 'Sequence clustering/denoising method: UPARSE, swarm, cd-hit, unoise3, dada2, or VSEARCH. Numeric shortcuts are also accepted. Default: UPARSE.'],
+  ['-id <0-1>', 'Clustering identity threshold for OTUs. Default: 0.97.'],
+  ['-vsearch_iddef <0-4>', 'VSEARCH identity definition for clustering/chimera checking: 0 CD-HIT; 1 edit distance over alignment length; 2 edit distance excluding terminal gaps; 3 MBL definition; 4 BLAST-like definition.'],
+  ['-swarm_distance <num>', 'Swarm clustering distance. Default: 1.'],
+  ['-chim_skew <num>', 'Abundance skew parameter for UCHIME. Default: 2.'],
+  ['-count_chimeras <T|F>', 'Include chimeras in OTU/ASV counts. Default: F.'],
+  ['-deactivateChimeraCheck <0|1|2|3>', '(0) run all chimera checks; (1) deactivate all chimera checks; (2) deactivate de novo chimera checks; (3) deactivate reference-based chimera checks. Default: 0.'],
+  ['-derepMin <rule>', 'Minimum abundance rule for dereplicated clusters before clustering/noise removal. Rules can be compound, e.g. 8:1,4:2,3:3.'],
+  ['-readOverlap <num>', 'Maximum expected overlap between paired reads. Default: 300.'],
+  ['-endRem <string>', 'Sequence, usually reverse primer/adaptor, after which OTU sequence output is trimmed. This duplicates the ReversePrimer mapping-file option but gives manual control. Default: none.'],
+  ['-xtalk <0|1>', '(1) check for index cross-talk. This requires USEARCH v11. Default: 0.']
+);
 
-
-
-my $other_heading = "Other uses of pipeline (quits after execution)";
-my %other_options = (
-  '-v', 'Print LotuS3 version',
-  '-link_usearch <file>', 'Provide the absolute path to your local usearch binary file, this will be installed to be useable with LotuS3 in the future.',
-  '-check_map <file>', 'Mapping_file: only checks mapping file and exists.',
-  '-create_map <file>', 'mapping_file: creates a new mapping file at location, based on already demultiplexed input (-i) dir. E.g. lotus3 -create_map mymap.txt -i /home/dir_with_demultiplex_fastq',
-  '-taxOnly <file>', 'Skip most of the lotus pipeline and only run a taxonomic classification on a fasta file. E.g. lotus3 -taxOnly <some16S.fna> -refDB SLV',
+my $other_heading = "Utility commands that exit after execution";
+my @other_options = (
+  ['-h|--help', 'Print this help message and exit.'],
+  ['-v|--version', 'Print LotuS3 version and exit.'],
+  ['-link_usearch <file>', 'Register a local USEARCH binary for future LotuS3 runs. Use an absolute path where possible.'],
+  ['-check_map <file>', 'Validate a mapping file and exit.'],
+  ['-create_map <file>', 'Create a mapping file at the given location from already-demultiplexed input files in -i. Example: lotus3 -create_map mymap.txt -i /path/to/fastq_dir.'],
+  ['-taxOnly <file>', 'Run only taxonomy classification on a FASTA file and exit after writing taxonomy outputs.']
 );
 #HELPPARSEEND
 
@@ -3451,38 +3515,45 @@ print "#### OPTIONS ####\n\n";
 
 print "$basic_heading:\n\n";
 my $key = "";
-foreach $key (sort(keys %basic_options))
+foreach my $row (@basic_options)
 {
-  print_option_pair($key, $basic_options{$key}, $option_indent, $option_width, $description_width);
+  print_option_pair($row->[0], $row->[1], $option_indent, $option_width, $description_width);
 }
 
 
 print "\n\n$workflow_heading:\n\n";
-foreach $key (sort(keys %workflow_options))
+foreach my $row (@workflow_options)
 {
-  print_option_pair($key, $workflow_options{$key}, $option_indent, $option_width, $description_width);
+  print_option_pair($row->[0], $row->[1], $option_indent, $option_width, $description_width);
 }
 print "\n\n$clustering_heading:\n\n";
-foreach $key (sort(keys %clustering_options))
+foreach my $row (@clustering_options)
 {
-  print_option_pair($key, $clustering_options{$key}, $option_indent, $option_width, $description_width);
+  print_option_pair($row->[0], $row->[1], $option_indent, $option_width, $description_width);
 }
 
 print "\n\n$taxonomy_heading:\n\n";
-foreach $key (sort(keys %taxonomy_options))
+foreach my $row (@taxonomy_options)
 {
-  print_option_pair($key, $taxonomy_options{$key}, $option_indent, $option_width, $description_width);
+  print_option_pair($row->[0], $row->[1], $option_indent, $option_width, $description_width);
 }
 
 print "\n\n$further_heading:\n\n";
-foreach $key (sort(keys %further_options))
+foreach my $row (@further_options)
 {
-  print_option_pair($key, $further_options{$key}, $option_indent, $option_width, $description_width);
+  print_option_pair($row->[0], $row->[1], $option_indent, $option_width, $description_width);
 }
-print "\n\n$other_heading:\n\n";
-foreach $key (sort(keys %other_options))
+
+print "\n\n$runtime_heading:\n\n";
+foreach my $row (@runtime_options)
 {
-  print_option_pair($key, $other_options{$key}, $option_indent, $option_width, $description_width);
+  print_option_pair($row->[0], $row->[1], $option_indent, $option_width, $description_width);
+}
+
+print "\n\n$other_heading:\n\n";
+foreach my $row (@other_options)
+{
+  print_option_pair($row->[0], $row->[1], $option_indent, $option_width, $description_width);
 }
 
 
@@ -5022,7 +5093,7 @@ sub readMap() {
 			$biomWarns++;
         }
 		if ($biomWarns == 4) {printL("(skipping further biom warnings..)\n\n");$biomWarns+=5;}
-        $line =~ s/\s+/\t/g;
+        # Do not rewrite arbitrary whitespace in metadata fields here; warn above but preserve user data.
 		if ( $smplNms =~ m/^\s/ || $smplNms =~ m/\s$/ ) {
 			printL"SampleID $smplNms contains spaces, this is not supported. Aborting LotuS as this will lead to errors, please fix.\n",5;
 		}
@@ -5039,6 +5110,9 @@ sub readMap() {
         for ( my $i = 0 ; $i < @spl ; $i++ ) {
             $spl[$i] =~ s/\"//g;
         }
+        if ($cnt > 1 && exists $mapH{$smplNms}) {
+            printL "Duplicate SampleID '$smplNms' in mapping file at line $cnt. Aborting to avoid silent overwrite.\n", 66;
+        }
         $mapH{$smplNms} = [@spl];
 
     }
@@ -5053,8 +5127,12 @@ sub readMap() {
 	writeMap($hr2,$cpMapFile);
 	printL( frame($Ltxt.$retStr), 0 );
 	if ( $warnTrig == 1 ) {
-		print "*********\nWarnings for mapping file \n$mapFile \nAbort by pressing Ctrl+c (10 sec wait)\n*********\n";
-		sleep(10);
+		if (-t STDIN) {
+			print "*********\nWarnings for mapping file \n$mapFile \nAbort by pressing Ctrl+c (10 sec wait)\n*********\n";
+			sleep(10);
+		} else {
+			print "*********\nWarnings for mapping file \n$mapFile \n(non-interactive run: not pausing)\n*********\n";
+		}
 	}
 
     return ( $hr, \%combH, $hasCombiSmpl ); #\%mapH
@@ -5726,6 +5804,427 @@ sub print_nseq($) {
     return ($nseqs);
 }
 
+
+
+sub run_self_test {
+    my $script = abs_path($0) // $0;
+    my $example_dir = File::Spec->catdir($RealBin, "Example");
+    my $map = File::Spec->catfile($RealBin, "Example", "miSeqMap.sm.txt");
+    my $sdm_miseq2 = File::Spec->catfile($RealBin, "configs", "sdm_miSeq2.txt");
+    my $cfg = $lotusCfg;
+    $cfg = File::Spec->catfile($RealBin, "lOTUs.cfg") if !defined($cfg) || $cfg eq "";
+
+    my $stamp = strftime("%Y%m%d_%H%M%S", localtime);
+    my $root = (defined($outdir) && $outdir ne "") ? $outdir : File::Spec->catdir(".", "LotuS3_selftest_$stamp");
+    ensure_dir($root) unless -d $root;
+    my $report = File::Spec->catfile($root, "self_test_report.txt");
+    my @report;
+
+    push @report, "LotuS3 self-test report";
+    push @report, "Date: " . strftime("%Y-%m-%d %H:%M:%S %z", localtime);
+    push @report, "Version: $selfID";
+    push @report, "Script: $script";
+    push @report, "Self-test root: $root";
+    push @report, "";
+    push @report, "Preflight files:";
+
+    my @preflight = (
+        ["Example directory", $example_dir, "dir"],
+        ["Example map", $map, "file"],
+        ["SDM miSeq2 options", $sdm_miseq2, "file"],
+        ["LotuS config", $cfg, "file"],
+    );
+    my @preflight_errors;
+    for my $chk (@preflight) {
+        my ($label, $path, $type) = @$chk;
+        my $ok = $type eq "dir" ? -d $path : -s $path;
+        push @report, sprintf("  %-22s %-7s %s", $label, ($ok ? "OK" : "MISSING"), $path);
+        push @preflight_errors, "$label missing or empty: $path" unless $ok;
+    }
+    if (@preflight_errors) {
+        push @report, "", "FAILED before execution:", map { "  - $_" } @preflight_errors;
+        atomic_write_text($report, join("\n", @report) . "\n");
+        print STDERR join("\n", @preflight_errors) . "\nSelf-test report: $report\n";
+        return 1;
+    }
+
+    my $selftest_threads = detect_available_cpus();
+    push @report, "", "Self-test threads: $selftest_threads (max currently available to this process/allocation)";
+
+    my @cases = (
+        {
+            name => "basic_example",
+            desc => "Standard Example/ run equivalent to: ./lotus3 -i Example/ -m Example/miSeqMap.sm.txt -o myTestRun",
+            out  => File::Spec->catdir($root, "myTestRun"),
+            args => ["-i", $example_dir, "-m", $map],
+            expected_tax => "hiera_RDP.txt",
+            required_tools => [qw(sdm)],
+        },
+        {
+            name => "miseq_dada2_lambda",
+            desc => "DADA2/Lambda Example/ run equivalent to the documented miSeq2/SLV/lambda command",
+            out  => File::Spec->catdir($root, "myTestRun2"),
+            args => [
+                "-i", $example_dir,
+                "-m", $map,
+                "-s", $sdm_miseq2,
+                "-p", "miSeq",
+                "-amplicon_type", "SSU",
+                "-forwardPrimer", "GTGYCAGCMGCCGCGGTAA",
+                "-reversePrimer", "GGACTACNVGGGTWTCTAAT",
+                "-CL", "dada2",
+                "-refDB", "SLV",
+                "-taxAligner", "lambda",
+            ],
+            expected_tax => "hiera_BLAST.txt",
+            required_tools => [qw(sdm Rscript lambda3)],
+        },
+    );
+
+    my $failures = 0;
+    for my $case (@cases) {
+        push @report, "", "==== $case->{name} ====", $case->{desc};
+        my $ok = selftest_run_case($script, $case, \@report, $selftest_threads);
+        $failures++ unless $ok;
+    }
+
+    push @report, "", $failures ? "SELF-TEST FAILED: $failures case(s) failed." : "SELF-TEST PASSED: all cases completed and validated.";
+    atomic_write_text($report, join("\n", @report) . "\n");
+    print join("\n", @report[-($failures ? 4 : 3)..-1]) . "\n" if @report >= 4;
+    print "Self-test report: $report\n";
+    return $failures ? 1 : 0;
+}
+
+sub selftest_run_case {
+    my ($script, $case, $report_ref, $selftest_threads) = @_;
+    my $out = $case->{out};
+    my $root = dirname($out);
+    my $log_root = File::Spec->catdir($root, "selftest_logs");
+    ensure_dir($log_root) unless -d $log_root;
+
+    my $dry_out = $out . "__preflight";
+    my $dry_log_dir = File::Spec->catdir($dry_out, "LotuSLogS");
+    my $dry_log = File::Spec->catfile($log_root, "$case->{name}_preflight.log");
+    my $run_log = File::Spec->catfile($log_root, "$case->{name}_pipeline.log");
+    my $dep_report = File::Spec->catfile($dry_log_dir, "dependency_report.txt");
+    my $manifest = File::Spec->catfile($dry_log_dir, "run_manifest.txt");
+
+    if (-e $out) {
+        push @$report_ref, "Output directory already exists; refusing to overwrite in self-test: $out";
+        return 0;
+    }
+    if (-e $dry_out) {
+        safe_remove_tree($dry_out, "self-test preflight directory");
+    }
+
+    # Important: do not create the real pipeline output directory before the real run.
+    # LotuS resets non-dry-run output directories at startup; pre-creating the output
+    # and placing the wrapper log inside it made the self-test fail or lose its startup log.
+    # The validation dry-run therefore uses a separate __preflight output directory.
+    my @dry = ($^X, $script, @{$case->{args}}, "-o", $dry_out, "-t", $selftest_threads,
+               "--dependencyReport", $dep_report, "--manifest", $manifest, "--dry-run");
+
+    push @$report_ref, "Preflight/dry-run command: " . join(" ", map { shell_quote($_) } @dry);
+    my $dry_stat = run_command_capture($dry_log, @dry);
+    push @$report_ref, "Dry-run exit status: $dry_stat";
+    push @$report_ref, "Dry-run log: $dry_log";
+    if ($dry_stat != 0) {
+        push @$report_ref, "Dry-run dependency/database validation failed; not executing biological pipeline.";
+        return 0;
+    }
+
+    if (-s $dep_report) {
+        push @$report_ref, "Dependency report: $dep_report";
+        my %dep_status;
+        open my $dfh, "<", $dep_report or do { push @$report_ref, "Could not read dependency report: $dep_report: $!"; return 0; };
+        while (my $line = <$dfh>) {
+            if ($line =~ /^([A-Za-z0-9_.-]+)\s+(OK|MISSING)\s+(.+)$/) {
+                $dep_status{$1} = [$2, $3];
+            }
+        }
+        close $dfh;
+        for my $tool (@{$case->{required_tools}}) {
+            my $row = $dep_status{$tool};
+            if (!$row || $row->[0] ne "OK") {
+                push @$report_ref, "Required self-test dependency not OK for $case->{name}: $tool";
+                return 0;
+            }
+            push @$report_ref, "Required dependency OK: $tool -> $row->[1]";
+        }
+    } else {
+        push @$report_ref, "Dependency report was not created or is empty: $dep_report";
+        return 0;
+    }
+
+    my $run_dep_report = File::Spec->catfile($out, "LotuSLogS", "dependency_report.txt");
+    my $run_manifest   = File::Spec->catfile($out, "LotuSLogS", "run_manifest.txt");
+    my @run = ($^X, $script, @{$case->{args}}, "-o", $out, "-t", $selftest_threads,
+               "--dependencyReport", $run_dep_report, "--manifest", $run_manifest);
+
+    push @$report_ref, "Pipeline command: " . join(" ", map { shell_quote($_) } @run);
+    my $run_stat = run_command_capture($run_log, @run);
+    push @$report_ref, "Pipeline exit status: $run_stat";
+    push @$report_ref, "Pipeline log: $run_log";
+    if ($run_stat != 0) {
+        push @$report_ref, "Pipeline execution failed.";
+        return 0;
+    }
+
+    return selftest_validate_output($case, $report_ref);
+}
+
+sub run_command_capture {
+    my ($log_file, @cmd) = @_;
+    my $pid = fork();
+    die "Cannot fork self-test command: $!\n" unless defined $pid;
+    if ($pid == 0) {
+        open STDOUT, ">", $log_file or die "Cannot write $log_file: $!\n";
+        open STDERR, ">&", STDOUT or die "Cannot redirect STDERR to $log_file: $!\n";
+        exec { $cmd[0] } @cmd or do {
+            print STDERR "Cannot exec @cmd: $!\n";
+            exit 127;
+        };
+    }
+    waitpid($pid, 0);
+    return $?;
+}
+
+sub selftest_validate_output {
+    my ($case, $report_ref) = @_;
+    my $out = $case->{out};
+    my @required = (
+        File::Spec->catfile($out, "OTU.fna"),
+        File::Spec->catfile($out, "OTU.txt"),
+        File::Spec->catfile($out, "OTU.biom"),
+        File::Spec->catfile($out, $case->{expected_tax}),
+        File::Spec->catfile($out, "LotuSLogS", "LotuS_run.log"),
+        File::Spec->catfile($out, "LotuSLogS", "LotuS_cmds.log"),
+        File::Spec->catfile($out, "LotuSLogS", "dependency_report.txt"),
+        File::Spec->catfile($out, "LotuSLogS", "run_manifest.txt"),
+    );
+    my @missing;
+    for my $f (@required) {
+        push @missing, $f unless -s $f;
+    }
+    if (@missing) {
+        push @$report_ref, "Missing or empty expected output(s):", map { "  - $_" } @missing;
+        return 0;
+    }
+
+    my $otu_count = selftest_count_fasta(File::Spec->catfile($out, "OTU.fna"));
+    my $table_rows = selftest_count_table_rows(File::Spec->catfile($out, "OTU.txt"));
+    push @$report_ref, "Output validation: OTU.fna entries = $otu_count; OTU.txt data rows = $table_rows";
+    if ($otu_count < 1 || $table_rows < 1) {
+        push @$report_ref, "Expected at least one OTU/ASV sequence and one abundance-table row.";
+        return 0;
+    }
+
+    my $biom = File::Spec->catfile($out, "OTU.biom");
+    open my $bfh, "<", $biom or do { push @$report_ref, "Could not read BIOM output: $biom: $!"; return 0; };
+    my $biom_head = do { local $/; <$bfh> };
+    close $bfh;
+    if ($biom_head !~ /"generated_by"\s*:\s*"LotuS/) {
+        push @$report_ref, "BIOM output does not contain expected LotuS generated_by metadata: $biom";
+        return 0;
+    }
+
+    my $main_log = File::Spec->catfile($out, "LotuSLogS", "LotuS_run.log");
+    if (-s $main_log) {
+        open my $lfh, "<", $main_log;
+        my $log_txt = do { local $/; <$lfh> };
+        close $lfh;
+        if ($log_txt =~ /(?:CMD failed|Aborting LotuS3 run|Error:)/i) {
+            push @$report_ref, "Main log contains failure-like text; inspect $main_log";
+            return 0;
+        }
+    }
+
+    push @$report_ref, "Output validation passed for $case->{name}: $out";
+    return 1;
+}
+
+sub selftest_count_fasta {
+    my ($file) = @_;
+    open my $fh, "<", $file or return 0;
+    my $n = 0;
+    while (my $line = <$fh>) { $n++ if $line =~ /^>/; }
+    close $fh;
+    return $n;
+}
+
+sub selftest_count_table_rows {
+    my ($file) = @_;
+    open my $fh, "<", $file or return 0;
+    my $n = 0;
+    while (my $line = <$fh>) {
+        next if $line =~ /^\s*$/;
+        $n++;
+    }
+    close $fh;
+    return $n > 0 ? $n - 1 : 0;
+}
+
+sub atomic_write_text {
+    my ($path, $text) = @_;
+    die "atomic_write_text called without path\n" unless defined $path && $path ne "";
+    my $dir = dirname($path);
+    ensure_dir($dir) if defined $dir && $dir ne "" && !-d $dir;
+    my $tmp = "$path.tmp.$$";
+    open my $fh, ">", $tmp or die "Cannot write $tmp: $!\n";
+    print {$fh} ($text // "") or die "Cannot write $tmp: $!\n";
+    close $fh or die "Cannot close $tmp: $!\n";
+    rename $tmp, $path or die "Cannot replace $path with $tmp: $!\n";
+}
+
+sub acquire_output_lock {
+    my ($target_outdir) = @_;
+    return if defined $outputLockFH;
+    my $parent = dirname($target_outdir);
+    $parent = "." if !defined($parent) || $parent eq "";
+    ensure_dir($parent) unless -d $parent;
+    my $base = basename($target_outdir);
+    $base =~ s/[^A-Za-z0-9_.-]/_/g;
+    $outputLockFile = File::Spec->catfile($parent, ".lotus3.$base.lock");
+    open my $lfh, ">>", $outputLockFile or die "Cannot open output lock $outputLockFile: $!\n";
+    unless (flock($lfh, LOCK_EX | LOCK_NB)) {
+        die "Output directory appears to be in use by another LotuS3 run: $target_outdir\nLock file: $outputLockFile\n";
+    }
+    print {$lfh} "LotuS3 lock held by PID $$ since " . scalar(localtime) . "\n";
+    $outputLockFH = $lfh;
+}
+
+sub release_output_lock {
+    return unless defined $outputLockFH;
+    flock($outputLockFH, LOCK_UN);
+    close $outputLockFH;
+    undef $outputLockFH;
+    unlink $outputLockFile if defined $outputLockFile && $outputLockFile ne "" && -e $outputLockFile;
+}
+
+sub file_signature {
+    my ($path) = @_;
+    return "missing" unless defined $path && $path ne "" && -e $path;
+    my @st = stat($path);
+    return "size=$st[7];mtime=$st[9]";
+}
+
+sub validate_reference_databases {
+    my @problems;
+    my @warnings;
+    for (my $i=0; $i<@TAX_REFDB; $i++) {
+        my $db  = $TAX_REFDB[$i]  // "";
+        my $tax = $TAX_RANKS[$i]  // "";
+        push @problems, "Reference FASTA missing or empty: $db"  if $db  ne "" && (!-s $db);
+        push @problems, "Taxonomy file missing or empty: $tax"   if $tax ne "" && (!-s $tax);
+    }
+    if ($UCHIME_REFDB ne "" && !-s $UCHIME_REFDB) {
+        push @problems, "UCHIME reference missing or empty: $UCHIME_REFDB";
+    }
+    if ($doPhiX && $CONT_REFDB_PHIX ne "" && !-s $CONT_REFDB_PHIX) {
+        push @problems, "PhiX reference missing or empty: $CONT_REFDB_PHIX";
+    }
+    if ($doBlasting == 2) { # lambda3
+        for my $db (@TAX_REFDB) {
+            next unless defined $db && $db ne "";
+            my $idx = "$db.lba.gz";
+            push @warnings, "Lambda index not found for $db (expected $idx); this is non-fatal because the index may be created during the pipeline run" unless -s $idx;
+        }
+    }
+    if (@warnings) {
+        my $msg = "Reference database validation warnings:
+" . join("
+", map { " - $_" } @warnings) . "
+";
+        printL($msg, "w");
+    }
+    if (@problems) {
+        my $msg = "Reference database validation failed:
+" . join("
+", map { " - $_" } @problems) . "
+";
+        if ($strictMode) { printL($msg, 55); } else { printL($msg, "w"); }
+    }
+}
+
+sub validate_option_combinations {
+    my @problems;
+    if ($TaxOnly eq "0") {
+        push @problems, "Missing input (-i)" unless defined($input) && $input ne "";
+        push @problems, "Missing mapping file (-m)" unless defined($mapFile) && $mapFile ne "" && -f $mapFile;
+    }
+    if (@inputArray >= 2) {
+        push @problems, "Second paired input does not exist: $inputArray[1]" unless -f $inputArray[1];
+    }
+    if (substr($ampliconType,0,3) eq "ITS" && $doBlasting < 1) {
+        push @problems, "ITS amplicon mode requires similarity-based taxonomy; current -taxAligner disables it";
+    }
+    if ($doITSx && !$itsxBin) {
+        push @problems, "ITSx extraction requested but ITSx binary is not configured";
+    }
+    if ($doVXTR && !$vxtrBin) {
+        push @problems, "VXtractor requested but VXtractor binary is not configured";
+    }
+    if (@problems) {
+        my $msg = "Option/dependency combination validation failed:\n" . join("\n", map { " - $_" } @problems) . "\n";
+        if ($strictMode) { printL($msg, 64); } else { printL($msg, "w"); }
+    }
+}
+
+sub dependency_report {
+    my @rows;
+    my @deps = (
+        ["Rscript", $Rscript], ["sdm", $sdmBin], ["LCA", $LCABin],
+        ["vsearch", $VSBin], ["usearch", $usBin], ["blastn", $blastBin],
+        ["lambda3", $lambda3Bin], ["mafft", $mafftBin], ["clustalo", $clustaloBin],
+        ["FastTree", $fasttreeBin], ["IQ-TREE", $iqTreeBin], ["swarm", $swarmBin],
+        ["cd-hit", $cdhitBin], ["dnaclust", $dnaclustBin], ["minimap2", $mini2Bin],
+        ["ITSx", $itsxBin], ["hmmsearch", $hmmsrchBin], ["VXtractor", $vxtrBin]
+    );
+    for my $d (@deps) {
+        my ($name, $path) = @$d;
+        next unless defined $path && $path ne "";
+        my $status = (-x $path || -f $path) ? "OK" : "MISSING";
+        push @rows, sprintf("%-12s %-8s %s", $name, $status, $path);
+    }
+    my $report = "LotuS3 dependency report\n" . join("\n", @rows) . "\n";
+    printL($report, 0) if $verbosity > 1;
+    my $out = $depReportFile ne "" ? $depReportFile : "$logDir/dependency_report.txt";
+    atomic_write_text($out, $report) if defined($logDir) && $logDir ne "";
+}
+
+sub write_repro_manifest {
+    my $out = $manifestFile ne "" ? $manifestFile : "$logDir/run_manifest.txt";
+    my @lines;
+    push @lines, "LotuS3 reproducibility manifest";
+    push @lines, "Date: " . strftime("%Y-%m-%d %H:%M:%S %z", localtime);
+    push @lines, "Version: $selfID";
+    push @lines, "Command: $cmdCall";
+    push @lines, "Working directory: " . (abs_path(".") // ".");
+    push @lines, "Output directory: $outdir";
+    push @lines, "Temp directory: $lotus_tempDir";
+    push @lines, "Dry run: $dryRun";
+    push @lines, "Strict mode: $strictMode";
+    push @lines, "Amplicon type: $ampliconType";
+    push @lines, "Platform: $platform";
+    push @lines, "Threads: $uthreads";
+    push @lines, "Input: $input";
+    push @lines, "Map file: " . ($mapFile // "") . " [" . file_signature($mapFile) . "]";
+    push @lines, "";
+    push @lines, "Reference databases:";
+    for (my $i=0; $i<@TAX_REFDB; $i++) {
+        push @lines, "  DB[$i]: " . ($TAX_REFDB[$i] // "") . " [" . file_signature($TAX_REFDB[$i]) . "]";
+        push @lines, "  TAX[$i]: " . ($TAX_RANKS[$i] // "") . " [" . file_signature($TAX_RANKS[$i]) . "]";
+    }
+    push @lines, "  UCHIME: $UCHIME_REFDB [" . file_signature($UCHIME_REFDB) . "]";
+    push @lines, "  PhiX: $CONT_REFDB_PHIX [" . file_signature($CONT_REFDB_PHIX) . "]";
+    push @lines, "";
+    push @lines, "Binaries:";
+    for my $d (["Rscript",$Rscript],["sdm",$sdmBin],["LCA",$LCABin],["vsearch",$VSBin],["usearch",$usBin],["blastn",$blastBin],["lambda3",$lambda3Bin],["mafft",$mafftBin],["clustalo",$clustaloBin],["FastTree",$fasttreeBin],["IQ-TREE",$iqTreeBin],["swarm",$swarmBin],["cd-hit",$cdhitBin],["dnaclust",$dnaclustBin],["minimap2",$mini2Bin]) {
+        push @lines, "  $d->[0]: " . ($d->[1] // "") . " [" . file_signature($d->[1]) . "]";
+    }
+    atomic_write_text($out, join("\n", @lines) . "\n");
+}
+
 sub printL($ $) {
     my ( $msg, $stat ) = @_;
     if ( defined $stat && lc($stat) eq "w" ) {
@@ -5746,30 +6245,144 @@ sub printL($ $) {
 	}
 }
 
-sub systemL {
-    my $cmdF = $_[0];
-	my $throwWarn = 1; my $descr="";
-	if (@_ > 2){$throwWarn = $_[2];}
-	if (@_ > 1){$descr = $_[1];}
+sub detect_available_cpus {
+    # Prefer GNU nproc because it respects CPU affinity/cgroup constraints on Linux,
+    # which is usually what matters for cluster jobs and containers.
+    my @checks = (
+        sub {
+            my $nproc = command_exists("nproc") or return 0;
+            my $out = `$nproc 2>/dev/null`;
+            chomp $out;
+            return int($out || 0);
+        },
+        sub {
+            my $getconf = command_exists("getconf") or return 0;
+            my $out = `$getconf _NPROCESSORS_ONLN 2>/dev/null`;
+            chomp $out;
+            return int($out || 0);
+        },
+        sub {
+            my $sysctl = command_exists("sysctl") or return 0;
+            my $out = `$sysctl -n hw.ncpu 2>/dev/null`;
+            chomp $out;
+            return int($out || 0);
+        },
+    );
 
-    #split up by subcmds..
-	my $retStat=0;
-	my @cmds = split /;/,$cmdF;
-	foreach my $subcmd (@cmds){
-		print("[cmd] $subcmd\n") if ($verbosity > 2) ;
-		print cmdLOG "[cmd] $subcmd\n";
-		my $attach = "";
-		$attach = ">> $progOutPut 2>&1" if ($verbosity < 2);
-		if ($subcmd =~ m/>/) {$attach = "";}
-		my $stat = system("$subcmd $attach");
-		if ($stat && $throwWarn){#something went wrong..
-			print "$descr CMD failed: $subcmd \nsee $progOutPut for error log\n" ;
-			$retStat = $stat;
-			exit(9);
-		}
-	}
+    for my $check (@checks) {
+        my $n = eval { $check->() } || 0;
+        return $n if $n > 0 && $n < 10000;
+    }
+    return 1;
+}
+
+sub command_exists {
+    my ($cmd) = @_;
+    return unless defined $cmd && $cmd ne "";
+    if ($cmd =~ m{/}) {
+        return $cmd if -x $cmd;
+        return;
+    }
+    for my $dir (split /:/, ($ENV{PATH} // "")) {
+        my $path = File::Spec->catfile($dir, $cmd);
+        return $path if -x $path;
+    }
+    return;
+}
+
+sub ensure_dir {
+    my ($dir) = @_;
+    die "Refusing to create an undefined/empty directory path\n" unless defined $dir && $dir ne "";
+    make_path($dir) unless -d $dir;
+    die "Failed to create directory $dir: $!\n" unless -d $dir;
+}
+
+sub safe_remove_tree {
+    my ($path, $label) = @_;
+    $label //= "path";
+    return unless defined $path && $path ne "" && -e $path;
+
+    my $abs = abs_path($path) // $path;
+    die "Refusing to remove unsafe $label path: $abs\n"
+        if $abs eq "/" || $abs eq "." || $abs eq ".." || $abs =~ m{^/+$};
+    die "Refusing to remove very short $label path: $abs\n"
+        if length($abs) < 8;
+    die "Refusing to recursively remove a file as $label: $abs\n"
+        if -f $abs;
+
+    remove_tree($abs, { safe => 1, error => \my $err });
+    if (@$err) {
+        my @msgs;
+        for my $diag (@$err) {
+            my ($file, $message) = %$diag;
+            push @msgs, "$file: $message";
+        }
+        die "Failed to remove $label $abs:\n" . join("\n", @msgs) . "\n";
+    }
+}
+
+sub shell_quote {
+    my ($s) = @_;
+    return "''" unless defined $s && length $s;
+    $s =~ s/'/'\\''/g;
+    return "'$s'";
+}
+
+sub split_shell_commands {
+    my ($cmd) = @_;
+    my @cmds;
+    my $buf = "";
+    my $quote = "";
+    my $esc = 0;
+    for my $ch (split //, $cmd) {
+        if ($esc) { $buf .= $ch; $esc = 0; next; }
+        if ($ch eq "\\") { $buf .= $ch; $esc = 1; next; }
+        if ($quote) {
+            $quote = "" if $ch eq $quote;
+            $buf .= $ch;
+            next;
+        }
+        if ($ch eq "'" || $ch eq '"') { $quote = $ch; $buf .= $ch; next; }
+        if ($ch eq ";") { push @cmds, $buf if $buf =~ /\S/; $buf = ""; next; }
+        $buf .= $ch;
+    }
+    push @cmds, $buf if $buf =~ /\S/;
+    return @cmds;
+}
+
+sub systemL {
+    my ($cmdF, $descr, $throwWarn) = @_;
+    $descr //= "";
+    $throwWarn = 1 unless defined $throwWarn;
+
+    my $retStat = 0;
+    my @cmds = split_shell_commands($cmdF);
+    foreach my $subcmd (@cmds) {
+        $subcmd =~ s/^\s+|\s+$//g;
+        next if $subcmd eq "";
+        print("[cmd] $subcmd\n") if ($verbosity > 2);
+        print cmdLOG "[cmd] $subcmd\n" if defined fileno(cmdLOG);
+
+        my $exec_cmd = $subcmd;
+        if ($verbosity < 2 && $subcmd !~ /(?:^|\s)(?:>|2>|&>|\|)/) {
+            $exec_cmd .= " >> " . shell_quote($progOutPut) . " 2>&1";
+        }
+
+        if ($dryRun) {
+            print cmdLOG "[dry-run] $exec_cmd\n" if defined fileno(cmdLOG);
+            next;
+        }
+        my $stat = system($exec_cmd);
+        if ($stat != 0) {
+            $retStat ||= $stat;
+            if ($throwWarn) {
+                my $msg = ($descr ne "" ? "$descr: " : "") . "CMD failed: $subcmd\nsee $progOutPut for error log\nExit status: $stat\n";
+                print $msg;
+                exit(9);
+            }
+        }
+    }
     return $retStat;
-    # return $ENV{'PIPESTATUS[0]'};
 }
 
 
