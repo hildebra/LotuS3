@@ -574,7 +574,7 @@ sub getKSGP($){
 	my $DB = "$ddir/KSGPv4.0";system "rm -f ${DB}*";
 	print "Downloading KSGP v4.0 Jul 2026 release..\n";
 	my $tarUTN = "$ddir/KSGPv4.0.gz";	my $tarUTNtax = "$ddir/KSGPv4.0.tax.gz";
-	getS2("http://lotus2.earlham.ac.uk/lotus/packs/DB/KSGPv4.0/KSGP.fasta.gz",$tarUTN);
+	getS2("http://lotus2.earlham.ac.uk/lotus/packs/DB/KSGPv4.0/KSGP_v4.0.fasta.gz",$tarUTN);
 	getS2("http://lotus2.earlham.ac.uk/lotus/packs/DB/KSGPv4.0/KSGP_plus2.tax.gz",$tarUTNtax);
 	system("gunzip -c $tarUTN > $DB.fasta");system("gunzip -c $tarUTNtax > $DB.tax");
 	system("rm -f $tarUTN $tarUTNtax");
