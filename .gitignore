@@ -9,6 +9,7 @@ DB
 test/
 rtk_src
 lotus.pl
+lOTUs.cfg.bak
 lOTUs.cfg
 config.txt
 ITSx_out.summary.txt
