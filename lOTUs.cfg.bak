@@ -1,0 +1,127 @@
+# -------------------- lOTUs configuration file
+# Progams Pathways  -- have to be set before first use
+# /YY/ is an abbreviation for the complete system path to specific program, if the program is in the system path, no absolute path needs to be set
+# only usearch and rdp are required - usearch binaries (e.g. "usearch	/home/user/bin/usearch/./usearch7.0.959_i86linux64")
+
+#sdm - essential C++ part of the LotuS pipeline
+sdm /hpc-home/hildebra/dev/lotus//bin//sdm
+#LCA implementation in C++, not essential
+LCA /hpc-home/hildebra/dev/lotus//bin//LCA
+#rarefaction toolkit
+rtk /hpc-home/hildebra/dev/lotus//bin//rtk
+#R helper scripts
+dada2R bin/R/dada2_pip.R
+phyloLnk bin/R/l2phyloseq.R
+LULUR bin/R/LULU.R
+ASVcl bin/R/ASV_clustering.R
+
+#usearch clustering & chimera checking program
+usearch /hpc-home/hildebra/dev/lotus//bin//usearch12_linux_beta
+#swarm clustering program
+swarm /hpc-home/hildebra/dev/lotus//bin/swarm-master//bin/swarm
+#cd-hit-est clustering program
+cd-hit /hpc-home/hildebra/dev/lotus//bin/cdhit-master//cd-hit-est
+#vsearch chimera checking, OTU clustering and mapping
+vsearch /hpc-home/hildebra/dev/lotus//bin//vsearch-2.15.0-linux-x86_64/bin/vsearch
+#dnaclust ref based OTU clustering
+dnaclust dnaclust
+minimap2 /hpc-home/hildebra/dev/lotus//bin//minimap2-2.28_x64-linux/minimap2
+
+
+#RDP multiclassifier java archieve (e.g. /YY/MultiClassifier.jar)
+#alternatively leave this "" and set environmental variable to RDP_JAR_PATH, as described in RDP documentary
+multiRDPjar MultiClassifier.jar
+RDPjar /hpc-home/hildebra/dev/lotus//bin/rdp_classifier_2.12/dist/classifier.jar
+
+
+#Blastn+ binary (e.g. /YY/ncbi-blast-2.2.XX+/bin/blastn)
+blastn /hpc-home/hildebra/dev/lotus//bin//ncbi-blast-2.2.29+/bin/blastn
+makeBlastDB /hpc-home/hildebra/dev/lotus//bin//ncbi-blast-2.2.29+/bin/makeblastdb
+#lambda binaries used for ref taxa searches
+lambda_index lambda_indexer
+lambda lambda
+lambda3 /hpc-home/hildebra/dev/lotus//bin//lambda3
+
+#clustalo multiple alignment binary (e.g. /YY/clustaloBin-1.2.0-OS-x86_64)
+clustalo /hpc-home/hildebra/dev/lotus//bin//clustalo-1.2.0-Ubuntu-x86_64
+mafft /hpc-home/hildebra/dev/lotus//bin//mafft-linux64/mafft.bat
+
+#FastTree binary - for speed improvements /YY/FastTReeMP recommended -- requires clustalo
+fasttree /hpc-home/hildebra/dev/lotus//bin//FastTreeMP
+#iqTree binary - more precise than fasttree at almost equal speeds
+iqtree /hpc-home/hildebra/dev/lotus//bin//iqtree-2.1.1-Linux/bin/iqtree2
+
+#flash - required for merging big fastq files
+flashBin flash
+
+#ITSX - required to only retain OTU's matching an ITS
+itsx /hpc-home/hildebra/dev/lotus//bin//ITSx_1.1.4/./ITSx
+#hmmsearch
+hmmsearch /hpc-home/hildebra/dev/lotus//bin//ITSx_1.1.4/bin/hmmsearch
+
+#V-xtractor
+vxtractorHMMs /hpc-home/hildebra/dev/lotus//bin//vxtr/HMMs/
+vxtractor /hpc-home/hildebra/dev/lotus//bin//vxtr/vxtractor.pl
+
+# --------------------
+#   databases
+#reference database for ref chimera filtering - suggested is gold.fa for bacteria SSU and UNITE resources for fungal ITS
+UCHIME_REFDB /hpc-home/hildebra/dev/lotus//DB//rdp_gold.fa
+UCHIME_REFDB_LSU /hpc-home/hildebra/dev/lotus//DB//SLV_119_LSU.fa
+UCHIME_REFDB_ITS /hpc-home/hildebra/dev/lotus//DB//ITS_chimera22//2022_10_26_chimera_reference_release//uchime_reference_dataset_16_10_2022.fasta
+UCHIME_REFDB_ITS2 /hpc-home/hildebra/dev/lotus//DB//ITS_chimera22//2022_10_26_chimera_reference_release//ITS1_ITS2_datasets/uchime_reference_dataset_16_20_2022_ITS2.fasta
+UCHIME_REFDB_ITS1 /hpc-home/hildebra/dev/lotus//DB//ITS_chimera22//2022_10_26_chimera_reference_release//ITS1_ITS2_datasets/uchime_reference_dataset_16_20_2022_ITS1.fasta
+
+#outdated - greengenes fasta ref database - requires blastn
+TAX_REFDB_GG DB//gg_13_5.fasta
+#outdated - greengenes taxnomic assignments for ref fasta database - requires blastn
+TAX_RANK_GG DB//gg_13_5_taxonomy
+
+#greengenes2 fasta ref database - requires blastn
+TAX_REFDB_GG2 /hpc-home/hildebra/dev/lotus//DB//GG2.2022.10.fasta
+#greengenes2 taxnomic assignments for ref fasta database - requires blastn
+TAX_RANK_GG2 /hpc-home/hildebra/dev/lotus//DB//GG2.2022.10.tax
+
+#SILVA SSU fasta ref database - requires blastn
+TAX_REFDB_SSU_SLV /hpc-home/hildebra/dev/lotus//DB//SLV_138.1_SSU.fasta
+#SILVA SSU taxnoomic assignments for ref fasta database - requires blastn
+TAX_RANK_SSU_SLV /hpc-home/hildebra/dev/lotus//DB//SLV_138.1_SSU.tax
+#SILVA LSU fasta ref database - requires blastn
+TAX_REFDB_LSU_SLV /hpc-home/hildebra/dev/lotus//DB//SLV_138.1_LSU.fasta
+#SILVA LSU taxonomic assignments for ref fasta database - requires blastn
+TAX_RANK_LSU_SLV /hpc-home/hildebra/dev/lotus//DB//SLV_138.1_LSU.tax
+#UNITE ITS fasta ref database - requires blastn
+TAX_REFDB_ITS_UNITE /hpc-home/hildebra/dev/lotus//DB//UNITE/sh_refs_v10_19.02.2025.fasta
+#UNITE ITS fasta ref tax - requires blastn
+TAX_RANK_ITS_UNITE /hpc-home/hildebra/dev/lotus//DB//UNITE/sh_refs_v10_19.02.2025.tax
+#reference database with phiX, to check for illumina platform phiX remainders
+REFDB_PHIX /hpc-home/hildebra/dev/lotus//DB//phiX.fasta
+#HITdb SSU database
+TAX_REFDB_HITdb /hpc-home/hildebra/dev/lotus//DB//HITdb/HITdb_sequences.fasta
+TAX_RANK_HITdb /hpc-home/hildebra/dev/lotus//DB//HITdb/HITdb_taxonomy.txt
+#PR2 LSU database
+TAX_REFDB_PR2 /hpc-home/hildebra/dev/lotus//DB//PR2_5.0.fasta
+TAX_RANK_PR2 /hpc-home/hildebra/dev/lotus//DB//PR2_5.0_tax.txt
+#ref DB for utax ITS + 16S
+TAX_REFDB_SSU_UTAX /hpc-home/hildebra/dev/lotus//DB//utaxref/rdp_16s_trainset15/
+TAX_REFDB_ITS_UTAX /hpc-home/hildebra/dev/lotus//DB//utaxref/unite_v7/
+TAX_REFDB_BEE /hpc-home/hildebra/dev/lotus//DB//beeTax/beeTax.fasta
+TAX_RANK_BEE /hpc-home/hildebra/dev/lotus//DB//beeTax/beeTax.txt
+infernal /hpc-home/hildebra/dev/lotus//bin//infernal-1.1.2-linux-intel-gcc/binaries/
+
+#KSGP database.. combination of several DBs, supplemented by environmental full length 16S/18S sequences
+TAX_RANK_KSGP /hpc-home/hildebra/dev/lotus//DB//KSGPv4.0.tax
+TAX_REFDB_KSGP /hpc-home/hildebra/dev/lotus//DB//KSGPv4.0.fasta
+
+
+# --------------------
+#  LotuS parameters
+#unique identifier, can be used for debugging support
+UID 633685344
+#Threshold used in blast LCA algorithm to delimit taxonomic assignments, if OTU sequence is below %id to reference sequence. This can be delimited to 5 taxanomic levels (separated by ","): species, genus, family, class, order, phylum. E.g.: 97,95,92,90,88,85
+#IdentityThresholds 97,95,93,91,88,78
+#updated based on Yarza, P. et al. Uniting the classification of cultured and uncultured bacteria and archaea using 16S rRNA gene sequences. Nature Reviews. Microbiology 12, 635–645 (2014).: Table 1, Min seq id, uprounded
+IdentityThresholds 97,95,88,83,81,78
+
+#This will check for more & less important updates each time lotus is run. Note that we will never track your LotuS usuage in any way, this is purely a convenience option if desired.
+CheckForUpdates 0

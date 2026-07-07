@@ -3822,6 +3822,7 @@ sub buildTree($ $) {
 			printL "Could not find multiple alignment file:\n$multAli\n", 5;
 		}
 		if ($buildPhylo==1){
+			if ($fasttreeBin eq "" || !-f $fasttreeBin){printL"Could not find fasttree binary\n",33;}
 			$cmd = $fasttreeBin . " -nt -gtr -no2nd -spr 4 -log $logDir/fasttree.log -quiet -out $outTree $multAli;";
 		} elsif ($buildPhylo==2){
 			$cmd = "$iqTreeBin -s $multAli -ntmax $tthreads -pre $treePrefix -seed 678 ";
