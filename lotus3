@@ -40,7 +40,7 @@ use FindBin qw($RealBin);
 sub systemL; sub uniq; sub printL;sub frame;
 sub command_exists; sub detect_available_cpus; sub ensure_dir; sub safe_remove_tree; sub split_shell_commands; sub shell_quote;
 sub acquire_output_lock; sub release_output_lock; sub atomic_write_text; sub file_signature;
-sub dependency_report; sub validate_reference_databases; sub validate_option_combinations; sub write_repro_manifest;
+sub dependency_report; sub validate_reference_databases; sub validate_option_combinations; sub validate_inputs_before_execution; sub validate_output_directory_compatibility; sub apply_profile_preset; sub fastq_validation_scan; sub fasta_validation_scan; sub validate_refdb_tax_overlap; sub write_schema_metadata; sub schema_metadata_text; sub write_repro_manifest;
 sub run_self_test; sub selftest_run_case; sub selftest_validate_output; sub selftest_count_fasta; sub selftest_count_table_rows;
 sub checkLtsVer; sub announce_options;sub announce_self;sub prepLtsOptions; sub usage;
 sub printWarnings; 
@@ -68,7 +68,10 @@ sub checkOS;
 #3.04: 3.2.26: OS check included 
 #3.10: 29.3.26: major refactor of sdm v3.25 and LCA v0.26
 #3.11: 16.6.26: sdm v 3.37 (faster, less mem, more controlled outputs). KSGP v4.0 added to installer.
-my $selfID = "LotuS 3.11"; 
+#3.12: major refactor LotuS3 via AI: stability, reporting
+my $selfID = "LotuS 3.12"; 
+my $LotuS_output_schema_version = "1.0";
+
 
 
 checkOS();
@@ -284,12 +287,22 @@ my $selfTest   = 0;    # run built-in example-based self tests and exit
 my $strictMode = 1;    # fail early on inconsistent inputs/dependencies
 my $depReportFile = "";
 my $manifestFile  = "";
+my $profilePreset  = "";
+my %userProvidedOption;
 my $outputLockFH;
 my $outputLockFile = "";
 my $sdmDerepDo = 2;
 if ( !@ARGV ) {
     usage();
     exit 1;
+}
+
+for (my $ai = 0; $ai < @ARGV; $ai++) {
+    if ($ARGV[$ai] =~ /^-{1,2}([^=]+)/) {
+        my $opt = $1;
+        $opt =~ s/^(?:cl|CL|clustering|UP|UPARSE)$/CL/;
+        $userProvidedOption{$opt} = 1;
+    }
 }
 
 GetOptions(
@@ -310,6 +323,7 @@ GetOptions(
 	"exe|executionMode=i"   => \$exec,
 	"dry-run|dryRun!"       => \$dryRun,
 	"self-test|selfTest!"    => \$selfTest,
+	"profile=s"             => \$profilePreset,
 	"strict!"               => \$strictMode,
 	"keepTmpFiles=i"        => \$keepTmpFiles,
 	"extendedLogs=i"        => \$extendedLogs,
@@ -408,6 +422,8 @@ if ($installUsearch ne ""){
 #!!!!!!!!!!!!!!!!!!!!!!!!!!
 #end external routines..
 
+apply_profile_preset() if defined($profilePreset) && $profilePreset ne "";
+
 if ($selfTest) {
     my $status = run_self_test();
     exit($status);
@@ -454,6 +470,9 @@ if ( $TaxOnly eq "0" ) {
 	( $mapHref, $combHref, $hasCombiSmpls ) = readMap();
 	%mapH = %{$mapHref};
 }
+
+validate_inputs_before_execution($mapHref, $combHref) if ($TaxOnly eq "0");
+write_schema_metadata();
 
 if ($dryRun) {
 	write_repro_manifest();
@@ -773,6 +792,7 @@ $treeF = buildTree( $OTUfa, $outdir );
 atomic_write_text("$logDir/citations.txt", $citations);
 
 my $phyloseqCreated=runPhyloObj($treeF);
+write_schema_metadata();
 write_repro_manifest();
 
 safe_remove_tree($lotus_tempDir, "temporary directory") if ($exec == 0 && !$keepTmpFiles);  #printL "Delete temp dir $lotus_tempDir\n", 0; }
@@ -2717,6 +2737,7 @@ $L2str .= "\n";
 
 
 sub announce_options{
+	printL "LotuS_output_schema_version $LotuS_output_schema_version\n", 0;
 	if ( !$onlyTaxRedo && $TaxOnly eq "0" ) {
 		if ( $ClusterPipe == 7 ) {
 			die "Incorrect dada2 script defined $dada2Scr" unless (-f $dada2Scr);
@@ -2754,6 +2775,7 @@ sub announce_options{
 	printL "TempDir     $lotus_tempDir$tmpXtra\n";
 	printL "NumCores    $uthreads\n";
 	printL "------------ Pipeline config   --------------\n", 0;
+	printL "Profile preset          $profilePreset\n", 0 if (defined($profilePreset) && $profilePreset ne "");
 	#printL "$clustMode sequence clustering with $clusteringNameStr into ${OTU_prefix}'s\n",0;
 	printL "Sequencing platform     $platform\n", 0 ;
 	printL "Amplicon target         $organism, $ampliconType\n", 0;
@@ -3078,6 +3100,7 @@ sub prepLtsOptions{
 	
 	#reset logfile
 	#create output folders
+	validate_output_directory_compatibility($outdir, $resetOutdir);
 	ensure_dir($outdir) unless ( -d $outdir );
 	acquire_output_lock($outdir);
 	if ($resetOutdir) {
@@ -6032,6 +6055,10 @@ sub selftest_validate_output {
     open my $bfh, "<", $biom or do { push @$report_ref, "Could not read BIOM output: $biom: $!"; return 0; };
     my $biom_head = do { local $/; <$bfh> };
     close $bfh;
+    if ($biom_head !~ /"LotuS_output_schema_version"\s*:\s*"1\.0"/) {
+        push @$report_ref, "BIOM output does not contain expected LotuS_output_schema_version metadata: $biom";
+        return 0;
+    }
     if ($biom_head !~ /"generated_by"\s*:\s*"LotuS/) {
         push @$report_ref, "BIOM output does not contain expected LotuS generated_by metadata: $biom";
         return 0;
@@ -6132,6 +6159,15 @@ sub validate_reference_databases {
     if ($doPhiX && $CONT_REFDB_PHIX ne "" && !-s $CONT_REFDB_PHIX) {
         push @problems, "PhiX reference missing or empty: $CONT_REFDB_PHIX";
     }
+    for (my $i=0; $i<@TAX_REFDB; $i++) {
+        my ($frac, $err) = validate_refdb_tax_overlap($TAX_REFDB[$i] // "", $TAX_RANKS[$i] // "", 10000);
+        push @warnings, $err if defined($err) && $err ne "";
+        if (defined $frac && $frac < 0.0001) {
+            push @problems, sprintf("Reference FASTA and taxonomy IDs have very low overlap for %s / %s (%.2f%% in approximate scan)", ($TAX_REFDB[$i] // ""), ($TAX_RANKS[$i] // ""), 100*$frac);
+        } elsif (defined $frac && $frac < 0.01) {
+            push @warnings, sprintf("Reference FASTA and taxonomy IDs have limited overlap for %s / %s (%.2f%% in approximate scan)", ($TAX_REFDB[$i] // ""), ($TAX_RANKS[$i] // ""), 100*$frac);
+        }
+    }
     if ($doBlasting == 2) { # lambda3
         for my $db (@TAX_REFDB) {
             next unless defined $db && $db ne "";
@@ -6167,6 +6203,12 @@ sub validate_option_combinations {
     if (substr($ampliconType,0,3) eq "ITS" && $doBlasting < 1) {
         push @problems, "ITS amplicon mode requires similarity-based taxonomy; current -taxAligner disables it";
     }
+    if (substr($ampliconType,0,3) eq "ITS" && $refDBwanted =~ /^(?:SLV|GG|GG2|KSGP|HITDB)$/i) {
+        push @problems, "Marker/reference DB incompatibility: ITS amplicon type should not use a 16S/prokaryotic reference DB ($refDBwanted); use UNITE or a compatible custom DB";
+    }
+    if ($ampliconType eq "SSU" && $refDBwanted =~ /^(?:UNITE)$/i) {
+        push @problems, "Marker/reference DB incompatibility: SSU/16S profile should not use UNITE ITS reference DB";
+    }
     if ($doITSx && !$itsxBin) {
         push @problems, "ITSx extraction requested but ITSx binary is not configured";
     }
@@ -6177,6 +6219,273 @@ sub validate_option_combinations {
         my $msg = "Option/dependency combination validation failed:\n" . join("\n", map { " - $_" } @problems) . "\n";
         if ($strictMode) { printL($msg, 64); } else { printL($msg, "w"); }
     }
+}
+
+
+sub _option_was_provided {
+    my (@names) = @_;
+    for my $n (@names) {
+        return 1 if exists $userProvidedOption{$n};
+    }
+    return 0;
+}
+
+sub _set_profile_default {
+    my ($value_ref, $value, @option_names) = @_;
+    return if _option_was_provided(@option_names);
+    $$value_ref = $value;
+}
+
+sub apply_profile_preset {
+    my $p = lc($profilePreset // "");
+    $p =~ s/-/_/g;
+    my %valid = map { $_ => 1 } qw(16s_otu 16s_asv its_otu its_asv longread_16s taxonomy_only);
+    if (!$valid{$p}) {
+        die "Unknown -profile '$profilePreset'. Supported presets: 16S_otu, 16S_asv, ITS_otu, ITS_asv, longread_16S, taxonomy_only\n";
+    }
+    if ($p eq "16s_otu") {
+        _set_profile_default(\$ClusterPipe_pre, "UPARSE", qw(CL cl clustering UP UPARSE));
+        _set_profile_default(\$ampliconType, "SSU", qw(amplicon_type));
+        _set_profile_default(\$organism, "bacteria", qw(tax_group));
+        _set_profile_default(\$refDBwanted, "KSGP", qw(refDB));
+        _set_profile_default(\$noChimChk, 0, qw(deactivateChimeraCheck));
+        _set_profile_default(\$mergePreCluster, 1, qw(mergePreClusterReads));
+    } elsif ($p eq "16s_asv") {
+        _set_profile_default(\$ClusterPipe_pre, "DADA2", qw(CL cl clustering UP UPARSE));
+        _set_profile_default(\$ampliconType, "SSU", qw(amplicon_type));
+        _set_profile_default(\$organism, "bacteria", qw(tax_group));
+        _set_profile_default(\$refDBwanted, "KSGP", qw(refDB));
+        _set_profile_default(\$noChimChk, 0, qw(deactivateChimeraCheck));
+        _set_profile_default(\$mergePreCluster, 0, qw(mergePreClusterReads));
+        _set_profile_default(\$backMapID, 0.99, qw(backmap_id));
+    } elsif ($p eq "its_otu") {
+        _set_profile_default(\$ClusterPipe_pre, "UPARSE", qw(CL cl clustering UP UPARSE));
+        _set_profile_default(\$ampliconType, "ITS", qw(amplicon_type));
+        _set_profile_default(\$organism, "fungi", qw(tax_group));
+        _set_profile_default(\$refDBwanted, "UNITE", qw(refDB));
+        _set_profile_default(\$doBlasting_pre, "vsearch", qw(doBlast simBasedTaxo taxAligner));
+        _set_profile_default(\$doITSx, 1, qw(ITSx itsextraction));
+        _set_profile_default(\$noChimChk, 0, qw(deactivateChimeraCheck));
+    } elsif ($p eq "its_asv") {
+        _set_profile_default(\$ClusterPipe_pre, "DADA2", qw(CL cl clustering UP UPARSE));
+        _set_profile_default(\$ampliconType, "ITS", qw(amplicon_type));
+        _set_profile_default(\$organism, "fungi", qw(tax_group));
+        _set_profile_default(\$refDBwanted, "UNITE", qw(refDB));
+        _set_profile_default(\$doBlasting_pre, "vsearch", qw(doBlast simBasedTaxo taxAligner));
+        _set_profile_default(\$doITSx, 1, qw(ITSx itsextraction));
+        _set_profile_default(\$noChimChk, 0, qw(deactivateChimeraCheck));
+        _set_profile_default(\$mergePreCluster, 0, qw(mergePreClusterReads));
+        _set_profile_default(\$backMapID, 0.99, qw(backmap_id));
+    } elsif ($p eq "longread_16s") {
+        _set_profile_default(\$platform, "pacbio", qw(p platform));
+        _set_profile_default(\$ClusterPipe_pre, "CDHIT", qw(CL cl clustering UP UPARSE));
+        _set_profile_default(\$ampliconType, "SSU", qw(amplicon_type));
+        _set_profile_default(\$organism, "bacteria", qw(tax_group));
+        _set_profile_default(\$refDBwanted, "KSGP", qw(refDB));
+        _set_profile_default(\$mergePreCluster, 0, qw(mergePreClusterReads));
+        _set_profile_default(\$noChimChk, 0, qw(deactivateChimeraCheck));
+    } elsif ($p eq "taxonomy_only") {
+        _set_profile_default(\$ClusterPipe_pre, "0", qw(CL cl clustering UP UPARSE));
+        _set_profile_default(\$refDBwanted, "KSGP", qw(refDB));
+        _set_profile_default(\$doBlasting_pre, "lambda", qw(doBlast simBasedTaxo taxAligner));
+        _set_profile_default(\$noChimChk, 1, qw(deactivateChimeraCheck));
+    }
+    $profilePreset = $p;
+}
+
+sub validate_output_directory_compatibility {
+    my ($dir, $will_reset) = @_;
+    return unless defined $dir && $dir ne "" && -d $dir;
+    opendir my $dh, $dir or die "Cannot inspect output directory $dir: $!\n";
+    my @entries = grep { $_ ne "." && $_ ne ".." } readdir($dh);
+    closedir $dh;
+    return unless @entries;
+    my $has_lotus_log = -s File::Spec->catfile($dir, "LotuSLogS", "LotuS_run.log");
+    my $has_schema = -s File::Spec->catfile($dir, "LotuS_output_schema_version.txt");
+    my $has_known_outputs = -e File::Spec->catfile($dir, "OTU.txt") || -e File::Spec->catfile($dir, "OTU.fna") || -e File::Spec->catfile($dir, "OTU.biom");
+    if ($will_reset && !$has_lotus_log && !$has_schema && !$has_known_outputs) {
+        my $msg = "Output directory '$dir' already exists and contains files, but does not look like a LotuS output directory. Refusing to delete a potentially unrelated directory. Choose an empty -o directory or remove it manually.\n";
+        if ($strictMode) { die $msg; } else { warn "WARNING:: $msg"; }
+    }
+}
+
+sub _open_maybe_gzip {
+    my ($file) = @_;
+    return undef unless defined $file && $file ne "" && -f $file;
+    my $fh;
+    if ($file =~ /\.gz$/) { open($fh, "-|", "gzip", "-cd", $file) or return undef; }
+    else { open($fh, "<", $file) or return undef; }
+    return $fh;
+}
+
+sub fastq_validation_scan {
+    my ($file, $max_records) = @_;
+    $max_records ||= 5000;
+    my @problems; my @warnings; my %seen; my $records = 0;
+    my $fh = _open_maybe_gzip($file);
+    return (0, ["Cannot open FASTQ file for validation: $file"], []) unless $fh;
+    while ($records < $max_records) {
+        my $h = <$fh>; last unless defined $h;
+        my $seq = <$fh>; my $plus = <$fh>; my $qual = <$fh>;
+        $records++;
+        if (!defined($seq) || !defined($plus) || !defined($qual)) { push @problems, "Truncated FASTQ record $records in $file"; last; }
+        chomp($h,$seq,$plus,$qual);
+        push @problems, "Malformed FASTQ header at record $records in $file" unless $h =~ /^\@\S+/;
+        push @problems, "Malformed FASTQ plus-line at record $records in $file" unless $plus =~ /^\+/;
+        push @problems, "FASTQ sequence/quality length mismatch at record $records in $file" unless length($seq) == length($qual);
+        my ($id) = $h =~ /^\@(\S+)/;
+        if (defined $id) {
+            $id =~ s/[\/ ][12](?::.*)?$//;
+            if ($seen{$id}++) { push @warnings, "Duplicate FASTQ ID observed in first $records records of $file: $id"; }
+        }
+        last if @problems >= 10;
+    }
+    close $fh;
+    push @problems, "No FASTQ records found in $file" if $records == 0;
+    return ($records, \@problems, \@warnings);
+}
+
+sub fasta_validation_scan {
+    my ($file, $max_records) = @_;
+    $max_records ||= 5000;
+    my @problems; my @warnings; my %seen; my $records = 0; my $current = ""; my $saw_seq = 0;
+    my $fh = _open_maybe_gzip($file);
+    return (0, ["Cannot open FASTA file for validation: $file"], []) unless $fh;
+    while (my $line = <$fh>) {
+        chomp $line;
+        if ($line =~ /^>(\S+)/) {
+            push @problems, "FASTA entry '$current' has no sequence in $file" if $current ne "" && !$saw_seq;
+            $current = $1; $saw_seq = 0; $records++;
+            if ($seen{$current}++) { push @warnings, "Duplicate FASTA ID observed in $file: $current"; }
+            last if $records >= $max_records;
+        } elsif ($current ne "" && $line =~ /\S/) {
+            $saw_seq = 1;
+            push @problems, "Unexpected characters in FASTA sequence for $current in $file" if $line =~ /[^A-Za-z*.-]/;
+        } elsif ($current eq "" && $line =~ /\S/) {
+            push @problems, "FASTA content before first header in $file";
+        }
+        last if @problems >= 10;
+    }
+    close $fh;
+    push @problems, "FASTA entry '$current' has no sequence in $file" if $current ne "" && !$saw_seq;
+    push @problems, "No FASTA entries found in $file" if $records == 0;
+    return ($records, \@problems, \@warnings);
+}
+
+sub _collect_input_files_for_validation {
+    my ($map_href) = @_;
+    my @files;
+    my @direct = grep { defined($_) && $_ ne "" } @inputArray;
+    if (@direct == 1 && -d $direct[0]) {
+        opendir my $dh, $direct[0] or return @files;
+        @files = map { File::Spec->catfile($direct[0], $_) } grep { /\.(?:f(?:ast)?q|fna|fa|fasta)(?:\.gz)?$/i } readdir($dh);
+        closedir $dh;
+    } else {
+        @files = grep { -f $_ } @direct;
+    }
+    return @files;
+}
+
+sub validate_inputs_before_execution {
+    my ($map_href, $comb_href) = @_;
+    my @problems; my @warnings;
+    my @files = _collect_input_files_for_validation($map_href);
+    if (!@files && defined($input) && $input ne "" && !-d $input) {
+        push @problems, "No readable input FASTA/FASTQ files found from -i $input";
+    }
+    my @fq = grep { /\.(?:f(?:ast)?q)(?:\.gz)?$/i } @files;
+    my @fa = grep { /\.(?:fna|fa|fasta)(?:\.gz)?$/i } @files;
+    my %fq_counts;
+    for my $f (@fq[0 .. ($#fq < 9 ? $#fq : 9)]) {
+        my ($n,$p,$w) = fastq_validation_scan($f, 5000);
+        $fq_counts{$f} = $n;
+        push @problems, @$p;
+        push @warnings, @$w;
+    }
+    if (@inputArray == 2 && -f $inputArray[0] && -f $inputArray[1]) {
+        my ($n1,$p1,$w1) = fastq_validation_scan($inputArray[0], 5000);
+        my ($n2,$p2,$w2) = fastq_validation_scan($inputArray[1], 5000);
+        push @problems, @$p1, @$p2; push @warnings, @$w1, @$w2;
+        push @problems, "Paired-end validation failed: first $n1 R1 records but $n2 R2 records in approximate scan" if $n1 != $n2;
+    }
+    for my $f (@fa[0 .. ($#fa < 4 ? $#fa : 4)]) {
+        my ($n,$p,$w) = fasta_validation_scan($f, 5000);
+        push @problems, @$p;
+        push @warnings, @$w;
+    }
+
+    if ($map_href && ref($map_href) eq 'HASH') {
+        my %samples = map { $_ => 1 } grep { $_ ne '#SampleID' } keys %$map_href;
+        for my $s (keys %samples) {
+            if ($s =~ /[^A-Za-z0-9_.]/) { push @problems, "Mapping SampleID '$s' contains unsupported characters; use letters, numbers, underscore or dot"; }
+        }
+
+        my @hdr = exists($map_href->{'#SampleID'}) ? @{$map_href->{'#SampleID'}} : ();
+        my $seq_col = -1;
+        for (my $i=0; $i<@hdr; $i++) {
+            if ($hdr[$i] eq 'fastqFile' || $hdr[$i] eq 'fnaFile') { $seq_col = $i; last; }
+        }
+        if ($seq_col >= 0) {
+            for my $s (sort keys %samples) {
+                my $entry = $map_href->{$s}->[$seq_col] // "";
+                if ($entry eq "") { push @problems, "Mapping SampleID '$s' has an empty sequence-file entry in fastqFile/fnaFile column"; next; }
+                for my $mf (split(/,/, $entry)) {
+                    next if $mf eq "";
+                    my $path = $mf;
+                    $path = File::Spec->catfile($inputArray[0], $mf) if @inputArray == 1 && -d $inputArray[0] && !-f $path;
+                    push @problems, "Mapping SampleID '$s' refers to missing sequence file '$mf'" unless -f $path;
+                }
+            }
+        } elsif (@files) {
+            my $matched = 0;
+            for my $f (@files) {
+                my $b = basename($f); $b =~ s/\.(?:gz)$//i; $b =~ s/\.(?:fastq|fq|fna|fa|fasta)$//i; $b =~ s/(?:_R?[12]|\.[12])$//i;
+                $matched++ if exists $samples{$b};
+            }
+            if ($matched == 0 && scalar(keys %samples) > 0 && @files <= 20) {
+                push @warnings, "No input file basenames matched mapping SampleIDs in the approximate validation scan. This may be valid for demultiplexed/barcoded runs, but should be checked.";
+            }
+        }
+    }
+
+    if (@warnings) {
+        printL("Input validation warnings:\n" . join("\n", map { " - $_" } @warnings) . "\n", "w");
+    }
+    if (@problems) {
+        my $msg = "Input validation failed before execution:\n" . join("\n", map { " - $_" } @problems) . "\n";
+        if ($strictMode) { printL($msg, 71); } else { printL($msg, "w"); }
+    }
+}
+
+sub validate_refdb_tax_overlap {
+    my ($db, $tax, $max_ids) = @_;
+    $max_ids ||= 5000;
+    return (undef, "") unless defined $db && defined $tax && -s $db && -s $tax;
+    my (%dbids, %taxids); my ($ndb, $ntax) = (0,0);
+    my $dfh = _open_maybe_gzip($db) or return (undef, "Cannot open reference FASTA $db");
+    while (my $l = <$dfh>) { if ($l =~ /^>(\S+)/) { $dbids{$1}=1; last if ++$ndb >= $max_ids; } }
+    close $dfh;
+    open my $tfh, "<", $tax or return (undef, "Cannot open taxonomy file $tax");
+    while (my $l = <$tfh>) { next if $l =~ /^\s*$/; my ($id) = split(/\t|\s+/, $l); next unless defined $id && $id ne ""; $taxids{$id}=1; last if ++$ntax >= $max_ids; }
+    close $tfh;
+    return (undef, "Reference/taxonomy overlap check had no IDs to compare for $db and $tax") if !$ndb || !$ntax;
+    my $overlap = 0; for my $id (keys %dbids) { $overlap++ if exists $taxids{$id}; }
+    return ($overlap / ($ndb < $ntax ? $ndb : $ntax), "");
+}
+
+sub schema_metadata_text {
+    return "LotuS_output_schema_version $LotuS_output_schema_version\nLotuS_version $selfID\nGenerated " . strftime("%Y-%m-%d %H:%M:%S %z", localtime) . "\n";
+}
+
+sub write_schema_metadata {
+    return unless defined($outdir) && $outdir ne "" && -d $outdir;
+    atomic_write_text(File::Spec->catfile($outdir, "LotuS_output_schema_version.txt"), schema_metadata_text());
+    atomic_write_text(File::Spec->catfile($logDir, "output_schema.txt"), schema_metadata_text()) if defined($logDir) && $logDir ne "" && -d $logDir;
+    for my $f (File::Spec->catfile($outdir,"OTU.txt"), File::Spec->catfile($outdir,"OTU_psRef.txt"), $RDP_hierFile, $SIM_hierFile, File::Spec->catfile($outdir,"hierachy_cnt.tax")) {
+        next unless defined $f && $f ne "" && -e $f;
+        atomic_write_text("$f.schema", schema_metadata_text() . "For_table $f\n");
+    }
+    atomic_write_text("$cpMapFile.schema", schema_metadata_text() . "For_mapping_output $cpMapFile\n") if defined($cpMapFile) && $cpMapFile ne "" && -e $cpMapFile;
 }
 
 sub dependency_report {
@@ -6195,7 +6504,7 @@ sub dependency_report {
         my $status = (-x $path || -f $path) ? "OK" : "MISSING";
         push @rows, sprintf("%-12s %-8s %s", $name, $status, $path);
     }
-    my $report = "LotuS3 dependency report\n" . join("\n", @rows) . "\n";
+    my $report = "LotuS3 dependency report\nLotuS_output_schema_version $LotuS_output_schema_version\n" . join("\n", @rows) . "\n";
     printL($report, 0) if $verbosity > 1;
     my $out = $depReportFile ne "" ? $depReportFile : "$logDir/dependency_report.txt";
     atomic_write_text($out, $report) if defined($logDir) && $logDir ne "";
@@ -6207,6 +6516,8 @@ sub write_repro_manifest {
     push @lines, "LotuS3 reproducibility manifest";
     push @lines, "Date: " . strftime("%Y-%m-%d %H:%M:%S %z", localtime);
     push @lines, "Version: $selfID";
+    push @lines, "LotuS_output_schema_version: $LotuS_output_schema_version";
+    push @lines, "Profile preset: " . (($profilePreset // "") eq "" ? "none" : $profilePreset);
     push @lines, "Command: $cmdCall";
     push @lines, "Working directory: " . (abs_path(".") // ".");
     push @lines, "Output directory: $outdir";
