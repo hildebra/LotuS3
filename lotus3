@@ -141,6 +141,8 @@ my $FaProTax        = undef; #faprotax -> functional annotations from taxonomy~~
 #my $citations = "$selfID: Hildebrand F, Tadeo RY, Voigt AY, Bork P, Raes J. 2014. LotuS: an efficient and user-friendly OTU processing pipeline. Microbiome 2: 30.\n";
 my $citations = "$selfID: Özkurt E, Fritscher J, et al. (2022) LotuS2: An ultrafast and highly accurate tool for amplicon sequencing analysis. Microbiome 10:176  doi:10.1186/s40168-022-01365-1.\n";
 my $noChimChk = 0; #deactivate all chimera checks 1=no nothing, 2=no denovo, 3=no ref; default = 0
+my $forceRefChim = 0; #force reference-based chimera check even for UPARSE(1)/DADA2(7); default 0=off, 1=on
+my $chimRefDBcust = ""; #custom fasta for ref-based chimera check (overrides built-in UCHIME_REFDB); empty=use default
 my $mainLogFile = "";
 my $osname      = $^O;
 my $verbosity = 1;
@@ -358,6 +360,8 @@ GetOptions(
 	"intargetDB=s"          => \$custKeepOTUDB,
 	"flash_param=s"         => \$flashCustom,
 	"deactivateChimeraCheck=i"=> \$noChimChk,
+	"refChimera=i"           => \$forceRefChim,
+	"refChimeraDB=s"         => \$chimRefDBcust,
 	#"VsearchChimera=i"		=> \$useVsearch,
 	"useVsearch=i"          => \$useVsearch,
 	"removePhiX=i"          => \$doPhiX,
@@ -1609,7 +1613,8 @@ sub chimera_ref_rem($) {
 	my $iniEntries = cntFastaEntrs($otusFA);
 	my $progUsed = ""; my $cmd="";
 	my $outfile = $otusFA.".tmp.fa";
-    if ($ClusterPipe == 1 ||$ClusterPipe == 7 || $UCHIME_REFDB eq ""  || !-f $UCHIME_REFDB ||  $noChimChk == 1 ){
+    if ( $noChimChk == 1 || $noChimChk == 3 || $UCHIME_REFDB eq "" || !-f $UCHIME_REFDB ||
+         ( ($ClusterPipe == 1 || $ClusterPipe == 7) && $forceRefChim == 0 ) ){
 		printL "No ref based chimera detection\n";
 		return $chimOut;
 	}
@@ -2501,6 +2506,10 @@ sub readPaths {    #read tax databases and setup correct usage
     }
     elsif ( $ampliconType eq "ITS1" ) {
         $UCHIME_REFDB = $UCHIME_REFits1;
+    }
+    if ( $chimRefDBcust ne "" ) {
+        $UCHIME_REFDB = $chimRefDBcust;
+        printL "Using custom reference DB for chimera checking:\n$UCHIME_REFDB\n", 0;
     }
     if ( !-e $UCHIME_REFDB ) {
         printL "Requested DB for uchime ref at\n$UCHIME_REFDB\ndoes not exist; LotuS will run without reference based ${OTU_prefix} chimera checking.\n","w";
