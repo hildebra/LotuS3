@@ -1,225 +1,188 @@
-<img src="images/lotus3_highres.png" alt="LotuS3 logo" width="350"/>
+<p align="center">
+  <img src="images/lotus3_highres.png" alt="LotuS3 logo" width="350"/>
+</p>
 
-[![Anaconda-Server Badge](https://anaconda.org/bioconda/lotus3/badges/downloads.svg)](https://anaconda.org/bioconda/lotus3)
-[![Anaconda-Server Badge](https://anaconda.org/bioconda/lotus3/badges/latest_release_relative_date.svg)](https://anaconda.org/bioconda/lotus3)
+<p align="center">
+  <a href="https://anaconda.org/bioconda/lotus3"><img src="https://anaconda.org/bioconda/lotus3/badges/downloads.svg" alt="Bioconda downloads"/></a>
+  <a href="https://anaconda.org/bioconda/lotus3"><img src="https://anaconda.org/bioconda/lotus3/badges/latest_release_relative_date.svg" alt="Latest Bioconda release"/></a>
+</p>
 
-LotuS3 is a amplicon sequencing pipeline, that is programmed to be lightweight, easy to use, fast without comprimising the quality of reconstructing microbial communitites. It supports 16S, 18S and ITS amplicons, and support for other amplicon targets is available. Currently five different sequence clustering algorithms (DADA2, uparse, unoise3, cd-hit, vsearch) are supported as well as multiple options to assigning taxonomic annotations. LotuS3 output can be imported directly into R or as text file into other programs.
-Full documentation on http://lotus2.earlham.ac.uk/
+# LotuS3
 
-### REQUIREMENTS
-- Perl 5 (should be available on most linux distributions)
-- C++ compiler supporting C++17
-- R
-- java
+LotuS3 is a lightweight, fast and configurable pipeline for amplicon sequencing analysis. It supports common marker-gene targets including 16S, 18S and ITS, and can be configured for additional amplicons. LotuS3 integrates several OTU/ASV inference methods, including DADA2, UPARSE, UNOISE3, CD-HIT and VSEARCH, and provides multiple options for taxonomic annotation. Outputs include abundance tables, representative sequences, taxonomy assignments, run logs and citation files, and can be imported into R or other downstream analysis tools.
 
-These can be installed via 
-```{sh}
-conda install -c bioconda r-base usearch wget perl rdp_classifier
-```
+Full documentation is available in this repository under [`docs/`](docs/). The historical documentation is available at: http://lotus2.earlham.ac.uk/
 
-### INSTALL LotuS3
-LotuS3 can be installed via conda https://anaconda.org/bioconda/LotuS3 
-```{sh}
-conda install -c conda-forge -c bioconda LotuS3
-```
-If there should be problems with the conda solver, try:
-```{sh}
-conda create -c conda-forge -c bioconda --strict-channel-priority -n LotuS3 LotuS3
+## Contents
+
+- [Installation](#installation)
+- [Check your installation](#check-your-installation)
+- [Inputs](#inputs)
+- [Outputs](#outputs)
+- [Configured example run](#configured-example-run)
+- [Documentation](#documentation)
+- [Updating LotuS3](#updating-lotus3)
+- [Citation](#citation)
+- [Acknowledgements](#acknowledgements)
+
+## Installation
+
+### Recommended installation: Bioconda
+
+The recommended way to install LotuS3 is through Bioconda:
+
+```bash
+conda create -n LotuS3 -c conda-forge -c bioconda --strict-channel-priority LotuS3
 conda activate LotuS3
 ```
 
-Alternatively, often the github contains pre-release versions and can be installed via:
-```{sh}
+If you already have a suitable conda environment, you can also install LotuS3 directly into it:
+
+```bash
+conda install -c conda-forge -c bioconda LotuS3
+```
+
+LotuS3 requires Perl 5, a C++17-capable compiler, R and Java. These dependencies are normally handled by the conda installation or by the GitHub autoinstaller described below.
+
+For more details, see [`docs/installation.md`](docs/installation.md).
+
+### Developer or pre-release installation: GitHub
+
+The GitHub repository may contain pre-release versions and development updates that are not yet available through Bioconda.
+
+```bash
 git clone https://github.com/hildebra/LotuS3.git
 cd LotuS3
 perl helpers/autoInstall.pl
 ```
 
-All required software will be downloaded and installed in this directory.
+The autoinstaller downloads and installs the required software and databases inside the LotuS3 directory. If you want to install software or databases to custom locations, see [`docs/installation.md`](docs/installation.md).
 
-If you want to install software and databases to other locations, follow installation instructions on: 
-http://lotus2.earlham.ac.uk/main.php?site=documentation
+## Check your installation
 
-LotuS3 packs a static compiled linux sdm binary, this should be useable out of the box. However, to manually compile **sdm**  (the autoinstaller can also do this) go to the lotus subdirectory *sdm_src* and run 
-**make** to compile the sdm binary. Next copy the binary into the lotus directory using **cp**. For using MACs and LotuS3, this would be a requirement as the static binary will only work Linux systems.
-```{sh}
-cd sdm_src
-make
-cp sdm ../sdm
+After installation, run the built-in self-test:
+
+```bash
+lotus3 --self-test
 ```
 
-###  UPDATE LotuS3
-If you installed LotuS3 via "git clone", you can get the latest release via "git pull".
-LotuS3 has a built in mechanism to upgrade LotuS3, so that properitary programs & databases (once installed) don't have to be downloaded again. To use this feature a) install LotuS3 for the first time using the autoinstaller. 
-Once you know or want to check for new updates, simply excecute the autoinstaller again and you will be prompted if LotuS3 should be updated. In case no new updates are available, the autoinstaller will exit without making changes, so this function can be used frequently. New updates will be avaialble from github (https://github.com/hildebra/LotuS3).
+If you installed LotuS3 directly from GitHub and are running it from the repository directory, the executable may be invoked as:
 
-## EXAMPLES & CONFIGURATION
-To test your installation, run a minimal example using test files distributed with LotuS3
-*Note: files can be found relative to the LotuS3 executable. If you used a conda installation, use "which LotuS3", the databases and examples will be present in the shared conda folder*
-:
-```{sh}
-./lotus3 -i Example/ -m Example/miSeqMap.sm.txt -o myTestRun
+```bash
+./lotus3 --self-test
 ```
 
-Note that you should have seen a warning that no PCR primers were provided - this is expected. LotuS3 will try to choose default options, like using RDPclassifier for taxonomic annotations. While RDP is great in our opinion, it does not assign species level annotations, for that we need a similarity based comparison to a reference database.
+The self-test checks the LotuS3 executable, helper tools, selected databases and example workflows. Some optional database indices may be generated during the first full pipeline run; missing optional indices should be treated as warnings rather than fatal installation errors.
 
-In the next example, we will explicitly configure the read filtering by providing sdm_miSeq2.txt, explicitly defining this to be 16S data from an illumina miSeq machine, to remove PCR primers used in this experiment, to use DADA2 instead of UPARSE clustering algorithm, to use alginments of ASVs against SILVA reference database instead of RDPclassifier taxonomic annotations:
-```{sh}
-./lotus3 -i Example/ -m Example/miSeqMap.sm.txt -o myTestRun2 -s configs/sdm_miSeq2.txt -p miSeq -amplicon_type SSU -forwardPrimer GTGYCAGCMGCCGCGGTAA -reversePrimer GGACTACNVGGGTWTCTAAT -CL dada2 -refDB SLV -taxAligner lambda
-```
-Building the lambda formatted SILVA reference database will take a long time the first time you run this. Please ensure that during installation you selected that the SILVA database will be installed (otherwise this example will not work).
+If the self-test completes successfully, your installation is ready for normal use. See [`docs/troubleshooting.md`](docs/troubleshooting.md) if the self-test fails.
 
-There are >60 flags with which you can further customize each LotuS3 run, but we try to optimize LotuS3 to work pretty well with just default options. Please run ./lotus3 to see these options.
+## Inputs
 
-### Custom Reference Database
-To use your own reference database for LotuS3, you can employ the flags -refDB and -tax4refDB to supply a fasta formated reference database and tab-delimited taxonomy file, respectively. The format of these is the same as in the database already installed with the LotuS3 autoinstall, e.g. have a look at DB/SLV_138_SSU.fasta and DB/SLV_138_LSU.tax for examples. In the \*.tax file, the levels are fixed to 7 levels (kingdom, phylum, class, order, family, genus, species). These are demarked by tags k__; p__ ; etc and separated by a ";" character. In case tax information is missing, use "?" to inset this information, for example:
+A typical LotuS3 run requires:
 
-FJ588878	k__Eukaryota; p__Phragmoplastophyta; c__?; o__?; f__?; g__?; s__Osyris wightiana
+- an input directory containing FASTQ files;
+- a mapping file linking sample IDs to sequencing files and sample metadata;
+- optionally, an `sdm` read-filtering configuration file;
+- optionally, forward and reverse primer sequences;
+- optionally, a selected reference database and taxonomy assignment method.
 
-Let's simulate using SILVA138 (SLV) as custom database now, with vsearch as search algorithm and uparse OTU clusering, using the following example (this might take some time )
-*Note: databases are installed relative to the lotus3 excecutable (see above)*:
-```{sh}
-./lotus3 -tax4refDB DB/SLV_138_SSU.tax -refDB DB/SLV_138_SSU.fasta -i Example/ -m Example/miSeqMap.sm.txt -o myTestRun3 -forwardPrimer GTGYCAGCMGCCGCGGTAA -reversePrimer GGACTACNVGGGTWTCTAAT -CL uparse -taxAligner vsearch 
-```
+Mapping files define how sequencing files are assigned to biological samples. See [`docs/mapping_files.md`](docs/mapping_files.md) for details.
 
-We can make this even more complicated, by having both HitDB and SLV as complimentary databases searched, using either
-```{sh}
-./lotus3 -tax4refDB DB/SLV_138_SSU.tax,DB/HITdb/HITdb_taxonomy.txt -refDB DB/SLV_138_SSU.fasta,DB/HITdb/HITdb_sequences.fna -i Example/ -m Example/miSeqMap.sm.txt -o myTestRun3 -forwardPrimer GTGYCAGCMGCCGCGGTAA -reversePrimer GGACTACNVGGGTWTCTAAT -CL uparse -taxAligner vsearch 
-```
-or (this is a shortcut, possible because GG2 and SLV are in-built):
+## Outputs
 
-```{sh}
-./lotus3 -refDB SLV,HITdb -i Example/ -m Example/miSeqMap.sm.txt -o myTestRun3 -forwardPrimer GTGYCAGCMGCCGCGGTAA -reversePrimer GGACTACNVGGGTWTCTAAT -CL uparse -refDB SLV -taxAligner vsearch 
-```
+LotuS3 produces the main files required for downstream amplicon analysis, including:
 
-Note that "-refDB GG2,SLV" and "-refDB SLV,GG2" would likely give a different result, as GG2 is the primary annotation source in the first, SLV is primary in the second case.
+- OTU or ASV abundance tables;
+- representative OTU/ASV sequences;
+- taxonomy annotations;
+- quality-filtering and read-processing summaries;
+- run logs;
+- method-specific citation files.
 
-###  PacBio CCS amplicon sequence processing with LotuS3
+The exact output files depend on the selected clustering method, reference database, taxonomy aligner and post-processing options. Each run records relevant settings and citations in the LotuS3 output directory. See [`docs/outputs.md`](docs/outputs.md) for more detail.
 
-When using PacBio CCS (HiFi) amplicons, set the ** -p PacBio ** flag first, this will be set important default options that in our hands work relatively well for PacBio. As clustering algortithm, CD-HIT might be a good choice because it's independent of read quality and read length differences, but in the end any of the clusterings will work.
+## Configured example run
 
-However, you might want to adopt the sdm read quality filtering options further. Have a look at either **configs/sdm_PacBio_ITS.txt** or **configs/sdm_PacBio_LSSU.txt**, these are the default configuration for ITS or SSU/LSU PacBio amplicons, respectively. Parameters can be freely modified, but of specific importance are:
-```
-minSeqLength	700
-maxSeqLength	2000
-TruncateSequenceLength	-1
-```
+The self-test is the recommended first check after installation. Once the self-test succeeds, you can run LotuS3 on the bundled example data using an explicitly configured 16S/DADA2/SILVA workflow:
 
-The first two describe the length distribution you expect of your amplicon (e.g. full length 16S would be ~1500 bp). Narrowing this further down can help avoid false positives, but beeing too narrow will also remove some natural biological variation. The range 700-1500bp in the LSSU file is chosen to be inclusive, but if you know you have full length 16S, 1300-1600 might be a better choice. For 18S amplicons, 1600-2000 might be a better choice. It's important to note that **TruncateSequenceLength -1** deactivates sequence truncation. This option is very important for illumina amplicons, because truncating amplicons is extremely important for DADA2 and UPARSE and UNOISE3 clusterings (please refer to [R Edgars excellent UPARSE paper](https://www.nature.com/articles/nmeth.2604)). However, since PacBio reads do not have a length dependent decay in quality scores and under the assumption that the complete amplicon is sequenced, truncating sequences for the clustering step is not necessary.
-
-Also note the option 
-```
-ExtensivePrimerChecks	T
-RejectSeqWithoutFwdPrim	T
-RejectSeqWithoutRevPrim	T
-```
-This options are important to remove faulty amplicons that can result from longer PCRs and suboptimal primers, PCR and sample conditions and faulty CCS derivations. This doesn't need to be the case for your experiment, but sometimes they occur and hence we decided to use a very strict quality filtering for PacBio data. Note that you need to pass your amplicon primers to LotuS3, otherwise all reads will be removed during quality filtering (**RejectSeqWithoutFwdPrim	T** option).
-
-So to summarize, maybe create your copy of the default **configs/sdm_PacBio_ITS.txt** or **configs/sdm_PacBio_LSSU.txt**, modify it to your needs, and run LotuS3 with a command similar to:
-
-```{sh}
-./lotus3 -i /my/PacBioDir/  -s configs/sdm_PacBio_my_copy.txt  -m PacBioDir/my_PacBio.map -o /my/PacBio/LotuS3 -p PacBio -id 0.97 -CL cdhit -refDB SLV  -forwardPrimer XYZ -reversePrimer XYZ ...
+```bash
+./lotus3 -i Example/ \
+  -m Example/miSeqMap.sm.txt \
+  -o myTestRun \
+  -s configs/sdm_miSeq2.txt \
+  -p miSeq \
+  -amplicon_type SSU \
+  -forwardPrimer GTGYCAGCMGCCGCGGTAA \
+  -reversePrimer GGACTACNVGGGTWTCTAAT \
+  -CL dada2 \
+  -refDB SLV \
+  -taxAligner lambda
 ```
 
-## Troubleshooting
+This example explicitly sets read filtering, defines the data as 16S Illumina MiSeq data, removes the supplied PCR primers, uses DADA2 for ASV inference, and annotates ASVs against the SILVA reference database using the lambda aligner.
 
-### Troubleshooting the Installation
+Building the lambda-formatted SILVA reference database can take a long time the first time this workflow is run. Make sure that the SILVA database was selected during installation if you want to run this example.
 
-If you install from github, lotus3 has an autoinstall script - running `perl helpers/autoInstall.pl` should be enough after you have cloned the repository. 
-But listed below are some problems you might run into (some are similar to the issues from the Troubleshooting section of [Lotus2](https://lotus2.earlham.ac.uk/main.php?site=documentation)). 
+LotuS3 has many additional command-line options, but the defaults are chosen to work well for common amplicon workflows. To list available options, run:
 
- - Warning about RScript: you need a working version of R and RScript.
- - Warning about no java (or openjdk): you need a working version of java for the RDP classifier / Postfilter.
- - Can't locate FindBin.pm in @INC: this is a perl error telling you that perl can't find a module that should be in `PERL5LIB`. Run `perl -e 'print join(":", @INC), "\n"'
-` when perl is working as expected to find what `PERL5LIB` is meant to be. Then make sure any export statements (such as in your .bashrc) e.g. `export PERL5LIB=<new list of paths>` includes the expected path for lotus3.
- - Error from RScript in the LULU.R file: R may try to download some packages at this point, and if you don't have an internet connection the first time you run this, it will not work.
- - DADA2: From previous experience (see Lotus2 documentation) this is easier to install manually rather than through the autoinstaller. E.g. `mamba install -c conda-forge -c bioconda bioconductor-dada2` if you are working in a conda environment. 
+```bash
+./lotus3
+```
 
-The Lotus3 autoinstaller works well inside a conda environment so you may choose to create an environment, run the autoinstaller, and possibly then manually troubleshoot the remaining parts of the installation. Re-running the autoinstall script is quite safe; if the autoinstaller hits a problem that you manually fix, re-running the autoinstaller should continue from the point that was left off. 
+For conda installations, the executable may be available on your path as `lotus3`. To locate the executable and associated shared files, use:
 
-### Troubleshooting the Example
+```bash
+which lotus3
+```
 
- - You may need approximately 4GB of memory, else you will get an OOM error and the program will halt. 
+## Documentation
 
-## Publications related to LotuS3
-LotuS2: https://www.biorxiv.org/content/10.1101/2021.12.24.474111v1
+The README is intentionally short. Detailed documentation is split across the [`docs/`](docs/) folder:
 
-offtarget removal: https://microbiomejournal.biomedcentral.com/articles/10.1186/s40168-021-01012-1
+- [`docs/installation.md`](docs/installation.md) - installation routes, dependencies, autoinstaller use and manual `sdm` compilation;
+- [`docs/mapping_files.md`](docs/mapping_files.md) - mapping file purpose, minimal structure and common checks;
+- [`docs/outputs.md`](docs/outputs.md) - expected output categories and where to find run-level information;
+- [`docs/custom_reference_databases.md`](docs/custom_reference_databases.md) - custom FASTA/taxonomy databases and multi-database annotation;
+- [`docs/pacbio.md`](docs/pacbio.md) - PacBio CCS/HiFi amplicon processing;
+- [`docs/troubleshooting.md`](docs/troubleshooting.md) - installation, self-test and runtime troubleshooting;
+- [`docs/citations.md`](docs/citations.md) - LotuS3, third-party software and database citations.
 
-LotuS: http://www.microbiomejournal.com/content/2/1/30
+## Updating LotuS3
 
-## Acknowledgements 
-LotuS3 was developed at Quadram Institute Bioscience (QIB) & Earlham Institaute (EI), Norwich, UK. Various members of the Hildebrand group contributed to the pipelines (see publication Özkurt et al., 2022).
-(c) Falk.Hildebrand {at} gmail.com
+If LotuS3 was installed with `git clone`, update the code with:
 
-**Please cite LotuS3 with:**
+```bash
+git pull
+```
 
-**Pipeline** - Özkurt E, Fritscher J, et al. (2022) LotuS2: An ultrafast and highly accurate tool for amplicon sequencing analysis. Microbiome 10:176  doi:10.1186/s40168-022-01365-1.
+LotuS3 also has a built-in update mechanism through the autoinstaller. If LotuS3 was first installed with:
 
-**offtarget removal** - Bedarf JR, Beraza N, Khazneh H, Özkurt E, et al (2021) Much ado about nothing? Off-target amplification can lead to false-positive bacterial brain microbiome detection in healthy and Parkinson’s disease individuals. Microbiome ;9:75.
+```bash
+perl helpers/autoInstall.pl
+```
 
-We would like to acknowledge the following proprietary software, that is used in LotuS3. Please acknowledge these if your LotuS3 run was using them (listed in LotuSLogS/citations.txt for each LotuS3 run):
+then running the autoinstaller again checks for updates. Previously downloaded proprietary programs and databases do not need to be downloaded again. If no updates are available, the autoinstaller exits without making changes, so it can be run periodically.
 
-* **DADA2** - Callahan, B., McMurdie, P., Rosen, M. et al. 2016. DADA2: High resolution sample inference from Illumina amplicon data. Nat Methods, 13. 581–583 (2016).
+More installation and update details are available in [`docs/installation.md`](docs/installation.md).
 
-* **UPARSE** - Edgar RC. 2013. UPARSE: highly accurate OTU sequences from microbial amplicon reads. Nat Methods, 10, 996–998 (2013).
+## Citation
 
-* **VSEARCH** - Rognes T, Flouri T, Nichols B, Quince C, Mahé F.2016. VSEARCH: a versatile open source tool for metagenomics PeerJ. vol. 4 e2584.
+If you use LotuS3, please cite:
 
-* **swarm** - Mahé F, Rognes T, Quince C, de Vargas C, Dunthorn M. 2014. Swarm: robust and fast clustering method for amplicon-based studies. PeerJ 2: e593.
+**Pipeline** - Özkurt E, Fritscher J, et al. (2022) LotuS2: An ultrafast and highly accurate tool for amplicon sequencing analysis. *Microbiome* 10:176. doi:10.1186/s40168-022-01365-1.
 
-* **CD-HIT** - Fu L, Niu B, Zhu Z, Wu S, Li W. 2012. CD-HIT: Accelerated for clustering the next-generation sequencing data. Bioinformatics 28: 3150–3152.
+**Off-target removal** - Bedarf JR, Beraza N, Khazneh H, Özkurt E, et al. (2021) Much ado about nothing? Off-target amplification can lead to false-positive bacterial brain microbiome detection in healthy and Parkinson's disease individuals. *Microbiome* 9:75.
 
-* **uchime** - Edgar RC, Haas BJ, Clemente JC, Quince C, Knight R. 2011. UCHIME improves sensitivity and speed of chimera detection. Bioinformatics 27: 2194–200.
+LotuS3 writes method-specific citations for each run to:
 
-* **RDP classifier** - Wang Q, Garrity GM, Tiedje JM, Cole JR. 2007. Naive Bayesian classifier for rapid assignment of rRNA sequences into the new bacterial taxonomy. Appl Env Microbiol 73: 5261–5267; DOI: 10.1128/AEM.00062-07.
+```text
+LotuSLogS/citations.txt
+```
 
-* **lambda aligner** - Hauswedell H, Singer J, Reinert K. 2014. Lambda: the local aligner for massive biological data. Bioinformatics 30: i349–i355. 
+Please also cite the clustering, taxonomy and database tools used in your specific run. See [`docs/citations.md`](docs/citations.md) for the full citation list.
 
-* **Blast+** - Altschul SF, Gish W, Miller W, Myers EW, Lipman DJ. 1990. Basic local alignment search tool. J Mol Biol 215: 403–10.
+## Acknowledgements
 
-* **Clustal Omega** - Sievers F, Wilm A, Dineen D, Gibson TJ, Karplus K, Li W, Lopez R, McWilliam H, Remmert M, Söding J, et al. 2011. Fast, scalable generation of high-quality protein multiple sequence alignments using Clustal Omega. Mol Syst Biol 7: 539.
+LotuS3 was developed at Quadram Institute Bioscience (QIB) and Earlham Institute (EI), Norwich, UK. Various members of the Hildebrand group contributed to the pipeline; see Özkurt et al. (2022).
 
-* **MAFFT** - Katoh K, Standley DM. MAFFT multiple sequence alignment software version 7: improvements in performance and usability. Mol Biol Evol. 2013;30:772–80.
-
-* **fasttree2** - Price MN, Dehal PS, Arkin AP. 2010. FastTree 2--approximately maximum-likelihood trees for large alignments. ed. A.F.Y. Poon. PLoS One 5: e9490.
-
-* **IQ-TREE 2** - Nguyen L-T, Schmidt HA, von Haeseler A, Minh BQ. IQ-TREE: A Fast and Effective Stochastic Algorithm for Estimating Maximum-Likelihood Phylogenies. Mol Biol Evol. 2015;32:268–74.
-
-## Databases
-
-* **SILVA** - Yilmaz P, Parfrey LW, Yarza P, Gerken J, Pruesse E, Quast C, Schweer T, Peplies J, Ludwig W, Glockner FO (2014) The SILVA and "All-species Living Tree Project (LTP)" taxonomic frameworks. Nucleic Acid Res. 42:D643-D648 
-
-* **Greengenes2** - McDonald, D. et al. Greengenes2 unifies microbial data in a single reference tree. Nat Biotechnol 1–4 (2023) doi:10.1038/s41587-023-01845-1.
-
-<!---
-* **Greengenes** - McDonald D, Price MN, Goodrich J, Nawrocki EP, DeSantis TZ, Probst A, Andersen GL, Knight R, Hugenholtz P. 2012. An improved Greengenes taxonomy with explicit ranks for ecological and evolutionary analyses of bacteria and archaea. ISME J 6: 610–8.
---->
-
-* **PR2** - Guillou L, Bachar D, Audic S, et al. The Protist Ribosomal Reference database (PR2): a catalog of unicellular eukaryote small sub-unit rRNA sequences with curated taxonomy. Nucleic Acids Res. 2013;41(Database issue):D597-D604
-
-* **KSGP** -  Alastair Grant, Abdullah Aleidan, Charli S. Davies, et al.(2023) Improved taxonomic annotation of Archaea communities using LotuS2, the Genome Taxonomy Database and RNAseq data.  bioRxiv https://ksgp.earlham.ac.uk/
-
-
-* **HITdb** - Ritari J, Salojärvi J, Lahti L & de Vos WM. Improved taxonomic assignment of human intestinal 16S rRNA sequences by a dedicated reference database. BMC Genomics. 2015 Dec 12;16(1):1056.
-
-* **beetax** - Jones, JC, Fruciano, C, Hildebrand, F, et al. Gut microbiota composition is associated with environmental landscape in honey bees. Ecol Evol. 2018; 8: 441– 451.
-
-
-## ITS specific
-
-* **UNITE ITS chimera DB** - Nilsson et al. 2015. A comprehensive, automatically updated fungal ITS sequence dataset for reference-based chimera control in environmental sequencing efforts. Microbes and Environments 
-
-* **UNITE ITS taxonomical refDB** - Koljalg, Urmas, et al. "Towards a unified paradigm for sequence-based identification of fungi." Molecular Ecology 22.21 (2013): 5271-5277.
-
-* **ITSx** - Bengtsson‐Palme, J., Ryberg, M., Hartmann, M., Branco, S., Wang, Z., Godhe, A., De Wit, P., Sánchez‐García, M., Ebersberger, I., de Sousa, F., Amend, A., Jumpponen, A., Unterseher, M., Kristiansson, E., Abarenkov, K., Bertrand, Y.J.K., Sanli, K., Eriksson, K.M., Vik, U., Veldre, V. and Nilsson, R.H. 2013. Improved software detection and extraction of ITS1 and ITS 2 from ribosomal ITS sequences of fungi and other eukaryotes for analysis of environmental sequencing data. Methods in Ecology and Evolution
-
-
-## Mathematical models
-
-* Puente-Sánchez 2016 - A novel conceptual approach to read-filtering in high-throughput amplicon sequencing studies. Nucleic Acids Res. 2016;44(4):e40. 
-
-## C++ libraries
-
-* **gzip libraries** - (gzstream.h) https://gist.github.com/piti118/1508048 and zlib library (http://www.zlib.net/)
-* **robin_hood hash map libraries** - (robinhood.h) https://github.com/martinus/robin-hood-hashing
+(c) Falk Hildebrand, Falk.Hildebrand {at} gmail.com

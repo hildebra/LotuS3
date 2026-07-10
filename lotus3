@@ -6481,11 +6481,11 @@ sub write_schema_metadata {
     return unless defined($outdir) && $outdir ne "" && -d $outdir;
     atomic_write_text(File::Spec->catfile($outdir, "LotuS_output_schema_version.txt"), schema_metadata_text());
     atomic_write_text(File::Spec->catfile($logDir, "output_schema.txt"), schema_metadata_text()) if defined($logDir) && $logDir ne "" && -d $logDir;
-    for my $f (File::Spec->catfile($outdir,"OTU.txt"), File::Spec->catfile($outdir,"OTU_psRef.txt"), $RDP_hierFile, $SIM_hierFile, File::Spec->catfile($outdir,"hierachy_cnt.tax")) {
-        next unless defined $f && $f ne "" && -e $f;
-        atomic_write_text("$f.schema", schema_metadata_text() . "For_table $f\n");
-    }
-    atomic_write_text("$cpMapFile.schema", schema_metadata_text() . "For_mapping_output $cpMapFile\n") if defined($cpMapFile) && $cpMapFile ne "" && -e $cpMapFile;
+    #for my $f (File::Spec->catfile($outdir,"OTU.txt"), File::Spec->catfile($outdir,"OTU_psRef.txt"), $RDP_hierFile, $SIM_hierFile, File::Spec->catfile($outdir,"hierachy_cnt.tax")) {
+    #    next unless defined $f && $f ne "" && -e $f;
+    #    atomic_write_text("$f.schema", schema_metadata_text() . "For_table $f\n");
+    #}
+    #atomic_write_text("$cpMapFile.schema", schema_metadata_text() . "For_mapping_output $cpMapFile\n") if defined($cpMapFile) && $cpMapFile ne "" && -e $cpMapFile;
 }
 
 sub dependency_report {
