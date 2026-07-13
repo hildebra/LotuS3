@@ -69,3 +69,9 @@ AmpliconShortPE	F
 CheckForMixedPairs	T
 #checks if whole amplicon was reverse-transcribed sequenced (not switched, just reverse translated)
 CheckForReversedSeqs	T
+
+#check if primer misvariants are commonly found, i.e. undetected wooble bases
+PrimerVariantMaxMismatches	3
+PrimerVariantMinCount	20
+PrimerVariantMinPercent	0.1
+PrimerVariantWarningPercent	5

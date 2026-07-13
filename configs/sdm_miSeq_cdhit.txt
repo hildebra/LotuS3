@@ -69,3 +69,8 @@ CheckForReversedSeqs	T
 AmpliconShortPE	T
 
 
+#check if primer misvariants are commonly found, i.e. undetected wooble bases
+PrimerVariantMaxMismatches	3
+PrimerVariantMinCount	20
+PrimerVariantMinPercent	0.1
+PrimerVariantWarningPercent	5

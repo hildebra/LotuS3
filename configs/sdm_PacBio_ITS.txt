@@ -69,3 +69,10 @@ AmpliconShortPE	T
 
 #mostly used for PacBio data: check if  more than once the reverse primer occurrs on reads, if yes, cut length to first fwd-rev primer pairing
 ExtensivePrimerChecks	T
+
+
+#check if primer misvariants are commonly found, i.e. undetected wooble bases
+PrimerVariantMaxMismatches	3
+PrimerVariantMinCount	20
+PrimerVariantMinPercent	0.1
+PrimerVariantWarningPercent	5

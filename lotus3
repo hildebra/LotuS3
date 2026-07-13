@@ -41,7 +41,7 @@ sub systemL; sub uniq; sub printL;sub frame;
 sub command_exists; sub detect_available_cpus; sub ensure_dir; sub safe_remove_tree; sub split_shell_commands; sub shell_quote;
 sub acquire_output_lock; sub release_output_lock; sub atomic_write_text; sub file_signature;
 sub dependency_report; sub validate_reference_databases; sub validate_option_combinations; sub validate_inputs_before_execution; sub validate_output_directory_compatibility; sub apply_profile_preset; sub fastq_validation_scan; sub fasta_validation_scan; sub validate_refdb_tax_overlap; sub write_schema_metadata; sub schema_metadata_text; sub write_repro_manifest;
-sub run_self_test; sub selftest_run_case; sub selftest_validate_output; sub selftest_count_fasta; sub selftest_count_table_rows;
+sub run_self_test; #sub selftest_run_case; sub selftest_validate_output; sub selftest_count_fasta; sub selftest_count_table_rows;
 sub checkLtsVer; sub announce_options;sub announce_self;sub prepLtsOptions; sub usage;
 sub printWarnings; 
 sub readMap; 
@@ -1042,6 +1042,9 @@ sub sdmStep1{
 			#if ($readSdmDereLog =~ m/([\d,]+\/[\d,]+ not passing derep.*)/){
 				#$shrtRpt .= "\n$1";
 			#}
+		}
+		if ($readSdmLog =~ m/(WARNING: Primer variant[^\.]\.)/){
+			$shrtRpt .= "\n$1";
 		}
 		printL( frame("Finished primary read processing with sdm:\n".$shrtRpt."\nFor an extensive report see $mainSDMlog\n",1,3),0 );
 
@@ -5837,96 +5840,6 @@ sub print_nseq($) {
 }
 
 
-
-sub run_self_test {
-    my $script = abs_path($0) // $0;
-    my $example_dir = File::Spec->catdir($RealBin, "Example");
-    my $map = File::Spec->catfile($RealBin, "Example", "miSeqMap.sm.txt");
-    my $sdm_miseq2 = File::Spec->catfile($RealBin, "configs", "sdm_miSeq2.txt");
-    my $cfg = $lotusCfg;
-    $cfg = File::Spec->catfile($RealBin, "lOTUs.cfg") if !defined($cfg) || $cfg eq "";
-
-    my $stamp = strftime("%Y%m%d_%H%M%S", localtime);
-    my $root = (defined($outdir) && $outdir ne "") ? $outdir : File::Spec->catdir(".", "LotuS3_selftest_$stamp");
-    ensure_dir($root) unless -d $root;
-    my $report = File::Spec->catfile($root, "self_test_report.txt");
-    my @report;
-
-    push @report, "LotuS3 self-test report";
-    push @report, "Date: " . strftime("%Y-%m-%d %H:%M:%S %z", localtime);
-    push @report, "Version: $selfID";
-    push @report, "Script: $script";
-    push @report, "Self-test root: $root";
-    push @report, "";
-    push @report, "Preflight files:";
-
-    my @preflight = (
-        ["Example directory", $example_dir, "dir"],
-        ["Example map", $map, "file"],
-        ["SDM miSeq2 options", $sdm_miseq2, "file"],
-        ["LotuS config", $cfg, "file"],
-    );
-    my @preflight_errors;
-    for my $chk (@preflight) {
-        my ($label, $path, $type) = @$chk;
-        my $ok = $type eq "dir" ? -d $path : -s $path;
-        push @report, sprintf("  %-22s %-7s %s", $label, ($ok ? "OK" : "MISSING"), $path);
-        push @preflight_errors, "$label missing or empty: $path" unless $ok;
-    }
-    if (@preflight_errors) {
-        push @report, "", "FAILED before execution:", map { "  - $_" } @preflight_errors;
-        atomic_write_text($report, join("\n", @report) . "\n");
-        print STDERR join("\n", @preflight_errors) . "\nSelf-test report: $report\n";
-        return 1;
-    }
-
-    my $selftest_threads = detect_available_cpus();
-    push @report, "", "Self-test threads: $selftest_threads (max currently available to this process/allocation)";
-
-    my @cases = (
-        {
-            name => "basic_example",
-            desc => "Standard Example/ run equivalent to: ./lotus3 -i Example/ -m Example/miSeqMap.sm.txt -o myTestRun",
-            out  => File::Spec->catdir($root, "myTestRun"),
-            args => ["-i", $example_dir, "-m", $map],
-            expected_tax => "hiera_RDP.txt",
-            required_tools => [qw(sdm)],
-        },
-        {
-            name => "miseq_dada2_lambda",
-            desc => "DADA2/Lambda Example/ run equivalent to the documented miSeq2/SLV/lambda command",
-            out  => File::Spec->catdir($root, "myTestRun2"),
-            args => [
-                "-i", $example_dir,
-                "-m", $map,
-                "-s", $sdm_miseq2,
-                "-p", "miSeq",
-                "-amplicon_type", "SSU",
-                "-forwardPrimer", "GTGYCAGCMGCCGCGGTAA",
-                "-reversePrimer", "GGACTACNVGGGTWTCTAAT",
-                "-CL", "dada2",
-                "-refDB", "SLV",
-                "-taxAligner", "lambda",
-            ],
-            expected_tax => "hiera_BLAST.txt",
-            required_tools => [qw(sdm Rscript lambda3)],
-        },
-    );
-
-    my $failures = 0;
-    for my $case (@cases) {
-        push @report, "", "==== $case->{name} ====", $case->{desc};
-        my $ok = selftest_run_case($script, $case, \@report, $selftest_threads);
-        $failures++ unless $ok;
-    }
-
-    push @report, "", $failures ? "SELF-TEST FAILED: $failures case(s) failed." : "SELF-TEST PASSED: all cases completed and validated.";
-    atomic_write_text($report, join("\n", @report) . "\n");
-    print join("\n", @report[-($failures ? 4 : 3)..-1]) . "\n" if @report >= 4;
-    print "Self-test report: $report\n";
-    return $failures ? 1 : 0;
-}
-
 sub selftest_run_case {
     my ($script, $case, $report_ref, $selftest_threads) = @_;
     my $out = $case->{out};
@@ -6099,6 +6012,96 @@ sub selftest_count_table_rows {
     close $fh;
     return $n > 0 ? $n - 1 : 0;
 }
+
+sub run_self_test {
+    my $script = abs_path($0) // $0;
+    my $example_dir = File::Spec->catdir($RealBin, "Example");
+    my $map = File::Spec->catfile($RealBin, "Example", "miSeqMap.sm.txt");
+    my $sdm_miseq2 = File::Spec->catfile($RealBin, "configs", "sdm_miSeq2.txt");
+    my $cfg = $lotusCfg;
+    $cfg = File::Spec->catfile($RealBin, "lOTUs.cfg") if !defined($cfg) || $cfg eq "";
+
+    my $stamp = strftime("%Y%m%d_%H%M%S", localtime);
+    my $root = (defined($outdir) && $outdir ne "") ? $outdir : File::Spec->catdir(".", "LotuS3_selftest_$stamp");
+    ensure_dir($root) unless -d $root;
+    my $report = File::Spec->catfile($root, "self_test_report.txt");
+    my @report;
+
+    push @report, "LotuS3 self-test report";
+    push @report, "Date: " . strftime("%Y-%m-%d %H:%M:%S %z", localtime);
+    push @report, "Version: $selfID";
+    push @report, "Script: $script";
+    push @report, "Self-test root: $root";
+    push @report, "";
+    push @report, "Preflight files:";
+
+    my @preflight = (
+        ["Example directory", $example_dir, "dir"],
+        ["Example map", $map, "file"],
+        ["SDM miSeq2 options", $sdm_miseq2, "file"],
+        ["LotuS config", $cfg, "file"],
+    );
+    my @preflight_errors;
+    for my $chk (@preflight) {
+        my ($label, $path, $type) = @$chk;
+        my $ok = $type eq "dir" ? -d $path : -s $path;
+        push @report, sprintf("  %-22s %-7s %s", $label, ($ok ? "OK" : "MISSING"), $path);
+        push @preflight_errors, "$label missing or empty: $path" unless $ok;
+    }
+    if (@preflight_errors) {
+        push @report, "", "FAILED before execution:", map { "  - $_" } @preflight_errors;
+        atomic_write_text($report, join("\n", @report) . "\n");
+        print STDERR join("\n", @preflight_errors) . "\nSelf-test report: $report\n";
+        return 1;
+    }
+
+    my $selftest_threads = detect_available_cpus();
+    push @report, "", "Self-test threads: $selftest_threads (max currently available to this process/allocation)";
+
+    my @cases = (
+        {
+            name => "basic_example",
+            desc => "Standard Example/ run equivalent to: ./lotus3 -i Example/ -m Example/miSeqMap.sm.txt -o myTestRun",
+            out  => File::Spec->catdir($root, "myTestRun"),
+            args => ["-i", $example_dir, "-m", $map],
+            expected_tax => "hiera_RDP.txt",
+            required_tools => [qw(sdm)],
+        },
+        {
+            name => "miseq_dada2_lambda",
+            desc => "DADA2/Lambda Example/ run equivalent to the documented miSeq2/SLV/lambda command",
+            out  => File::Spec->catdir($root, "myTestRun2"),
+            args => [
+                "-i", $example_dir,
+                "-m", $map,
+                "-s", $sdm_miseq2,
+                "-p", "miSeq",
+                "-amplicon_type", "SSU",
+                "-forwardPrimer", "GTGYCAGCMGCCGCGGTAA",
+                "-reversePrimer", "GGACTACNVGGGTWTCTAAT",
+                "-CL", "dada2",
+                "-refDB", "SLV",
+                "-taxAligner", "lambda",
+            ],
+            expected_tax => "hiera_BLAST.txt",
+            required_tools => [qw(sdm Rscript lambda3)],
+        },
+    );
+
+    my $failures = 0;
+    for my $case (@cases) {
+        push @report, "", "==== $case->{name} ====", $case->{desc};
+        my $ok = selftest_run_case($script, $case, \@report, $selftest_threads);
+        $failures++ unless $ok;
+    }
+
+    push @report, "", $failures ? "SELF-TEST FAILED: $failures case(s) failed." : "SELF-TEST PASSED: all cases completed and validated.";
+    atomic_write_text($report, join("\n", @report) . "\n");
+    print join("\n", @report[-($failures ? 4 : 3)..-1]) . "\n" if @report >= 4;
+    print "Self-test report: $report\n";
+    return $failures ? 1 : 0;
+}
+
 
 sub atomic_write_text {
     my ($path, $text) = @_;
