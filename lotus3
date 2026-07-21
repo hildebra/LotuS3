@@ -72,7 +72,7 @@ sub checkOS;
 #3.10: 29.3.26: major refactor of sdm v3.25 and LCA v0.26
 #3.11: 16.6.26: sdm v 3.37 (faster, less mem, more controlled outputs). KSGP v4.0 added to installer.
 #3.12: major refactor LotuS3 via AI: stability, reporting
-#3.13: 21.7.26: safer installer and non-destructive dry-run; stronger validation, self-tests, taxonomy-only handling, and cleanup; removed reference-based OTU clustering; added SDM 3.41 summary parsing.
+#3.13: 21.7.26: safer installer and non-destructive dry-run; targeted, lightweight validation and expanded self-tests; improved taxonomy-only handling and cleanup; removed reference-based OTU clustering; added SDM 3.41 summary parsing.
 my $selfID = "LotuS 3.13";
 my $LotuS_output_schema_version = "1.0";
 
@@ -3134,7 +3134,8 @@ sub prepLtsOptions{
 		die "Taxonomy redo output must not be a symbolic link: $redo_source\n" if -l $redo_source;
 		my $redo_fasta = File::Spec->catfile($redo_source, "OTU.fna");
 		die "Taxonomy redo requires a non-empty OTU.fna in $redo_source\n" unless -s $redo_fasta;
-		my ($records, $fasta_problems) = fasta_validation_scan($redo_fasta, 5000);
+		# A full OTU FASTA pass is unnecessary here; taxonomy processing will consume it below.
+		my ($records, $fasta_problems) = fasta_validation_scan($redo_fasta, 1);
 		die "Taxonomy redo OTU.fna validation failed:\n" . join("\n", map { " - $_" } @$fasta_problems) . "\n"
 			if @$fasta_problems;
 		if ($onlyTaxRedo) {
@@ -3462,7 +3463,7 @@ my @further_options = (
   ['-c|-config <file>', 'LotuS configuration file with program paths. Default: <LotuS3_dir>/lOTUs.cfg.'],
   ['-p|-platform <454|miSeq|hiSeq|PacBio|PacBio_GA|AVITI>', 'Sequencing platform preset. Default: miSeq.'],
   ['-t|-threads <num>', 'Number of threads to use. Default: 1, or auto-detected where supported.'],
-  ['-tmp|-tmpDir <dir>', 'Temporary directory for intermediate files. Default: <outputDir>/tmpDir.'],
+	['-tmp|-tmpDir <dir>', 'Temporary directory for intermediate files. Default: <outputDir>/tmpFiles. Marker-less directories from older LotuS runs are recognized from known intermediates; mixed contents are preserved in a sibling backup.'],
   ['-verbosity <0-3>', 'Logging verbosity: 0 minimal, 1 standard, 2 verbose, 3 include detailed command output. Default: 1.']
 );
 
@@ -6365,16 +6366,6 @@ sub validate_reference_databases {
         push @problems, "Reference FASTA missing or empty: $db" if $db ne "" && !-s $db;
         push @problems, "Taxonomy file missing or empty: $tax" if $tax ne "" && !-s $tax;
         push @problems, "Compressed taxonomy files are not supported by downstream taxonomy readers: $tax" if $tax =~ /\.gz$/i;
-        if ($db ne "" && -s $db) {
-            my ($n,$p,$w) = fasta_validation_scan($db, 1000);
-            push @problems, @$p;
-            push @warnings, @$w;
-        }
-        if ($tax ne "" && -s $tax && $tax !~ /\.gz$/i) {
-            my ($n,$p,$w) = taxonomy_validation_scan($tax, 1000);
-            push @problems, @$p;
-            push @warnings, @$w;
-        }
     }
     if ($TaxOnly eq "0" && (($forceRefChim && ($noChimChk == 0 || $noChimChk == 2) && ($UCHIME_REFDB eq "" || !-s $UCHIME_REFDB)) ||
         ($UCHIME_REFDB ne "" && !-s $UCHIME_REFDB))) {
@@ -6384,16 +6375,6 @@ sub validate_reference_databases {
     }
     if ($TaxOnly eq "0" && $doPhiX && ($CONT_REFDB_PHIX eq "" || !-s $CONT_REFDB_PHIX)) {
         push @problems, "PhiX removal is enabled, but the PhiX reference is missing or empty: " . ($CONT_REFDB_PHIX eq "" ? "<not configured>" : $CONT_REFDB_PHIX);
-    }
-    for (my $i=0; $i<@TAX_REFDB; $i++) {
-        next if $doBlasting == 3;
-        my ($frac, $err) = validate_refdb_tax_overlap($TAX_REFDB[$i] // "", $TAX_RANKS[$i] // "", 10000);
-        push @warnings, $err if defined($err) && $err ne "";
-        if (defined $frac && $frac < 0.50) {
-            push @problems, sprintf("Reference FASTA and taxonomy IDs have insufficient overlap for %s / %s (%.2f%% of sampled FASTA IDs)", ($TAX_REFDB[$i] // ""), ($TAX_RANKS[$i] // ""), 100*$frac);
-        } elsif (defined $frac && $frac < 0.95) {
-            push @warnings, sprintf("Reference FASTA and taxonomy IDs have incomplete overlap for %s / %s (%.2f%% of sampled FASTA IDs)", ($TAX_REFDB[$i] // ""), ($TAX_RANKS[$i] // ""), 100*$frac);
-        }
     }
     if ($doBlasting == 2) { # lambda3
         for my $db (@TAX_REFDB) {
@@ -6430,7 +6411,8 @@ sub validate_option_combinations {
         }
     }
     if ($TaxOnly ne "0" && -f $TaxOnly) {
-        my ($n,$p,$w) = fasta_validation_scan($TaxOnly, 5000);
+        # Taxonomy-only input bypasses sdm, so retain a minimal one-record format check.
+        my ($n,$p,$w) = fasta_validation_scan($TaxOnly, 1);
         push @problems, @$p;
         printL("Taxonomy-only FASTA validation warnings:\n" . join("\n", map { " - $_" } @$w) . "\n", "w") if @$w;
     } elsif ($TaxOnly ne "0" && $TaxOnly ne "1") {
@@ -6839,6 +6821,17 @@ sub _collect_input_files_for_validation {
     return @files;
 }
 
+sub _minimum_input_file_issues {
+    my ($file) = @_;
+    return ("path is empty") unless defined($file) && $file ne "";
+    return ("does not exist") unless -e $file;
+    return ("is not a regular file") unless -f $file;
+    my @issues;
+    push @issues, "is not readable" unless -r $file;
+    push @issues, "is empty" unless -s $file;
+    return @issues;
+}
+
 sub validate_inputs_before_execution {
     my ($map_href, $comb_href) = @_;
     my @problems; my @warnings;
@@ -6846,28 +6839,16 @@ sub validate_inputs_before_execution {
     if (!@files && defined($input) && $input ne "" && !-d $input) {
         push @problems, "No readable input FASTA/FASTQ files found from -i $input";
     }
-    my @fq = grep { /\.(?:f(?:ast)?q)(?:\.[A-Za-z0-9_-]+)*(?:\.gz)?$/i } @files;
-    my @fa = grep { /\.(?:fna|fa|fasta)(?:\.[A-Za-z0-9_-]+)*(?:\.gz)?$/i } @files;
-    my %fq_counts;
-    if (@fq) {
-        for my $f (@fq[0 .. ($#fq < 9 ? $#fq : 9)]) {
-            my ($n,$p,$w) = fastq_validation_scan($f, 5000);
-            $fq_counts{$f} = $n;
-            push @problems, @$p;
-            push @warnings, @$w;
+    if (@inputArray == 1 && -d $inputArray[0]) {
+        push @problems, "Input directory is not readable: $inputArray[0]" unless -r $inputArray[0];
+        push @problems, "No FASTA/FASTQ files found in input directory: $inputArray[0]" unless @files;
+        # Avoid stat'ing an arbitrarily large directory twice; sdm validates every file it consumes.
+        for my $f (@files[0 .. ($#files < 9 ? $#files : 9)]) {
+            push @problems, "Input sequence file '$f' $_" for _minimum_input_file_issues($f);
         }
-    }
-    if (@inputArray == 2 && -f $inputArray[0] && -f $inputArray[1]
-        && $inputArray[0] =~ /\.(?:f(?:ast)?q)(?:\.[A-Za-z0-9_-]+)*(?:\.gz)?$/i
-        && $inputArray[1] =~ /\.(?:f(?:ast)?q)(?:\.[A-Za-z0-9_-]+)*(?:\.gz)?$/i) {
-        my ($p,$w) = validate_fastq_pair($inputArray[0], $inputArray[1], "direct input", 5000);
-        push @problems, @$p; push @warnings, @$w;
-    }
-    if (@fa) {
-        for my $f (@fa[0 .. ($#fa < 4 ? $#fa : 4)]) {
-            my ($n,$p,$w) = fasta_validation_scan($f, 5000);
-            push @problems, @$p;
-            push @warnings, @$w;
+    } else {
+        for my $f (@inputArray) {
+            push @problems, "Input sequence file '$f' $_" for _minimum_input_file_issues($f);
         }
     }
 
@@ -6886,18 +6867,14 @@ sub validate_inputs_before_execution {
             for my $s (sort keys %samples) {
                 my $entry = $map_href->{$s}->[$seq_col] // "";
                 if ($entry eq "") { push @problems, "Mapping SampleID '$s' has an empty sequence-file entry in fastqFile/fnaFile column"; next; }
-                my @resolved;
                 for my $mf (split(/,/, $entry)) {
                     next if $mf eq "";
                     my $path = $mf;
                     $path = File::Spec->catfile($inputArray[0], $mf) if @inputArray == 1 && -d $inputArray[0] && !-f $path;
-                    push @problems, "Mapping SampleID '$s' refers to missing sequence file '$mf'" unless -f $path;
-                    push @resolved, $path if -f $path;
+                    my @issues = _minimum_input_file_issues($path);
+                    push @problems, "Mapping SampleID '$s' sequence file '$mf' $_" for @issues;
                 }
-                if (@resolved == 2 && $resolved[0] =~ /\.(?:f(?:ast)?q)(?:\.[A-Za-z0-9_-]+)*(?:\.gz)?$/i && $resolved[1] =~ /\.(?:f(?:ast)?q)(?:\.[A-Za-z0-9_-]+)*(?:\.gz)?$/i) {
-                    my ($p,$w) = validate_fastq_pair($resolved[0], $resolved[1], "mapping sample $s", 5000);
-                    push @problems, @$p; push @warnings, @$w;
-                } elsif (@resolved > 2) {
+                if (scalar(grep { $_ ne "" } split(/,/, $entry)) > 2) {
                     push @problems, "Mapping SampleID '$s' lists more than two sequence files";
                 }
             }
@@ -7128,10 +7105,74 @@ sub safe_remove_tree {
     }
 }
 
+sub _path_is_same_or_parent {
+    my ($parent, $child) = @_;
+    return 0 unless defined($parent) && defined($child) && $parent ne "" && $child ne "";
+    $parent =~ s{/+$}{};
+    $child =~ s{/+$}{};
+    return 1 if $parent eq $child;
+    return index($child . "/", $parent . "/") == 0 ? 1 : 0;
+}
+
+sub _assert_safe_temp_directory_target {
+    my ($path) = @_;
+    my $abs = -e $path ? (abs_path($path) // $path) : File::Spec->rel2abs($path);
+    die "Refusing unsafe temporary directory path: $abs\n"
+        if $abs eq "/" || $abs eq "." || $abs eq ".." || $abs =~ m{^/+$} || length($abs) < 8;
+    my $cwd = abs_path(".") // File::Spec->rel2abs(".");
+    my $script_root = abs_path($RealBin) // File::Spec->rel2abs($RealBin);
+    my $output_root = abs_path($outdir) // File::Spec->rel2abs($outdir);
+    my $home = defined($ENV{HOME}) && $ENV{HOME} ne "" ? (abs_path($ENV{HOME}) // File::Spec->rel2abs($ENV{HOME})) : "";
+    die "Temporary directory must not be the current working directory or one of its parents: $abs\n"
+        if _path_is_same_or_parent($abs, $cwd);
+    die "Temporary directory must not be the LotuS installation directory or one of its parents: $abs\n"
+        if _path_is_same_or_parent($abs, $script_root);
+    die "Temporary directory must not contain or equal the output directory: $abs\n"
+        if _path_is_same_or_parent($abs, $output_root);
+    die "Temporary directory must not be the home directory: $abs\n"
+        if $home ne "" && $abs eq $home;
+    return $abs;
+}
+
+sub _legacy_lotus_temp_entry {
+    my ($name) = @_;
+    return 1 if $name =~ /^(?:
+        demulti(?:\..*)? |
+        derep(?:\..*)? |
+        otu_seeds(?:\..*)? |
+        finalOTU(?:\..*)? |
+        filtered\.fa | tmp_otu\.fa | tmp1\.fa | uniqueSeqs\.fna | uparse\.fa |
+        clusters\.uc | otus(?:\..*)? | dada2(?:\..*)? | dada2_p\d+_err[FRM]\.pdf |
+        chimeras_(?:denovo|ref)\.fa | lulu_match_list\.txt(?:\.rm)? | RDPotus\.tax |
+        tax(?:\..*)? | add\.(?:uc|paf) | rests\.(?:uc|paf) | tmpUCs\.\d+\.uct |
+        otus4blast\.tmp | blast4dire\.blast | taxonomy_only_input\.fna | ASVcl\.hits |
+        IQ(?:\..*)? | itsx | demultiplexed
+    )$/ix;
+    return 0;
+}
+
+sub _classify_legacy_lotus_temp {
+    my ($dir) = @_;
+    opendir my $dh, $dir or die "Cannot inspect temporary directory $dir: $!\n";
+    my @entries = grep { $_ ne "." && $_ ne ".." } readdir($dh);
+    closedir $dh;
+    my (@known, @unknown);
+    for my $entry (@entries) {
+        my $full = File::Spec->catfile($dir, $entry);
+        if (!-l $full && _legacy_lotus_temp_entry($entry)) {
+            push @known, $entry;
+        } else {
+            push @unknown, $entry;
+        }
+    }
+    return (\@known, \@unknown, \@entries);
+}
+
 sub prepare_temp_directory {
     die "Temporary directory is undefined\n" unless defined($lotus_tempDir) && $lotus_tempDir ne "";
     die "Refusing symbolic-link temporary directory: $lotus_tempDir\n" if -l $lotus_tempDir;
     die "Temporary path exists but is not a directory: $lotus_tempDir\n" if -e $lotus_tempDir && !-d $lotus_tempDir;
+    _assert_safe_temp_directory_target($lotus_tempDir);
 
     $tempDirCreatedMarker = File::Spec->catfile($lotus_tempDir, ".lotus3_tmp_owned");
     if (-d $lotus_tempDir) {
@@ -7144,11 +7185,27 @@ sub prepare_temp_directory {
                 unless defined($marker) && $marker =~ /^Output:\s*\Q$expected\E\s*$/m;
             safe_remove_tree($lotus_tempDir, "temporary directory");
         } else {
-            opendir my $tdh, $lotus_tempDir or die "Cannot inspect temporary directory $lotus_tempDir: $!\n";
-            my @entries = grep { $_ ne "." && $_ ne ".." } readdir($tdh);
-            closedir $tdh;
-            die "Temporary directory already contains files and is not owned by LotuS3; refusing to delete or overwrite it: $lotus_tempDir\n"
-                if @entries;
+            my ($known, $unknown, $entries) = _classify_legacy_lotus_temp($lotus_tempDir);
+            if (@$entries && @$known == 0) {
+                my $examples = join(", ", @$unknown[0 .. ($#$unknown < 4 ? $#$unknown : 4)]);
+                die "Temporary directory contains no recognizable LotuS intermediate files and has no ownership marker: $lotus_tempDir\nUnrecognized entries: $examples\n";
+            }
+            if (@$entries && @$unknown && @$known < 2) {
+                my $examples = join(", ", @$unknown[0 .. ($#$unknown < 4 ? $#$unknown : 4)]);
+                die "Temporary directory is ambiguous: only one legacy LotuS intermediate was recognized alongside unrelated entries: $lotus_tempDir\nUnrecognized entries: $examples\n";
+            }
+            if (@$entries && !@$unknown) {
+                printL("Recognized a marker-less temporary directory from an older LotuS run; clearing " . scalar(@$known) . " legacy intermediate(s): $lotus_tempDir\n", "w");
+                safe_remove_tree($lotus_tempDir, "legacy LotuS temporary directory");
+            } elsif (@$entries) {
+                (my $legacy_path = $lotus_tempDir) =~ s{[\\/]+$}{};
+                my $backup = $legacy_path . ".lotus3-legacy-backup-" . strftime("%Y%m%d_%H%M%S", localtime) . "-$$";
+                my $suffix = 0;
+                while (-e $backup) { $suffix++; $backup = $legacy_path . ".lotus3-legacy-backup-" . strftime("%Y%m%d_%H%M%S", localtime) . "-$$-$suffix"; }
+                rename($legacy_path, $backup)
+                    or die "Could not preserve legacy temporary directory $legacy_path as $backup: $!\n";
+                printL("Recognized a marker-less temporary directory from an older LotuS run, but it also contained unrecognized entries. The complete directory was preserved at $backup before creating a clean temporary directory.\n", "w");
+            }
         }
     }
     ensure_dir($lotus_tempDir);
