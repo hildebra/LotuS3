@@ -38,7 +38,7 @@ sub getInfoLtS;
 sub getInstallVer;
 sub compile_sdm;
 sub compile_LCA;
-sub compile_rtk;
+sub install_bundled_rtk;
 sub checkLtsVer;
 sub version_is_newer;
 sub check_version;
@@ -238,13 +238,13 @@ if ($install_dada) {
 
 
 #only binary installs after this point
-#first install/compile sdm,LCA,rtk
+#compile sdm/LCA and validate the bundled rtk binary
 my $nsdmp = compile_sdm("$ldir/sdm_src");
 @txt = addInfoLtS("sdm",$nsdmp,\@txt,1);
 $nsdmp = compile_LCA("$ldir/LCA_src");
 @txt = addInfoLtS("LCA",$nsdmp,\@txt,1);
 
-$nsdmp = compile_rtk("$ldir/rtk_src");
+$nsdmp = install_bundled_rtk("$ldir/bin/rtk");
 @txt = addInfoLtS("rtk",$nsdmp,\@txt,1);
 
 #download and install the remaining programs exactly once
@@ -1011,29 +1011,24 @@ sub compile_LCA($){
 	run_cmd("chmod", "+x", $expPath);
 	return $expPath;
 }
-sub compile_rtk($){
-	my ($ldi2) = @_;
-	my $expPath = "$bdir/rtk";
-	if (-x $expPath){#test if can execute locally
-		my ($rtkV,$status) = capture_cmd($expPath, "-v");
-		return $expPath if ($status == 0 && $rtkV =~ m/rtk \d/);
-	}
+sub install_bundled_rtk($){
+	my ($source) = @_;
+	die "Bundled rtk binary is missing or empty at $source\n" unless (-s $source);
+	run_cmd("chmod", "+x", $source);
+	my ($rtk_help,$source_status) = capture_cmd($source, "-h");
+	die "Bundled rtk binary at $source could not be executed or did not identify itself as rtk (help exit status $source_status).\n"
+		unless ($rtk_help =~ /rarefaction tool kit \(rtk\)\s+[\d.]+/i);
 
-	if (-d $ldi2 && -f "$ldi2/Makefile" ){
-		print "Compiling rtk..\n";
-		unlink glob("$ldi2/*.o");
-		my $stat = system("make", "-C", $ldi2);
-		if ($stat == 0){
-			unlink("$ldir/rtk") if -e "$ldir/rtk"; unlink("$bdir/rtk") if -e "$bdir/rtk"; move("$ldi2/rtk", "$bdir/rtk") or die "Cannot install rtk: $!\n"; run_cmd("chmod", "+x", "$bdir/rtk");
-		} else {
-			die "Compilation of required rtk binary failed (make status $stat). Install a C++ compiler and rerun the installer.\n";
-		}
-	} else {
-		die "rtk source directory or Makefile is missing at $ldi2\n";
-	}
-	die "Compilation did not produce executable $expPath\n" unless (-e $expPath);
-	run_cmd("chmod", "+x", $expPath);
-	return $expPath;
+	my $destination = "$bdir/rtk";
+	my $source_abs = abs_path($source) // $source;
+	my $destination_abs = -e $destination ? (abs_path($destination) // $destination) : $destination;
+	return $destination if $source_abs eq $destination_abs;
+	copy_file_atomic($source, $destination);
+	run_cmd("chmod", "+x", $destination);
+	my ($installed_help,$installed_status) = capture_cmd($destination, "-h");
+	die "Installed rtk binary at $destination failed its execution check (help exit status $installed_status).\n"
+		unless ($installed_help =~ /rarefaction tool kit \(rtk\)\s+[\d.]+/i);
+	return $destination;
 }
 
 sub compile_sdm($){
@@ -1781,19 +1776,20 @@ sub user_options(){
 					exec($^X, $installedHelper, "-forceUpdate");
 					die "Failed to rerun updated autoInstall.pl: $!\n";
 				}
-				for my $sourceDir (qw(sdm_src LCA_src rtk_src)){
+				for my $sourceDir (qw(sdm_src LCA_src)){
 					die "Update archive is missing updates/$sourceDir\n" unless (-d "$updateDir/$sourceDir");
 				}
+				die "Update archive is missing the bundled updates/bin/rtk binary\n" unless (-s "$updateDir/bin/rtk");
 				# Compile the staged sources before replacing the installed source trees.
 				my $nsdmp = compile_sdm("$updateDir/sdm_src");
 				@txt = addInfoLtS("sdm",$nsdmp,\@txt,1);
 				$nsdmp = compile_LCA("$updateDir/LCA_src");
 				@txt = addInfoLtS("LCA",$nsdmp,\@txt,1);
-				$nsdmp = compile_rtk("$updateDir/rtk_src");
+				$nsdmp = install_bundled_rtk("$updateDir/bin/rtk");
 				@txt = addInfoLtS("rtk",$nsdmp,\@txt,1);
 				copy_file_atomic("$updateDir/autoInstall.pl", $installedHelper);
 				copy_file_atomic("$updateDir/lotus3", "$ldir/lotus3");
-				for my $sourceDir (qw(sdm_src LCA_src rtk_src)){
+				for my $sourceDir (qw(sdm_src LCA_src)){
 					replace_tree_atomic("$updateDir/$sourceDir", "$ldir/$sourceDir");
 				}
 				($lver,$sver) = getInstallVer("$ldir/sdm_src");
