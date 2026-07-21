@@ -4611,6 +4611,37 @@ sub onelinerSWM($) {
     rename( $ofil, $ifil ) or die "Unable to overwrite file $ifil\n";
 }
 
+sub validate_rdp_fixrank_fields {
+    my ($fields) = @_;
+    my @expected_ranks = ( "domain", "phylum", "class", "order", "family", "genus" );
+    my $rank_offset = -1;
+    for (my $i = 3; $i < 10 && $i <= $#$fields; $i += 3) {
+        if (($fields->[$i] // "") eq "domain") {
+            $rank_offset = $i - 1;
+            last;
+        }
+    }
+    return (-1, "could not locate the domain rank") if $rank_offset < 0;
+
+    # fixrank is: sequence ID, orientation, then six name/rank/confidence triplets.
+    my $required_columns = $rank_offset + 18;
+    return ($rank_offset, "expected at least $required_columns tab-separated columns, found " . scalar(@$fields))
+        if @$fields < $required_columns;
+
+    for my $rank_index (0 .. $#expected_ranks) {
+        my $i = $rank_offset + 3 * $rank_index;
+        my $observed_rank = $fields->[$i + 1] // "";
+        return ($rank_offset, "expected rank '$expected_ranks[$rank_index]' at column " . ($i + 2) . ", found '$observed_rank'")
+            if $observed_rank ne $expected_ranks[$rank_index];
+        my $confidence = $fields->[$i + 2];
+        return ($rank_offset, "missing or non-numeric confidence for rank '$observed_rank'")
+            unless defined($confidence) && $confidence =~ /^(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?$/;
+        return ($rank_offset, "confidence for rank '$observed_rank' is outside 0..1: $confidence")
+            if $confidence < 0 || $confidence > 1;
+    }
+    return ($rank_offset, "");
+}
+
 sub readRDPtax($) {
     my ($taxf) = @_;    #$avOTUR
     open T, "<", $taxf or die "Can't open $taxf : \n" . $!;
@@ -4621,7 +4652,7 @@ sub readRDPtax($) {
 	#my @unclHier = ("?","?","?","?","?","?");
 
     #my %AvOTUs = %{$avOTUR};
-    my $rankN = -1; my $remtax = 0;
+	my $rankN = -1; my $remtax = 0;
 	while ( my $line = <T> ) {
 		chomp($line);
 		$line =~ s/"//g;
@@ -4633,17 +4664,11 @@ sub readRDPtax($) {
 
 
 		#print $spl[0]."\n";
-		if ( $rankN == -1 ) {
-			for ( my $i = 3 ; $i < 10 && $i <= $#spl ; $i += 3 ) {
-				if ( $spl[$i] =~ m/domain/ ) {
-					$rankN = $i - 1;
-					last;
-				}
-			}
-		}
-		next if ( $rankN == -1 );
-		printL "Malformed RDP classifier row for '$spl[0]': expected at least " . ($rankN + 19) . " tab-separated columns, found " . scalar(@spl) . "\n", 71
-			if $#spl < $rankN + 18;
+		my ($row_rankN, $layout_error) = validate_rdp_fixrank_fields(\@spl);
+		printL "Malformed RDP classifier row for '$spl[0]': $layout_error\n", 71 if $layout_error ne "";
+		$rankN = $row_rankN if $rankN == -1;
+		printL "Malformed RDP classifier row for '$spl[0]': rank columns are inconsistent with earlier rows\n", 71
+			if $row_rankN != $rankN;
 
 		#phylum level class
 		if ( $spl[ $rankN + 5 ] < $RDPCONF ) {
@@ -4668,7 +4693,6 @@ sub readRDPtax($) {
 			if ( $spl[ $i + 2 ] < $RDPCONF ) {
 				$nhier .= "?\t";
 			} else { $nhier .= $spl[$i] . "\t"; }
-			if ( $i > @spl ) { last; }
 		}
 		$nhier .= "?" ; #push in species assignment
 		
@@ -6190,6 +6214,22 @@ sub selftest_sdm_summary_parser {
     return (1, "SDM 3.41 and legacy summary formats parsed correctly");
 }
 
+sub selftest_rdp_fixrank_parser {
+    my @fields = ("OTU1", "+");
+    for my $rank (qw(domain phylum class order family genus)) {
+        push @fields, "taxon_$rank", $rank, "0.95";
+    }
+    return (0, "RDP fixrank fixture should contain 20 columns, found " . scalar(@fields))
+        unless @fields == 20;
+    my ($offset, $error) = validate_rdp_fixrank_fields(\@fields);
+    return (0, "Valid 20-column RDP fixrank row was rejected: $error") if $error ne "";
+    return (0, "Unexpected RDP fixrank triplet offset $offset") unless $offset == 2;
+    pop @fields;
+    my (undef, $short_error) = validate_rdp_fixrank_fields(\@fields);
+    return (0, "Truncated 19-column RDP fixrank row was accepted") if $short_error eq "";
+    return (1, "20-column fixrank rows accepted; truncated rows rejected");
+}
+
 sub run_self_test {
     my $script = abs_path($0) // $0;
     my $example_dir = File::Spec->catdir($RealBin, "Example");
@@ -6215,14 +6255,17 @@ sub run_self_test {
     push @report, "Self-test root: $root";
     push @report, "";
     my ($sdm_parser_ok, $sdm_parser_detail) = selftest_sdm_summary_parser();
+    my ($rdp_parser_ok, $rdp_parser_detail) = selftest_rdp_fixrank_parser();
     my $legacy_dada2_path = selftest_resolve_dependency(
         { dada2R => File::Spec->catfile("bin", "R", "dada2_pip.R") }, "dada2R"
     );
     my $legacy_dada2_ok = $legacy_dada2_path ne "" && -f $legacy_dada2_path;
     push @report, "Internal checks:", "  SDM summary parser: " . ($sdm_parser_ok ? "OK" : "FAILED"),
         "  $sdm_parser_detail",
+        "  RDP fixrank parser: " . ($rdp_parser_ok ? "OK" : "FAILED"),
+        "  $rdp_parser_detail",
         "  Legacy dada2R config resolution: " . ($legacy_dada2_ok ? "OK ($legacy_dada2_path)" : "FAILED"), "";
-    if (!$sdm_parser_ok || !$legacy_dada2_ok) {
+    if (!$sdm_parser_ok || !$rdp_parser_ok || !$legacy_dada2_ok) {
         atomic_write_text($report, join("\n", @report) . "\n");
         print STDERR "Self-test internal validation failed. Report: $report\n";
         return 1;
