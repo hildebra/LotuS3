@@ -5265,9 +5265,10 @@ sub readOTUmat($) {
         die "Blank line in ${OTU_prefix} count table $file at line $line_no\n" if $line eq "";
         my @spl = split( /\t/, $line, -1 );
         if ( $line_no == 1 ) {
-            die "${OTU_prefix} count table $file must have an OTU column and at least one sample column\n" unless @spl >= 2;
-            my $first = shift @spl;
-            die "Unexpected first header '$first' in ${OTU_prefix} count table $file (expected OTU)\n" unless $first eq "OTU";
+            die "${OTU_prefix} count table $file must have a row-ID column and at least one sample column\n" unless @spl >= 2;
+            # The row-ID header is intentionally blank in several native sdm/UPARSE
+            # outputs; its label is not data and must not be used to validate the table.
+            shift @spl;
             @samples = @spl;
             my %seen_sample;
             for my $sample (@samples) {
@@ -6230,6 +6231,26 @@ sub selftest_rdp_fixrank_parser {
     return (1, "20-column fixrank rows accepted; truncated rows rejected");
 }
 
+sub selftest_otu_table_parser {
+    my ($root) = @_;
+    my $fixture = File::Spec->catfile($root, ".otu_table_parser_test_$$.txt");
+    atomic_write_text($fixture, "\tSMPL0\tSMPL1\nOTU1\t1\t2\nOTU2\t0\t3\n");
+    my ($table, $ids);
+    my $ok = eval { ($table, $ids) = readOTUmat($fixture); 1 };
+    my $error = $@;
+    unlink $fixture;
+    return (0, "Native blank row-ID header was rejected: $error") unless $ok;
+    return (0, "OTU table fixture produced incorrect row IDs")
+        unless @$ids == 2 && $ids->[0] eq "OTU1" && $ids->[1] eq "OTU2";
+    return (0, "OTU table fixture produced incorrect counts")
+        unless $table->{SMPL0}{OTU1} == 1 && $table->{SMPL1}{OTU2} == 3;
+    atomic_write_text($fixture, "SMPL0\tSMPL1\nOTU1\t1\t2\n");
+    my $shifted_ok = eval { readOTUmat($fixture); 1 };
+    unlink $fixture;
+    return (0, "Header missing its row-ID placeholder was incorrectly accepted") if $shifted_ok;
+    return (1, "blank native row-ID header accepted; shifted columns still rejected");
+}
+
 sub run_self_test {
     my $script = abs_path($0) // $0;
     my $example_dir = File::Spec->catdir($RealBin, "Example");
@@ -6256,6 +6277,7 @@ sub run_self_test {
     push @report, "";
     my ($sdm_parser_ok, $sdm_parser_detail) = selftest_sdm_summary_parser();
     my ($rdp_parser_ok, $rdp_parser_detail) = selftest_rdp_fixrank_parser();
+    my ($otu_table_ok, $otu_table_detail) = selftest_otu_table_parser($root);
     my $legacy_dada2_path = selftest_resolve_dependency(
         { dada2R => File::Spec->catfile("bin", "R", "dada2_pip.R") }, "dada2R"
     );
@@ -6264,8 +6286,10 @@ sub run_self_test {
         "  $sdm_parser_detail",
         "  RDP fixrank parser: " . ($rdp_parser_ok ? "OK" : "FAILED"),
         "  $rdp_parser_detail",
+        "  OTU table parser: " . ($otu_table_ok ? "OK" : "FAILED"),
+        "  $otu_table_detail",
         "  Legacy dada2R config resolution: " . ($legacy_dada2_ok ? "OK ($legacy_dada2_path)" : "FAILED"), "";
-    if (!$sdm_parser_ok || !$rdp_parser_ok || !$legacy_dada2_ok) {
+    if (!$sdm_parser_ok || !$rdp_parser_ok || !$otu_table_ok || !$legacy_dada2_ok) {
         atomic_write_text($report, join("\n", @report) . "\n");
         print STDERR "Self-test internal validation failed. Report: $report\n";
         return 1;
@@ -6923,10 +6947,6 @@ sub validate_inputs_before_execution {
 
     if ($map_href && ref($map_href) eq 'HASH') {
         my %samples = map { $_ => 1 } grep { $_ ne '#SampleID' } keys %$map_href;
-        for my $s (keys %samples) {
-            if ($s =~ /[^A-Za-z0-9_.]/) { push @problems, "Mapping SampleID '$s' contains unsupported characters; use letters, numbers, underscore or dot"; }
-        }
-
         my @hdr = exists($map_href->{'#SampleID'}) ? @{$map_href->{'#SampleID'}} : ();
         my $seq_col = -1;
         for (my $i=0; $i<@hdr; $i++) {
