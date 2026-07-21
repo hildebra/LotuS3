@@ -5940,10 +5940,30 @@ sub selftest_resolve_dependency {
     my $key = $key_for{$name} // $name;
     my $candidate = $cfg_values->{$key} // "";
     return "" if $candidate eq "";
+    # Match readPaths_aligners(): older installed configs still name dada2_pip.R,
+    # while current installations provide dada2_pip_v2.R.
+    if ($name eq "dada2R" && $candidate =~ /dada2_pip\.R$/) {
+        $candidate =~ s/dada2_pip\.R$/dada2_pip_v2.R/;
+    }
     my $local = File::Spec->catfile($RealBin, $candidate);
     return abs_path($local) // $local if -f $local;
     return abs_path($candidate) // $candidate if -f $candidate;
     return command_exists($candidate) // "";
+}
+
+sub selftest_log_tail {
+    my ($file, $max_lines) = @_;
+    $max_lines ||= 40;
+    return ("<pipeline log is missing: $file>") unless -f $file;
+    open my $fh, "<", $file or return ("<cannot read pipeline log $file: $!>");
+    my @tail;
+    while (my $line = <$fh>) {
+        $line =~ s/[\r\n]+$//;
+        push @tail, $line;
+        shift @tail while @tail > $max_lines;
+    }
+    close $fh;
+    return @tail ? @tail : ("<pipeline log is empty>");
 }
 
 sub selftest_run_case {
@@ -5980,7 +6000,8 @@ sub selftest_run_case {
     push @$report_ref, "Pipeline exit status: $run_stat";
     push @$report_ref, "Pipeline log: $run_log";
     if ($run_stat != 0) {
-        push @$report_ref, "Pipeline execution failed.";
+        push @$report_ref, "Pipeline execution failed.", "Pipeline log tail:",
+            map { "  $_" } selftest_log_tail($run_log, 40);
         return 0;
     }
 
@@ -6194,11 +6215,16 @@ sub run_self_test {
     push @report, "Self-test root: $root";
     push @report, "";
     my ($sdm_parser_ok, $sdm_parser_detail) = selftest_sdm_summary_parser();
-    push @report, "Internal parser checks:", "  SDM summary parser: " . ($sdm_parser_ok ? "OK" : "FAILED"),
-        "  $sdm_parser_detail", "";
-    if (!$sdm_parser_ok) {
+    my $legacy_dada2_path = selftest_resolve_dependency(
+        { dada2R => File::Spec->catfile("bin", "R", "dada2_pip.R") }, "dada2R"
+    );
+    my $legacy_dada2_ok = $legacy_dada2_path ne "" && -f $legacy_dada2_path;
+    push @report, "Internal checks:", "  SDM summary parser: " . ($sdm_parser_ok ? "OK" : "FAILED"),
+        "  $sdm_parser_detail",
+        "  Legacy dada2R config resolution: " . ($legacy_dada2_ok ? "OK ($legacy_dada2_path)" : "FAILED"), "";
+    if (!$sdm_parser_ok || !$legacy_dada2_ok) {
         atomic_write_text($report, join("\n", @report) . "\n");
-        print STDERR "Self-test SDM parser validation failed. Report: $report\n";
+        print STDERR "Self-test internal validation failed. Report: $report\n";
         return 1;
     }
     push @report, "Preflight files:";
