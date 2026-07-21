@@ -22,9 +22,7 @@ swarm swarm
 #cd-hit-est clustering program
 cd-hit cd-hit-est
 #vsearch chimera checking, OTU clustering and mapping
-vsearch vsearch
-#dnaclust ref based OTU clustering
-dnaclust dnaclust
+vsearch bin/vsearch
 minimap2 minimap2
 
 
@@ -110,8 +108,8 @@ TAX_RANK_BEE DB//beeTax/beeTax.txt
 infernal bin//infernal-1.1.2-linux-intel-gcc/binaries/
 
 #KSGP database.. combination of several DBs, supplemented by environmental full length 16S/18S sequences
-TAX_RANK_KSGP DB//KSGP_v1.0.fasta
-TAX_REFDB_KSGP DB//KSGP_v1.0.tax
+TAX_RANK_KSGP DB//KSGP_v1.0.tax
+TAX_REFDB_KSGP DB//KSGP_v1.0.fasta
 
 
 # --------------------
