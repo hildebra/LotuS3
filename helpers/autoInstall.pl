@@ -27,6 +27,9 @@ use Cwd 'abs_path';
 use File::Copy qw(move copy);
 use File::Path qw(make_path remove_tree);
 use File::Basename qw(dirname);
+use File::Spec;
+use File::Temp qw(tempdir);
+use POSIX qw(uname);
 use IO::Uncompress::Gunzip qw(gunzip $GunzipError);
 sub addInfoLtS;sub finishAI;
 #subroutines to download various DBs..
@@ -69,6 +72,7 @@ my $downloadLmbdIdx = 0; #download lambda index from webpage
 my $compile_lambda=0;
 my $usearchInstall = "";
 my $noTelemetry = 0;
+my $ontOnly = 0;
 
 GetOptions(
 	"forceUpdate"     => \$forceUpdate,
@@ -77,7 +81,12 @@ GetOptions(
 	"lambdaIndex"     => \$compile_lambda,
 	"link_usearch=s"  => \$usearchInstall,
 	"no-telemetry"    => \$noTelemetry,
+	"ont-only"        => \$ontOnly,
 ) or die "Invalid command line options\n";
+
+if ($ontOnly && ($forceUpdate || $condaDBinstall || $compile_lambda || $downloadLmbdIdx || $usearchInstall ne "")) {
+	die "--ont-only cannot be combined with database, update, or USEARCH-link modes.\n";
+}
 
 if ($compile_lambda && $downloadLmbdIdx){
 	die "Can't use both -lambdaIndex and -downloadLmbdIdx arguments together\nAborting..\n";
@@ -141,6 +150,16 @@ my $uspath = getInfoLtS("usearch",\@txt);
 #DEBUG
 #@txt = getPR2db(\@txt);;exit;
 
+# ONT-only installation leaves databases, R packages, and other tools untouched.
+if ($ontOnly) {
+    ensure_dir($bdir);
+    check_ont_build_requirements();
+    install_ont_programs();
+    finishAI("none");
+    print "Installed ONT programs and registered their paths in $mainCfg\n";
+    exit(0);
+}
+
 ###### GET USER OPTIONS ###################
 
 my ($lver,$sver) = getInstallVer("");
@@ -194,6 +213,8 @@ if (!$condaDBinstall && !$onlyDbinstall){
 	}
 }
 
+
+check_ont_build_requirements() unless $condaDBinstall || $onlyDbinstall;
 
 ###################   database downloads ... #########################
 get_DBs();
@@ -299,7 +320,7 @@ sub addInfoLtS($ $ $ $){
 	my $ss = quotemeta $cmd;
 	#print "$ss\nXX\n";
 	my $i=0; my $tagset=0;
-	while ($txt[$i] !~ m/^$ss\s/){
+	while ($i < @txt && $txt[$i] !~ m/^$ss\s/){
 		#print $txt[$i]."\n";
 		$i++;
 		if ($i >= @txt){
@@ -308,6 +329,7 @@ sub addInfoLtS($ $ $ $){
 			push(@txt,""); last;
 		}
 	}
+	$txt[$i-1] .= "\n" if $i > 0 && $txt[$i-1] !~ /\n$/;
 	$txt[$i] = $cmd." ".$ex."\n";
 	$i++;
 	while ($i<@txt){ if ($txt[$i] =~ m/^$ss\s/){splice(@txt,$i,1) ; $i--;} $i++; last if ($i>=@txt); }
@@ -320,14 +342,15 @@ sub addInfoLtS($ $ $ $){
 	return @txt;
 }
                
-sub getInfoLtS($ $){
-	my ($cmd,$aref) = @_;
+sub getInfoLtS($ $;$){
+	my ($cmd,$aref,$default) = @_;
 	my $ss = quotemeta $cmd;
 	foreach my $line (@{$aref}){
 		chomp(my $copy = $line);
 		return $1 if ($copy =~ m/^$ss\s+(.*)$/);
 		return "??" if ($copy =~ m/^$ss\s*$/);
 	}
+	return $default if @_ > 2;
 	die ("Could not find the entry \"$cmd\" in lotus configuration file. Aborting Installer..\n");
 }
 sub parse_hitdb($ $){
@@ -1096,7 +1119,7 @@ sub capture_cmd {
 	$output = "" unless defined($output);
 	close($fh);
 	my $raw_status = $?;
-	my $status = $raw_status == -1 ? -1 : ($raw_status >> 8);
+	my $status = $raw_status == -1 ? -1 : ($raw_status & 127) ? 128 + ($raw_status & 127) : ($raw_status >> 8);
 	return ($output,$status);
 }
 
@@ -1399,37 +1422,166 @@ sub getUsearch{
 }
 
 
+# Pin upstream releases so rerunning the installer does not silently change tools.
+sub ont_tool_spec {
+    my ($name) = @_;
+    my %spec = (
+        savont => ['0.7.0', 'bluenote-1577/savont', 'a60141fd4d4e83cdcbc3601220dc41487f4cdf7bd81558c7125e876117ed756c'],
+        barbell => ['0.3.2', 'rickbeeloo/barbell', '2f840c3fe625c62f3d91deadf721da54a8c7b57f8f12a7976cc8cbba273f0daf'],
+        minimap2 => ['2.28', 'lh3/minimap2', '5ea6683b4184b5c49f6dbaef2bc5b66155e405888a0790d1b21fd3c93e474278'],
+    );
+    die "Unknown ONT program $name\n" unless exists $spec{$name};
+    return @{$spec{$name}};
+}
+
+sub ont_release_binary {
+    my ($name) = @_;
+    my @host = uname();
+    my $arch = lc($host[4]);
+    $arch = 'aarch64' if $arch eq 'arm64';
+    $arch = 'x86_64' if $arch eq 'amd64';
+    if ($name eq 'minimap2' && !$isMac && $arch eq 'x86_64') {
+        return ('https://github.com/lh3/minimap2/releases/download/v2.28/minimap2-2.28_x64-linux.tar.bz2',
+            '51f2cf0e486d0f9f88ace1aa58fdc56571382a676ea0889ae607301c60693377', 'minimap2-2.28_x64-linux/minimap2');
+    }
+    if ($name eq 'barbell') {
+        my $target = $arch . ($isMac ? '-apple-darwin' : '-unknown-linux-gnu');
+        my %sha = (
+            'aarch64-apple-darwin' => '2934846dcb2a6b2a6ebac86e67cf28b507b8b70a4440fd1f47213d3cf3181b87',
+            'aarch64-unknown-linux-gnu' => '055a9fd1df729c671a8061ad26baa64fe078fe8a97e233b96812bea61977e9c1',
+            'x86_64-unknown-linux-gnu' => 'f23a599eceb8b27211178facf5504935a98880c031eb9f2b4f136382193f2081',
+        );
+        return ("https://github.com/rickbeeloo/barbell/releases/download/v0.3.2/barbell-$target", $sha{$target}, '')
+            if exists $sha{$target};
+    }
+    return; # Build from the pinned source archive on other supported architectures.
+}
+
+sub compatible_ont_program {
+    my ($name, $path) = @_;
+    return 0 unless defined($path) && -f $path && -x $path;
+    my ($version, $status) = capture_cmd($path, '--version');
+    return 0 if $status != 0;
+    if ($name eq 'minimap2') {
+        my ($v) = $version =~ /(\d+\.\d+)/;
+        return defined($v) && !version_is_newer('2.17', $v);
+    }
+    return 0 unless $version =~ /\b\Q$name\E\b/i;
+    my ($help, $help_status) = capture_cmd($path, $name eq 'savont' ? 'asv' : 'kit', '--help');
+    return 0 if $help_status != 0;
+    my @flags = $name eq 'savont'
+        ? qw(--quality-value-cutoff --minimum-base-quality --chimera-allowable-errors --single-strand)
+        : qw(--kit --input --output --maximize --threads);
+    return 0 if grep { index($help, $_) < 0 } @flags;
+    return 1;
+}
+
+sub find_ont_program {
+    my ($name) = @_;
+    my $configured = getInfoLtS($name, \@txt, '');
+    $configured =~ s/"//g;
+    my @candidates;
+    if ($configured ne '' && $configured ne '??') {
+        push @candidates, File::Spec->file_name_is_absolute($configured)
+            ? $configured : File::Spec->catfile($ldir, $configured);
+        push @candidates, $configured if -f $configured;
+        push @candidates, command_exists($configured);
+    }
+    push @candidates, "$bdir/$name", command_exists($name);
+    my %seen;
+    for my $candidate (@candidates) {
+        next unless defined($candidate) && $candidate ne '';
+        my $path = abs_path($candidate);
+        next unless defined($path) && !$seen{$path}++;
+        return $path if compatible_ont_program($name, $path);
+    }
+    return;
+}
+
+sub check_ont_build_requirements {
+    my $needs_rust = 0; my $needs_make = 0;
+    for my $name (qw(savont barbell minimap2)) {
+        next if find_ont_program($name);
+        my @release = ont_release_binary($name);
+        next if @release;
+        if ($name eq 'minimap2') { $needs_make = 1; } else { $needs_rust = 1; }
+    }
+    if ($needs_rust) {
+        for my $tool (qw(cargo rustc cc c++ cmake)) {
+            die "ONT source builds require $tool. Install Rust >= 1.88, a C/C++ compiler and CMake, or install compatible Savont/Barbell executables on PATH, then rerun the installer.\n"
+                unless command_exists($tool);
+        }
+        my ($version, $status) = capture_cmd(command_exists('rustc'), '--version');
+        my ($rust_version) = $version =~ /rustc\s+(\d+\.\d+\.\d+)/;
+        die "ONT source builds require Rust >= 1.88 (found: $version).\n"
+            unless $status == 0 && defined($rust_version) && !version_is_newer('1.88.0', $rust_version);
+    }
+    if ($needs_make) {
+        die "Building minimap2 requires make and a C compiler (plus zlib development headers).\n"
+            unless command_exists('make') && command_exists('cc');
+    }
+}
+
+sub install_ont_program {
+    my ($name) = @_;
+    if (my $existing = find_ont_program($name)) { return $existing; }
+    my ($version, $repo, $sha) = ont_tool_spec($name);
+    my $stage = tempdir("$name-install-XXXXXXXX", DIR => $bdir, CLEANUP => 1);
+    my @release = ont_release_binary($name);
+    my $exe;
+    if (@release) {
+        my ($url, $digest, $member) = @release;
+        my $archive = "$stage/download";
+        getS2($url, $archive);
+        verify_sha256($archive, $digest);
+        if ($member ne '') {
+            run_cmd('tar', '-xjf', $archive, '-C', $stage);
+            $exe = "$stage/$member";
+        } else { $exe = $archive; }
+    } else {
+        my $archive = "$stage/source.tar.gz";
+        getS2("https://codeload.github.com/$repo/tar.gz/refs/tags/v$version", $archive);
+        verify_sha256($archive, $sha);
+        run_cmd('tar', '-xzf', $archive, '-C', $stage);
+        my $source = "$stage/$name-$version";
+        if ($name eq 'minimap2') {
+            my @host = uname();
+            my @make = ('make', '-C', $source);
+            push @make, 'arm_neon=1', 'aarch64=1' if $host[4] =~ /^(?:arm64|aarch64)$/;
+            run_cmd(@make);
+            $exe = "$source/minimap2";
+        } else {
+            my @build = (command_exists('cargo'), 'build', '--release', '--locked', '--manifest-path', "$source/Cargo.toml", '--target-dir', "$stage/target");
+            push @build, '--config', "$source/.cargo/config.toml" if -f "$source/.cargo/config.toml";
+            run_cmd(@build);
+            $exe = "$stage/target/release/$name";
+        }
+    }
+    die "Installation did not produce $name at $exe\n" unless -s $exe;
+    run_cmd('chmod', '+x', $exe);
+    die "Installed $name is not executable or lacks the CLI required by LotuS. See the tool's output above. The existing $name configuration entry was preserved.\n"
+        unless compatible_ont_program($name, $exe);
+    my $destination = "$bdir/$name";
+    copy_file_atomic($exe, $destination);
+    run_cmd('chmod', '+x', $destination);
+    return abs_path($destination);
+}
+
+sub install_ont_programs {
+    for my $name (qw(minimap2 savont barbell)) {
+        my $path = install_ont_program($name);
+        @txt = addInfoLtS($name, $path, \@txt, 1);
+    }
+}
+
 sub get_programs{
+	my ($dtar, $dexe);
 	#-----------  exit prog here, if set
 	#-----------------------
 
 
 
-	#minimap2
-	print "Installing minimap2 executable..\n";
-	my $dtar = "$bdir/minimap2-2.28_x64-linux.tar.bz2";
-	my $dexe = "$bdir/minimap2-2.28_x64-linux/minimap2";
-	if ($isMac){
-		$dexe = command_exists("minimap2") // "";
-		if ($dexe ne ""){
-			@txt = addInfoLtS("minimap2",$dexe,\@txt,1);
-		} else {
-			my $message = "minimap2 was not found in PATH. Install it natively on macOS and rerun the installer.\n";
-			print $message;
-			$finalWarning .= $message;
-		}
-	} else {
-		getS2("http://lotus2.earlham.ac.uk/lotus/packs//minimap2-2.28_x64-linux.tar.bz2",$dtar);
-		run_cmd("tar", "-xjf", $dtar, "-C", $bdir);
-		unlink($dtar) or warn "Could not remove $dtar: $!\n";
-		if (-e $dexe){ #not essential
-			run_cmd("chmod", "+x", $dexe);
-			@txt = addInfoLtS("minimap2",$dexe,\@txt,1);
-		} else {
-			$finalWarning .= "minimap2 executable did not exist at $dexe; minimap2 was not installed.\n";
-			print "minimap2 executable did not exist at $dexe; minimap2 was not installed.\n";
-		}
-	}
+	install_ont_programs();
 
 
 	if ($ITSready){ #ITSx

@@ -29,7 +29,31 @@ cd LotuS3
 perl helpers/autoInstall.pl
 ```
 
-The autoinstaller downloads and installs required software and databases inside the LotuS3 directory.
+The autoinstaller downloads and installs required software and databases inside the LotuS3 directory. Full installations include minimap2, Savont, and Barbell for ONT processing. Database-only modes do not install programs.
+
+## Adding ONT tools to an existing installation
+
+From this checkout, run:
+
+```bash
+perl helpers/autoInstall.pl --ont-only
+```
+
+This installs or locates the three ONT tools and writes their absolute executable paths to **`lOTUs.cfg`** in the installation root. Existing compatible executables configured there, in `bin/`, or on `PATH` are reused. Missing configuration entries are added, duplicate entries are collapsed, unrelated settings are retained, and the previous configuration is backed up as `lOTUs.cfg.bak` before the first change in that installer run. This mode does not repeat database or R-package installation.
+
+New downloads use pinned versions: Savont 0.7.0, Barbell 0.3.2, and minimap2 2.28. The installer verifies SHA-256 checksums, builds in temporary directories, and checks executable/version or command-interface compatibility before registering each tool. An installation failure preserves that tool's previous configuration entry; tools installed successfully earlier in the run remain installed.
+
+Savont is built from source and needs **Rust/Cargo 1.88 or newer, C and C++ compilers, and CMake**. Install these build tools before running the installer, or provide a compatible Savont executable on `PATH`. Barbell uses an official binary on Linux x86-64, Linux ARM64, and Apple Silicon; other supported hosts build it with Cargo. Minimap2 uses its Linux x86-64 binary where applicable and is otherwise built with Make, a C compiler, and zlib development headers. Downloads and source builds require network access, and archive extraction needs `tar`, gzip, and bzip2 support. A downloaded binary that cannot execute on the host is rejected; a compatible tool supplied on `PATH` can then be used instead.
+
+For manual installations, add the following entries to `lOTUs.cfg` (or your custom configuration selected with `-c`):
+
+```text
+savont /absolute/path/to/savont
+barbell /absolute/path/to/barbell
+minimap2 /absolute/path/to/minimap2
+```
+
+Barbell is needed at runtime only for `-ontDemux barbell`. See [ONT processing](ont.md) for commands and input formats. The ONT-only installer updates the installation-root `lOTUs.cfg`; it does not update custom `-c` configuration files.
 
 ## Requirements
 
@@ -41,7 +65,7 @@ LotuS3 requires:
 - Java or OpenJDK for tools such as the RDP classifier;
 - selected third-party tools and databases, depending on the chosen workflow.
 
-These dependencies are normally handled by conda or by the LotuS3 autoinstaller.
+Conda normally handles its package dependencies. The source autoinstaller expects system build tools to be installed already; see the ONT build requirements above.
 
 ## Installing dependencies manually
 

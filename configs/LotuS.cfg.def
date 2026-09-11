@@ -24,6 +24,9 @@ cd-hit cd-hit-est
 #vsearch chimera checking, OTU clustering and mapping
 vsearch bin/vsearch
 minimap2 minimap2
+#ONT ASV caller and raw-read demultiplexer; autoInstall.pl registers installed paths
+savont savont
+barbell barbell
 
 
 #RDP multiclassifier java archieve (e.g. /YY/MultiClassifier.jar)

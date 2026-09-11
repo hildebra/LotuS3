@@ -27,7 +27,7 @@ use File::Path qw(make_path remove_tree);
 use File::Spec;
 use File::Basename qw(dirname basename);
 use File::Copy qw(copy move);
-use File::Temp qw(tempdir);
+use File::Temp qw(tempdir tempfile);
 use Fcntl qw(:flock);
 use POSIX qw(strftime);
 use IO::Uncompress::Gunzip qw($GunzipError);
@@ -106,6 +106,8 @@ my $VSBinOri    = "";
 my $VSused      = 1;
 my $internalMapper = "V/USEARCH";
 my $cdhitBin    = "";
+my $savontBin   = ""; #absolute path to savont binary (ONT ASV caller)
+my $barbellBin  = ""; #absolute path to barbell binary (ONT demultiplexer)
 my $mini2Bin    = "";
 my $mjar = ""; #RDP multiclassifier java archieve (e.g. /YY/MultiClassifier.jar)
 my $rdpjar = ""
@@ -164,9 +166,20 @@ my $sdm454CDHITOpt = "$RealBin/configs/sdm_454_cdhit.txt";
 my $sdmHiseqOpt = "$RealBin/configs/sdm_hiSeq.txt";
 my $sdmPacBioOpt = "$RealBin/configs/sdm_PacBio_LSSU.txt";
 my $sdmPacBioITSOpt = "$RealBin/configs/sdm_PacBio_ITS.txt";
+my $sdmONTsavontOpt = "$RealBin/configs/sdm_ONT_savont.txt"; #ONT path: sdm demux+primer-trim only, savont owns QC
+my $sdmONTprimersOpt = "$RealBin/configs/sdm_ONT_primersonly.txt"; #ONT+barbell path: sdm strips primers only (barbell already demuxed; savont owns QC)
+my $ontDemux      = "0";          #ONT demultiplexer: "0"=off (input already per-sample), "barbell"=run barbell first
+my $ontKit        = "";           #barbell kit, e.g. SQK-RBK114-96 (required when -ontDemux barbell)
+my $ontBarcodeCol = "ONTBarcode"; #mapping-file column holding the per-sample barcode LABEL (e.g. BC38)
+my $ontMinReads   = 0;            #drop a declared barcode if barbell yields < this many reads (0 = keep all)
+my $ontWriteFastqCol = 1;         #add fastqFile to the working map; mode 0 requires that column to exist already
+my $savontSingleStrand  = 0;   #0=both-strand (default for raw ONT); 1=forward-only (pre-oriented data)
+my $savontQualCutoff    = 80;  #min estimated read accuracy % (savont --quality-value-cutoff)
+my $savontMinBaseQual   = 15;  #min base Q for SNPmer detection (savont --minimum-base-quality)
+my $savontChimeraErrors = 0;   #allowable errors in chimera detection (0=strict; 1=savont default)
 
 my $ClusterPipe_pre = "?"; #default is unknown..
-my $ClusterPipe     = 1; #use UPARSE (1), SWARM (2), cd-hit (3), UNOISE (6), DADA2 (7), or VSEARCH (8)
+my $ClusterPipe     = 1; #use UPARSE (1), SWARM (2), cd-hit (3), UNOISE (6), DADA2 (7), VSEARCH (8), or savont (9)
 my $clusteringNameStr = "UPARSE";
 my $clustMode = "de novo";
 
@@ -299,6 +312,7 @@ my %userProvidedOption;
 my $outputLockFH;
 my $outputLockFile = "";
 my $sdmDerepDo = 2;
+my @originalArgs = @ARGV;
 if ( !@ARGV ) {
     usage();
     exit 1;
@@ -361,6 +375,15 @@ GetOptions(
 	"LCA_idthresh=s"        => \$idThreshs,
 	"chim_skew=f"           => \$chimera_absskew,		
 	"p|platform=s"          => \$platform,		#miSeq,hiSeq,pacbio,pacbio_GA
+	"ontDemux=s"            => \$ontDemux,        #ONT: "barbell" to demultiplex a raw multiplexed FASTQ before sdm
+	"ontKit=s"              => \$ontKit,          #ONT: barbell kit name (e.g. SQK-RBK114-96)
+	"ontBarcodeCol=s"       => \$ontBarcodeCol,   #ONT: mapping-file column holding the per-sample barcode label
+	"ontMinReads=i"         => \$ontMinReads,     #ONT: min reads/barcode to keep a demuxed sample (0=keep all)
+	"ontWriteFastqCol=i"    => \$ontWriteFastqCol,
+	"savontSingleStrand=i"  => \$savontSingleStrand,
+	"savontQualCutoff=f"    => \$savontQualCutoff,
+	"savontMinBaseQual=i"   => \$savontMinBaseQual,
+	"savontChimeraErrors=i" => \$savontChimeraErrors,
 	"tolerateCorruptFq=i"   => \$damagedFQ,
 	"keepUnclassified=i"    => \$keepUnclassified,
 	"keepOfftargets=i"      => \$keepOfftargets,
@@ -404,6 +427,7 @@ GetOptions(
 #die "$refDBwanted\n";
 
 validate_cli_safety();
+my $userInput = $input; #keep original sources when ONT demultiplexing rewrites $input
 
 #!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
 #routines that are external of a proper 16S run
@@ -511,6 +535,11 @@ if ($dryRun) {
 
 prepare_temp_directory() if ( $exec == 0 );
 die( "Failed to make tmp dir or doesn't exist: \"" . $lotus_tempDir . "\"\n" ) if ( !-d $lotus_tempDir );
+
+#ONT pre-step: if requested, demultiplex the raw multiplexed FASTQ with barbell BEFORE
+#sdm runs, then route the resulting per-sample files into the normal per-sample-file path.
+ontBarbellDemux($mapHref, $combHref);
+%mapH = %{$mapHref};
 
 
 
@@ -680,7 +709,9 @@ if ( $exec == 0 && $onlyTaxRedo == 0 && $TaxOnly eq "0" ) {
 	
 	
 	#merge contamination results..
-	${$xtraConthref}{"phiX"} = ${$phiXhref}{"phiX"} ;
+	my %phiXhits = map { %$_ } values %{$phiXhref};
+	${$xtraConthref}{"phiX"} = \%phiXhits;
+	${$xtraConthref}{"VXtractor"} = $nonVXTRs;
 	${$xtraConthref}{"ITSx"} = $nonITShref;
 
 	#finalize OTU file;
@@ -868,6 +899,93 @@ close LOG; close cmdLOG;
 
 
 
+# Validate the already parsed map in both dry-run and execution modes.
+sub ontBarcodeMap {
+    my ($map) = @_;
+    my @headers = @{$map->{'#SampleID'}};
+    my %columns = map { $headers[$_] => $_ } 0 .. $#headers;
+    die "ONT demultiplexing needs a '$ontBarcodeCol' mapping column (barcode labels such as BC38).\n"
+        unless exists $columns{$ontBarcodeCol};
+    for my $column (qw(fnaFile qualFile BarcodeSequence Barcode2ndPair MIDfqFile)) {
+        die "-ontDemux barbell cannot use mapping column '$column'; use barcode labels in '$ontBarcodeCol' and FASTQ input.\n"
+            if exists $columns{$column};
+    }
+    die "-ontWriteFastqCol 0 requires an existing fastqFile mapping column for SDM directory input.\n"
+        if !$ontWriteFastqCol && !exists $columns{fastqFile};
+    my %barcodes;
+    for my $sample (sort grep { $_ ne '#SampleID' } keys %$map) {
+        my $barcode = $map->{$sample}->[$columns{$ontBarcodeCol}] // '';
+        $barcode =~ s/^\s+|\s+$//g;
+        next if $barcode eq '' || $barcode eq 'NA';
+        die "Unsafe ONT SampleID '$sample'; use letters, digits, underscores, and dots.\n"
+            unless $sample =~ /^[A-Za-z0-9_][A-Za-z0-9_.]*$/;
+        die "Invalid ONT barcode label '$barcode'.\n" unless $barcode =~ /^[A-Za-z0-9_][A-Za-z0-9_.-]*$/;
+        die "ONT barcode '$barcode' is assigned to more than one sample.\n" if exists $barcodes{$barcode};
+        $barcodes{$barcode} = $sample;
+    }
+    die "No usable '$ontBarcodeCol' entries found in the mapping file.\n" unless keys %barcodes;
+    return \%barcodes;
+}
+
+# Demultiplex one raw ONT FASTQ, then reuse the normal per-sample SDM path.
+sub ontBarbellDemux {
+    my ($map, $combined) = @_;
+    return if $ontDemux eq '0' || $exec != 0 || $dryRun || $onlyTaxRedo || $TaxOnly ne '0';
+    my $barcodes = ontBarcodeMap($map);
+    my $bbRaw = "$lotus_tempDir/barbell_raw";
+    my $bbDmx = "$lotus_tempDir/ont_demux";
+    safe_remove_tree($bbRaw, 'Barbell raw output');
+    safe_remove_tree($bbDmx, 'ONT demultiplexed input');
+    ensure_dir($bbDmx);
+    printL frame("ONT demultiplexing with barbell (kit $ontKit)\n",1,2),0;
+    my $cmd = join(' ', map { shell_quote($_) }
+        ($barbellBin, 'kit', '-k', $ontKit, '-i', $inputArray[0], '-o', $bbRaw, '--maximize', '-t', $uthreads));
+    systemL($cmd, 'Barbell demultiplexing');
+
+    my %kept; my @missing;
+    for my $barcode (sort keys %$barcodes) {
+        my $sample = $barcodes->{$barcode};
+        my $src = "$bbRaw/$barcode.trimmed.fastq";
+        unless (-s $src) { push @missing, "$barcode->$sample (no reads)"; next; }
+        if ($ontMinReads > 0) {
+            # Stop at the threshold; SDM validates all records when consuming this file.
+            my ($count, $problems) = fastq_validation_scan($src, $ontMinReads);
+            die join("\n", @$problems) . "\n" if @$problems;
+            if ($count < $ontMinReads) {
+                push @missing, "$barcode->$sample ($count<$ontMinReads reads)"; next;
+            }
+        }
+        copy($src, "$bbDmx/$sample.fq") or die "Cannot copy $src: $!\n";
+        $kept{$sample} = "$sample.fq";
+    }
+    printL "barbell: kept " . scalar(keys %kept) . ' of ' . scalar(keys %$barcodes) . " declared barcodes; excluded undeclared barcodes.\n",0;
+    printL "barbell: dropped declared barcodes: " . join('; ', @missing) . "\n",'w' if @missing;
+    die "barbell produced no usable per-sample files; check -ontKit and '$ontBarcodeCol' labels.\n" unless keys %kept;
+
+    # Keep metadata and the working map consistent even with -ontWriteFastqCol 0.
+    my @headers = @{$map->{'#SampleID'}};
+    my ($fqCol) = grep { $headers[$_] eq 'fastqFile' } 0 .. $#headers;
+    if ($ontWriteFastqCol && !defined $fqCol) {
+        push @headers, 'fastqFile'; $fqCol = $#headers;
+    }
+    $map->{'#SampleID'} = \@headers;
+    for my $sample (grep { $_ ne '#SampleID' } keys %$map) {
+        if (!exists $kept{$sample}) { delete $map->{$sample}; next; }
+        # Existing file names must also follow the new input directory in mode 0.
+        $map->{$sample}->[$fqCol] = $kept{$sample} if defined $fqCol;
+    }
+    %$combined = ();
+    my ($combineCol) = grep { $headers[$_] eq 'CombineSamples' } 0 .. $#headers;
+    for my $sample (sort keys %kept) {
+        my $group = defined($combineCol) ? $map->{$sample}->[$combineCol] : '';
+        $combined->{defined($group) && $group ne '' ? $group : $sample} = $sample;
+    }
+    my (undef, $grouped) = addSeqRun($map);
+    writeMap($grouped, $cpMapFile);
+    $input = $bbDmx; @inputArray = ($input); $numInput = 1;
+    $citations .= "Barbell ONT demultiplexing: https://github.com/rickbeeloo/barbell\n";
+}
+
 sub sdmStep1{
 	my $sdmcmd       = "";
 	my $filterOut    = "$lotus_tempDir/demulti.fna";
@@ -917,7 +1035,7 @@ sub sdmStep1{
 
 	my $sdmDemultiDir = "";
 	my $sdmOptStr     = "-options $sdmOpt ";
-	if ( $saveDemulti == 2 || $saveDemulti == 1 || $ClusterPipe == 7 ) { #dada2 also requires filtered raw reads
+	if ( $saveDemulti == 2 || $saveDemulti == 1 || $ClusterPipe == 7 || $ClusterPipe == 9 ) { #dada2 & savont also require filtered raw reads
 		$sdmDemultiDir = "$outdir/demultiplexed/";
 		if ( $saveDemulti == 1 ) { 
 			printL frame("Demultiplexed input files into single samples, no quality filtering done\nWill abort after demultiplexing (mode \"1\" is only for preparing publication ready, raw sequences)!\n"),0;
@@ -927,10 +1045,15 @@ sub sdmStep1{
 		#for valid paired output, need to keep them together..
 		$sdmOptStr .= "-pairedDemulti 1 " if ($paired > 1);
 
-		$sdmOptStr .= "-o_demultiplex_gz 1 " if ($ClusterPipe != 7 || $saveDemulti == 1);#for dada2 leave files.. (saveDemulti==1 exits before clustering)
+		#leave demux files non-gzipped for dada2 and savont (both read per-sample files directly; saveDemulti==1 exits before clustering)
+		$sdmOptStr .= "-o_demultiplex_gz 1 " if (($ClusterPipe != 7 && $ClusterPipe != 9) || $saveDemulti == 1);
 		if ($ClusterPipe == 7){ #dada2.. no rd pair info in head!
 			$sdmOptStr .= "-pairedRD_HD_out 0 -derep_format fq -derepPerSR 1 -DemultiBPperSR 1e8 ";
 			$sdmOptStr .= "-onlyCanonicalNTs 1 -strictPositiveQualsOut 1 ";
+			$sdmDemultiDir = "$lotus_tempDir/demultiplexed/" if ($saveDemulti == 0);
+		}
+		if ($ClusterPipe == 9){ #savont: single-end long reads, needs full (non-dereplicated) per-sample fq
+			$sdmOptStr .= "-DemultiBPperSR 1e9 ";
 			$sdmDemultiDir = "$lotus_tempDir/demultiplexed/" if ($saveDemulti == 0);
 		}
 	}
@@ -1513,7 +1636,7 @@ sub contamination_rem($ $ $ $) {
 			$hexDB .= ".lts.fna";
 			my $hitsFile = $otusFA . ".$nameRDB.${processShrt}_hit.uc";
 			
-			if ($nameRDB ne "PhiX"){ #minimap2, now default
+			if ($useMini4map){ #use the selected mapper for contamination searches too
 				$hitsFile= "$otusFA.$nameRDB.${processShrt}_hit.paf";
 				$cmd = "$mini2Bin  $mini2RdPreset -t $uthreads -o $hitsFile $refDB $otusFA;";
 				$matchAlgo = "minimap2";
@@ -1537,19 +1660,28 @@ sub contamination_rem($ $ $ $) {
 			my %hits;
 			if ($hitsFile =~ m/\.paf/){
 				open I, "<", $hitsFile or die "Can't open search result file $hitsFile";
-				while (<I>) {my @spl = split(/\t/); 
-					#look for matches at 50% overlap, 90% ANI
-					if ( $spl[9] > $spl[6] * 0.5 || (($spl[9] / $spl[10]) > $minHitID) ) { $hits{$spl[0]}=1; $contRem++; }
+				while (<I>) {
+					chomp; my @spl = split(/\t/);
+					die "Malformed PAF alignment in $hitsFile at line $.\n"
+						unless @spl >= 12 && !grep { $spl[$_] !~ /^\d+$/ } (1, 2, 3, 6, 7, 8, 9, 10, 11);
+					die "Invalid PAF alignment lengths in $hitsFile at line $.\n"
+						unless $spl[1] > 0 && $spl[10] > 0 && $spl[2] <= $spl[3] && $spl[3] <= $spl[1]
+						&& $spl[7] <= $spl[8] && $spl[8] <= $spl[6] && $spl[9] <= $spl[10];
+					# Require BOTH >=50% query coverage and >=90% identity. PAF's
+					# target length can be a whole genome, not the amplicon length.
+					$hits{$spl[0]} = 1 if ($spl[3] - $spl[2]) >= $spl[1] * 0.5
+						&& $spl[9] >= $spl[10] * $minHitID;
 				}
 				close I;
 			} else {
 				open I, "<", $hitsFile or die "Can't open search result file $hitsFile";
 				while (<I>) {my @spl = split(/\t/);
-					if ( $spl[0] eq "H" ) { $hits{$spl[8]}=1; $contRem++; }
+					if ( $spl[0] eq "H" ) { $hits{$spl[8]}=1; }
 				}
 				close I;
 			}
 			my @hitA = keys %hits;
+			$contRem = scalar @hitA;
 			my $storeContamIDsF = "$logDir/$nameRDB1.$nameRDB.otus";
 			my $Xtxt ="";
 			#$Xtxt .= "\nIDs stored in $storeContamIDsF" if ($contRem);
@@ -1597,14 +1729,14 @@ sub contamination_rem($ $ $ $) {
 	}
 	#nothing found? don't bother writing file again..
 	if ($Lreport ne ""){
-		my $usvstr = `$mini2Bin --version 2>&1`;
+		my $usvstr = $useMini4map ? checked_program_output($mini2Bin, "--version") : "";
 		my ($miniVer) = $usvstr =~ m/(\d+(?:\.\d+)+)/;
 		$miniVer = "unknown" unless defined $miniVer;
 
 		printL (frame( $Lreport), 0);
 		unless ($citations =~ m/Offtarget removal/){
 			$citations .= "Offtarget removal (against $nameRDB1): Bedarf, J.R., Beraza, N., (2021). Much ado about nothing? Off-target amplification can lead to false-positive bacterial brain microbiome detection in healthy and Parkinson's disease individuals. Microbiome 9, 75.\n";
-			$citations .= "minimap2 v$miniVer used in offtarget aligments: Li H. 2018. Minimap2: pairwise alignment for nucleotide sequences. Bioinformatics 34:3094–3100.\n";
+			$citations .= "minimap2 v$miniVer used in offtarget aligments: Li H. 2018. Minimap2: pairwise alignment for nucleotide sequences. Bioinformatics 34:3094–3100.\n" if $useMini4map;
 		}
 	}
 	my @kh = keys %totHits;
@@ -1682,8 +1814,8 @@ sub addSize2OTUfna($ $){
 
 sub chimera_denovo($){
 	my ($OTUfa) = @_;
-	#uparse, unoise, dada2 have their own chimera checks
-    if ($ClusterPipe == 1 ||$ClusterPipe == 7||$ClusterPipe == 6 || !-e $OTUfa || $noChimChk == 1 || $noChimChk == 2 ){
+	#uparse, unoise, dada2, savont have their own chimera checks
+    if ($ClusterPipe == 1 ||$ClusterPipe == 7||$ClusterPipe == 6 || $ClusterPipe == 9 || !-e $OTUfa || $noChimChk == 1 || $noChimChk == 2 ){
 		return $OTUfa;
 	}
 	my $iniEntries = cntFastaEntrs($OTUfa);
@@ -1901,7 +2033,7 @@ sub clean_otu_mat($ $ $) {
 	my $Lreport = "";
 
 	#die "$OTUmFile\n$OTUfa\n";
-	open I, "<$OTUmFile";
+	open I, "<", $OTUmFile or die "Cannot read abundance table $OTUmFile: $!\n";
 	if ($extendedLogs) {
 		open O2x, ">$extendedLogD/otu_mat.chim.txt" or printL "Failed to open $extendedLogD/otu_mat.chim.txt", 33;
 	}
@@ -1935,9 +2067,9 @@ sub clean_otu_mat($ $ $) {
 	if ($extendedLogs) { close O2x; }
 
 	#print resorted OTU matrix & contaminant matrix..
-	open OF,  ">$OTUfa";
-	open OOFF,  ">$logDir/OTU.contaminants.fa";
-	open O,   ">$OTUmFile";
+	open OF, ">", $OTUfa or die "Cannot write filtered sequences $OTUfa: $!\n";
+	open OOFF, ">", "$logDir/OTU.contaminants.fa" or die "Cannot write contaminant sequences: $!\n";
+	open O, ">", $OTUmFile or die "Cannot write filtered abundance table $OTUmFile: $!\n";
 	open O3x, ">$extendedLogD/otu_mat.contam.txt" or printL "Failed to open $extendedLogD/otu_mat.contam.txt", 33 if ($extendedLogs);
 	my $emptyOTUcnt = 0;my $nonChim   = 0; my $nonChimRds = 0;
 	print O $OTUmat{head} . "\n";
@@ -2007,7 +2139,7 @@ sub clean_otu_mat($ $ $) {
 	$Lreport.= "Removed mismapped OTUs ($emptyOTUcnt) with 0 matrix counts..\n" if ( $emptyOTUcnt > 0 );
 $Lreport .= "After filtering $nonChim ${OTU_prefix}'s ($nonChimRds reads) remaining in matrix.\n";
 
-	if ( ( $nonChim - $emptyOTUcnt ) == 0 ) {
+	if ( $nonChim == 0 && $intoMatLast eq "" ) {
 		#print "$nonChim - $emptyOTUcnt\n";
 		printL "Empty ${OTU_prefix} matrix.. aborting LotuS run!\n", 87;
 	}
@@ -2119,16 +2251,12 @@ sub readTaxIn($ $ $ $ ) {
         unshift @lvls2, "";
     }
     open I, "<", $inT or die("$inT not found: $!\n");
-    my $markLvl = -1;
+    my %seen_otus;
     my $cnt     = -1;
     while ( my $line = <I> ) {
         chomp($line);
         $cnt++;
-        my @spl = split( /\t/, $line );
-        if ( $cnt == 1 && $markLvl == -1 ) {
-            $markLvl = 0;
-            $markLvl = 1 unless ( $spl[0] =~ m/[kpc]__/ );
-        }
+        my @spl = split( /	/, $line, -1 );
         for ( my $i = 0 ; $i < @spl ; $i++ ) {
             $spl[$i] = "?" if ( $spl[$i] eq "" );
         }
@@ -2137,17 +2265,19 @@ sub readTaxIn($ $ $ $ ) {
           ; #|| $spl[0] eq "domain" || $spl[0] eq "Domain" || $spl[0] eq "OTU");
             #phylum unknown: ignore entry
             #if ($spl[1] eq "?" && $spl[2] eq "?"){next;}
-        if ( @spl < 6 ) { die $line; }
-        if ( $markLvl == 1 && $biomFmt == 1 ) {    #add k__ etc tags
-            for ( my $i = 0 ; $i < @lvls2 ; $i++ ) {
-                chomp $spl[$i];
-                $spl[$i] = $lvls2[$i] . $spl[$i];
-            }
+        die "Malformed taxonomy row in $inT at line " . ($cnt + 1) . ": expected an OTU ID and seven ranks\n" unless @spl >= 8;
+        die "Missing OTU ID in $inT at line " . ($cnt + 1) . "\n" if $spl[$tarEntr] eq "?";
+        die "Duplicate taxonomy OTU '$spl[$tarEntr]' in $inT at line " . ($cnt + 1) . "\n" if $seen_otus{$spl[$tarEntr]}++;
+        $spl[$hit2DBEntr] //= "?";
+        my @biom_tax = @spl[$taxStart .. $taxEnd - 1];
+        for my $i (0 .. $#biom_tax) {
+            my $prefix = $lvls2[$taxStart + $i];
+            $biom_tax[$i] = $prefix . $biom_tax[$i] unless $biom_tax[$i] =~ /^\Q$prefix\E/;
         }
         if ( $biomFmt == 1 ) {                     #simple joining of levels
                 #print ("@spl $taxStart .. $taxEnd\n");
             $Taxo{ $spl[$tarEntr] } =
-              join( "\", \"", @spl[ $taxStart .. ( $taxEnd - 1 ) ] );
+              join( "\", \"", @biom_tax );
         }
         else {    #complex add up of levels
             my $foreRun = $spl[$taxStart];
@@ -2178,16 +2308,7 @@ sub readTaxIn($ $ $ $ ) {
                     $hit2DB{ $spl[$hit2DBEntr] } = \@tmp;
                 }
 
-                #for bioim format, need to change the lvls
-                if ( $markLvl == 1 ) {
-                    for ( my $i = 0 ; $i < @lvls2 ; $i++ ) {
-                        chomp $spl[$i];
-                        $spl[$i] = $lvls2[$i] . $spl[$i];
-                    }
-                }
-                $hit2DBtax{ $spl[$hit2DBEntr] } =
-                  join( "\", \"", @spl[ $taxStart .. ( $taxEnd - 1 ) ] )
-                  ;    #in biom format
+                $hit2DBtax{ $spl[$hit2DBEntr] } = join( "\", \"", @biom_tax );
 
             }
             else { $hit2DB{ $spl[$tarEntr] } = [ $spl[$tarEntr] ]; }
@@ -2363,6 +2484,12 @@ sub readPaths_aligners($) {
 		}
 		elsif ( $line =~ m/^cd-hit\s+(.+?)\s*$/ ) {
 			$cdhitBin = truePath($1);
+		}
+		elsif ( $line =~ m/^savont\s+(.+?)\s*$/ ) {
+			$savontBin = truePath($1);
+		}
+		elsif ( $line =~ m/^barbell\s+(.+?)\s*$/ ) {
+			$barbellBin = truePath($1);
 		}
 		elsif ( $line =~ m/^minimap2\s+(.+?)\s*$/ ) {
 			$mini2Bin = truePath($1);
@@ -2911,21 +3038,44 @@ sub announce_options{
 
 
 
+sub version_at_least {
+    my ($actual, $required) = @_;
+    my @a = split /\./, $actual; my @r = split /\./, $required;
+    for my $i (0 .. ($#a > $#r ? $#a : $#r)) {
+        my $cmp = ($a[$i] // 0) <=> ($r[$i] // 0);
+        return $cmp > 0 if $cmp;
+    }
+    return 1;
+}
+
+sub checked_program_output {
+    my (@command) = @_;
+    my ($fh, $path) = tempfile("lotus3-version-XXXXXXXX", TMPDIR => 1, UNLINK => 1);
+    close $fh;
+    my $status = run_command_capture($path, @command);
+    open my $reader, "<", $path or die "Cannot read version output $path: $!\n";
+    my $output = do { local $/; <$reader> } // "";
+    close $reader;
+    unlink $path;
+    die "Executable check failed (exit $status): @command\n$output" if $status;
+    return $output;
+}
+
 sub checkProgVersions{
 	#version checks
 	#die "$mini2Bin\n";
-	my $LCAout = `$LCABin -v 2>&1`;
+	my $LCAout = checked_program_output($LCABin, "-v");
 	my ($LCAver) = $LCAout =~ /(\d+(?:\.\d+)+)/;
-	if (!defined($LCAver) || $LCAver < 0.25){
+	if (!defined($LCAver) || !version_at_least($LCAver, "0.25")){
 		printL "Could not verify LCA >= 0.25 (output: $LCAout) at $LCABin\n",823;
 	}
 #minimap2 version check
 	if (defined($mini2Bin) && -f $mini2Bin){
-		my $usvstr = `$mini2Bin --version 2>&1`;
+		my $usvstr = checked_program_output($mini2Bin, "--version");
 		my ($miniVer) = $usvstr =~ /(\d+(?:\.\d+)+)/;
 		if (!defined $miniVer) {
 			printL "Could not parse minimap2 version from $mini2Bin: $usvstr\n", 823;
-		} elsif ($miniVer < 2.17) {
+		} elsif (!version_at_least($miniVer, "2.17")) {
 			die "minimap2 version (found $miniVer at $mini2Bin) too low, expected at least 2.17\n";
 		}
 	}
@@ -2959,7 +3109,7 @@ sub checkProgVersions{
 	}
 	#vsearchversion:
 	if (defined $VSBin && -f $VSBin){
-		my $vstring = `$VSBin --version 2>&1`;
+		my $vstring = checked_program_output($VSBin, "--version");
 		if ($vstring =~ m/vsearch v([\d\.]+)/i) {
 			$vsearchVer = $1;
 		} else {
@@ -2988,7 +3138,7 @@ sub checkProgVersions{
 	my ($lotusVersion) = $selfID =~ m/LotuS (\d+(?:\.\d+)+)/;
 	printL "Could not parse the LotuS version from '$selfID'\n", 823 unless defined $lotusVersion;
 	my $sdmVer = checkLtsVer($lotusVersion);
-	if ( $sdmVer < $curSdmV ) {
+	if ( !version_at_least($sdmVer, $curSdmV) ) {
 		printL "Installed sdm version ($sdmVer < $curSdmV) seems to be outdated, please check on \n    lotus2.earlham.ac.uk\nfor the most recent version. Make sure the sdm path in '$lotusCfg' points to the correct sdm binary\n","w";
 	}
 
@@ -3025,6 +3175,12 @@ sub setClusterAlgo{
 		printL "DNACLUST/reference-based OTU clustering has been removed. Choose UPARSE, VSEARCH, CD-HIT, SWARM, UNOISE, or DADA2.\n", 64;
 	}elsif ( $ClusterPipe_pre eq "0" ) {
 		printL "Clustering cannot be disabled for a full LotuS run; use -taxOnly <fasta> for taxonomy-only mode.\n", 64;
+	}elsif ( $ClusterPipe_pre eq "SAVONT" || $ClusterPipe_pre eq "9" ) {
+		$ClusterPipe = 9; $clusteringNameStr = "savont";
+		${OTU_prefix} = "ASV";
+		if ( $saveDemulti != 1 && !$onlyTaxRedo && (!-f $savontBin || !-x $savontBin) ) {
+			printL "No valid savont binary found at $savontBin\n (set 'savont <path>' in lOTUs.cfg)\n", 88;
+		}
 	} else {#default pipeline
 		if (-f $usBin) {
 			$ClusterPipe = 1; $clusteringNameStr = "UPARSE";
@@ -3145,7 +3301,6 @@ sub prepLtsOptions{
 	}
 	if ($TaxOnly eq "0" ){
 		$resetOutdir = ( $exec == 0 && $onlyTaxRedo == 0 ) ? 1 : 0;
-		unlink($progOutPut) if (-e $progOutPut); #from here log systemL
 	}
 	
 	
@@ -3160,6 +3315,22 @@ sub prepLtsOptions{
 	validate_output_directory_compatibility($outdir, $resetOutdir);
 	ensure_dir($outdir) unless ( -d $outdir );
 	acquire_output_lock($outdir) unless $dryRun;
+	# Only the lock holder may reset logs or output from a previous run.
+	_assert_directory_excludes_inputs($outdir) if $resetOutdir;
+    if ($resetOutdir) {
+        opendir my $existing, $outdir or die "Cannot inspect $outdir: $!\n";
+        my @entries = grep { $_ ne "." && $_ ne ".." } readdir($existing);
+        closedir $existing;
+        if (@entries) {
+            # Reuse the isolated dry-run path to validate options, dependencies,
+            # and mappings before replacing an existing run. The parent holds
+            # the output lock; the dry-run child never touches that output.
+            eval { checked_program_output($^X, abs_path($0), @originalArgs, "--dry-run"); 1 }
+                or die "Output reset preflight failed; previous output preserved.\n$@";
+        }
+    }
+	unlink($progOutPut) or die "Cannot reset program log $progOutPut: $!\n"
+		if $TaxOnly eq "0" && -e $progOutPut;
 	if ($resetOutdir) {
 		safe_remove_tree($outdir, "output directory");
 		ensure_dir($outdir);
@@ -3278,7 +3449,20 @@ sub prepLtsOptions{
 		}
 	} elsif ($platform eq "aviti"){
 		$sdmOpt =$sdmAVITIOpt;
+	} elsif ($platform eq "ont"){
+		#ONT long-read amplicons: demux+primer-trim via sdm, ASVs via savont.
+		#  -ontDemux barbell: barbell does demux+barcode-trim first, so sdm strips
+		#  16S primers ONLY (primers-only config); otherwise sdm does demux+primer-trim.
+		$dereplicate_minsize_def = 0;
+		$mini2RdPreset = "-x map-ont -u b --secondary=no -c ";
+		$ClusterPipe_pre = "SAVONT" if ($ClusterPipe_pre eq "?");#default, user can override with -CL
+		if ($sdmOpt eq ""){
+			$sdmOpt = ($ClusterPipe_pre eq "SAVONT" || $ClusterPipe_pre eq "9")
+				? (($ontDemux eq "barbell") ? $sdmONTprimersOpt : $sdmONTsavontOpt)
+				: "$RealBin/configs/sdm_ONT_LSSU.txt";
+		}
 	}
+	die "Option -ontDemux \"$ontDemux\" only applies to the ONT long-read path; it requires -p ONT.\n" if ($ontDemux ne "0" && $platform ne "ont");
 	
 	
 	if (  $dereplicate_minsize eq "-1" ){
@@ -3461,7 +3645,16 @@ my @further_options = (
   ['-barcode|-MID <file>', 'FASTQ-formatted barcode/MID file. The equivalent mapping-file column is MIDfqFile. Default: none.'],
   ['-s|-sdmopt <file>', 'SDM option file. Defaults to configs/sdm_miSeq.txt or a platform-specific preset.'],
   ['-c|-config <file>', 'LotuS configuration file with program paths. Default: <LotuS3_dir>/lOTUs.cfg.'],
-  ['-p|-platform <454|miSeq|hiSeq|PacBio|PacBio_GA|AVITI>', 'Sequencing platform preset. Default: miSeq.'],
+  ['-p|-platform <454|miSeq|hiSeq|PacBio|PacBio_GA|AVITI|ONT>', 'Sequencing platform preset. Default: miSeq.'],
+  ['-ontDemux <0|barbell>', 'ONT only: optionally demultiplex one raw FASTQ with Barbell before SDM. Default: 0 (SDM handles supplied input).'],
+  ['-ontKit <name>', 'Barbell kit, e.g. SQK-RBK114-96. Required with -ontDemux barbell.'],
+  ['-ontBarcodeCol <name>', 'Mapping column containing Barbell labels such as BC38. Default: ONTBarcode.'],
+  ['-ontMinReads <num>', 'Drop declared Barbell samples with fewer reads. Default: 0.'],
+  ['-ontWriteFastqCol <0|1>', 'Add fastqFile to the Barbell working map. Default: 1. Mode 0 requires an existing fastqFile column. File entries are always updated; dropped samples are removed.'],
+  ['-savontSingleStrand <0|1>', 'Search both strands (0, default), or only forward reads (1, for pre-oriented input).'],
+  ['-savontQualCutoff <0-100>', 'Savont quality-value cutoff. Default: 80 (from the ONT branch).'],
+  ['-savontMinBaseQual <0-93>', 'Savont minimum base quality for SNPmer detection. Default: 15.'],
+  ['-savontChimeraErrors <num>', 'Savont allowable chimera errors. Default: 0.'],
   ['-t|-threads <num>', 'Number of threads to use. Default: 1, or auto-detected where supported.'],
 	['-tmp|-tmpDir <dir>', 'Temporary directory for intermediate files. Default: <outputDir>/tmpFiles. Marker-less directories from older LotuS runs are recognized from known intermediates; mixed contents are preserved in a sibling backup.'],
   ['-verbosity <0-3>', 'Logging verbosity: 0 minimal, 1 standard, 2 verbose, 3 include detailed command output. Default: 1.']
@@ -3483,7 +3676,7 @@ my $workflow_heading = "Workflow options";
 my @workflow_options = (
   ['-forwardPrimer <string>', 'Forward primer sequence used to amplify the target region.'],
   ['-reversePrimer <string>', 'Reverse primer sequence used to amplify the target region.'],
-  ['-backmap_id <0-1>', 'Identity cutoff for backmapping reads onto OTUs/zOTUs/ASVs. Default: 0.97, or 0.99 for ASVs/zOTUs.'],
+  ['-backmap_id <0-1>', 'Identity cutoff for backmapping reads onto OTUs/zOTUs/ASVs. Default: 0.97 (including ONT/savont), or 0.99 for DADA2/UNOISE.'],
   ['-saveDemultiplex <0|1|2|3>', '(1) save all unfiltered demultiplexed reads; (2) save quality-filtered demultiplexed reads and continue the run; (3) save demultiplexed, filtered reads into one FASTQ/FASTA with sample IDs in headers; (0) do not save demultiplexed reads. Default: 0.'],
   ['-taxOnly <file>', 'Skip most of the pipeline and only run taxonomic classification on a FASTA file. Example: lotus3 -taxOnly reads.fna -refDB SLV.'],
   ['-redoTaxOnly <0|1>', '(1) redo only taxonomic assignments for an existing LotuS run, useful for replacing a database. (0) normal LotuS run. Default: 0.'],
@@ -3520,7 +3713,7 @@ my @taxonomy_options = (
 
 my $clustering_heading = "Clustering and chimera options";
 my @clustering_options = (
-  ['-CL|-clustering <uparse|swarm|cdhit|unoise|dada2|vsearch>', 'Sequence clustering/denoising method: UPARSE, swarm, cd-hit, unoise3, dada2, or VSEARCH. Numeric shortcuts are also accepted. Default: UPARSE.'],
+  ['-CL|-clustering <uparse|swarm|cdhit|unoise|dada2|vsearch|savont>', 'Sequence clustering/denoising method: UPARSE, swarm, cd-hit, unoise3, dada2, VSEARCH, or savont (9, requires -p ONT). Numeric shortcuts are also accepted. ONT defaults to savont; other defaults depend on platform and installed tools.'],
   ['-id <0-1>', 'Clustering identity threshold for OTUs. Default: 0.97.'],
   ['-vsearch_iddef <0-4>', 'VSEARCH identity definition for clustering/chimera checking: 0 CD-HIT; 1 edit distance over alignment length; 2 edit distance excluding terminal gaps; 3 MBL definition; 4 BLAST-like definition.'],
   ['-swarm_distance <num>', 'Swarm clustering distance. Default: 1.'],
@@ -3847,7 +4040,7 @@ sub calcHighTax($ $ $ $ $) {
 		my $isUnassigned     = 0;
 		my @avTax            = sort( keys( %{ $Taxo{$l} } ) );
 		my $outF             = $highLvlDir . $l . ".txt";
-		open O, ">", $outF;
+		open O, ">", $outF or die "Cannot write taxonomy abundance table $outF: $!\n";
 
 		#header
 		print O $l . $SEP . join( $SEP, @avSmps );
@@ -3973,6 +4166,7 @@ sub buildTree($ $) {
 		if (!-f $mafftBin){
 			printL "Could not find MAFFT binary at $mafftBin\nAborting\n", 5;
 		}
+		ensure_dir(dirname($multAli)); #alignment is needed even with -extendedLogs 0
 		$cmd = "$mafftBin --thread $tthreads --quiet $OTUfa > $multAli";
 		systemL $cmd;
         
@@ -4844,13 +5038,13 @@ sub writeBlastHiera($ $ $) {
 
 sub checkLtsVer($) {
     my ($lver)  = @_;
-    my $sdmVstr = `$sdmBin -v`;
+    my $sdmVstr = checked_program_output($sdmBin, "-v");
     my $sdmVer  = 1;
     if ( $sdmVstr =~ m/sdm (\d\.\d+) \D+/ ) {
         $sdmVer = $1;
     }
     else {
-        $sdmVstr = `$sdmBin`;
+        $sdmVstr = checked_program_output($sdmBin);
 
         #die $sdmVstr;
         if ( $sdmVstr =~ m/This is sdm version (\d\.\d+) \D+/ ) {
@@ -5372,7 +5566,7 @@ sub doDBblasting($ $ $) {
 		my $outCols="query+target+id+alnlen+mism+opens+qlo+qhi+tlo+thi+ql";
         my $udbDB = $DB . ".vudb";
         $udbDB = $DB . ".udb" if ($doBlasting == 5 );
-		system "rm $udbDB*" if ($redoTaxDB);
+		systemL "rm -f $udbDB;" if ($redoTaxDB);
         if ( !-f $udbDB ) { 
             print "Building UDB database $DB (takes some time the first time)\n";
 			if ($doBlasting == 4 ){
@@ -5403,19 +5597,18 @@ sub doDBblasting($ $ $) {
 		
 		if ($lamVer < 3.0){printL "Found Lambda v $lamVer at $lambda3Bin\nLotuS3 no longer supports lambda below version 3.0\nPlease update\n",333;}
 		#v3 fix:
-		my $query1 = ""; if ($query =~ m/\.fna$/){$query1 = $query; $query =~ s/\.fna$/\.fa/;}
-		systemL("mv $query1  $query;") unless ($query1 eq "");
-        ( my $TAX_REFDB_wo = $DB ) =~ s/\.[^.]+$//;
-        #print $DB. ".fm.txt.concat\n";
-		system "rm -f $DB.dna5* $DB.bin* $DB.idx* " if ($redoTaxDB);
-        if (   $lamVer > 0.4 && -f $DB . ".dna5.fm.sa.val"&& !-f "$DB.dna5.fm.lf.drv.wtc.24" ){
-            printL "Rewriting taxonomy DB to Lambda > 0.9 version\n", 0;
-            systemL "rm -rf $DB.*;";
-        } 
-		if ($lamVer >= 3 && -f "$DB.dna5.fm.lf.drv.wtc.24" ){
-            printL "Rewriting taxonomy DB to Lambda3 > 3.0 version\n", 0;
-            systemL "rm -rf $DB.*;";
+        # Lambda expects a recognised FASTA suffix. Never rename the user's
+        # taxonomy-only input: a failed index/search must leave it intact.
+        my $query1 = "";
+        if ($query =~ /\.fna$/) {
+            $query1 = $query;
+            $query = "$lotus_tempDir/lambda_query.fa";
+            copy($query1, $query) or die "Cannot prepare Lambda query $query: $!\n";
         }
+        # Lambda3 has its own index files. Keep older index formats and
+        # unrelated DB sidecars intact; only clear the exact current index when
+        # explicitly requested. A broad "$DB.*" also deletes taxonomy files.
+        systemL "rm -f $DB.lba $DB.lba.gz;" if $redoTaxDB;
 		if (  !-f "$DB.lba.gz" || -s "$DB.lba.gz" < 100 ) {
 			printL "\n\nBuilding LAMBDA index anew for $DB (this only happens the first time you use this ref DB, it may take several hours to build)..\n\n",0;
 
@@ -5440,7 +5633,7 @@ sub doDBblasting($ $ $) {
         #$cmd = "$lambdaBin -t $BlastCores -id 75 -nm 200 -p blastn -e 1e-8 -so 7 -sl 16 -sd 1 -b 5 -pd on -q $query -d $DB -o $tmptaxblastf -oc $outcols;";
         $cmd = "$lambda3Bin searchn -t $BlastCores --percent-identity 75 --num-matches 200 --e-value 1e-8 -q $query -i $DB.lba.gz -o $tmptaxblastf --output-columns $outcols;";
         $cmd .= "mv $tmptaxblastf $taxblastf;";
-		$cmd .= "mv $query  $query1;" unless ($query1 eq "");
+		$cmd .= "rm -f $query;" unless ($query1 eq "");
 
 
         #lambda is not guranteed to return sorted list <- apparently it does
@@ -6416,6 +6609,8 @@ sub acquire_output_lock {
     unless (flock($lfh, LOCK_EX | LOCK_NB)) {
         die "Output directory appears to be in use by another LotuS3 run: $target_outdir\nLock file: $outputLockFile\n";
     }
+    seek($lfh, 0, 0) or die "Cannot seek output lock $outputLockFile: $!\n";
+    truncate($lfh, 0) or die "Cannot truncate output lock $outputLockFile: $!\n";
     print {$lfh} "LotuS3 lock held by PID $$ since " . scalar(localtime) . "\n";
     $outputLockFH = $lfh;
 }
@@ -6425,7 +6620,8 @@ sub release_output_lock {
     flock($outputLockFH, LOCK_UN);
     close $outputLockFH;
     undef $outputLockFH;
-    unlink $outputLockFile if defined $outputLockFile && $outputLockFile ne "" && -e $outputLockFile;
+    # Keep the inode: unlinking after unlocking lets another process lock the old
+    # inode while a third process creates and locks a new file at the same path.
 }
 
 sub file_signature {
@@ -6544,7 +6740,7 @@ sub validate_option_combinations {
     push @problems, "-GAminAmpli cannot be negative" if $GAminAmpli < 0;
     push @problems, "-GAmaxAmpli cannot be negative" if $GAmaxAmpli < 0;
     push @problems, "-GAminAmpli cannot exceed -GAmaxAmpli" if $GAmaxAmpli > 0 && $GAminAmpli > $GAmaxAmpli;
-    push @problems, "Unsupported -platform '$platform'" unless $platform =~ /^(?:miseq|hiseq|454|pacbio|pacbio_ga|aviti)$/;
+    push @problems, "Unsupported -platform '$platform'" unless $platform =~ /^(?:miseq|hiseq|454|pacbio|pacbio_ga|aviti|ont)$/;
     push @problems, "Unsupported -amplicon_type '$ampliconType'" unless $ampliconType =~ /^(?:SSU|LSU|ITS|ITS1|ITS2|CUSTOM)$/;
     push @problems, "Unsupported -tax_group '$organism'" unless $organism =~ /^(?:bacteria|fungi|eukarya)$/;
     push @problems, "-derepMin has invalid syntax '$dereplicate_minsize'"
@@ -6599,12 +6795,32 @@ sub _option_was_provided {
 sub _unsafe_shell_token_reason {
     my ($value) = @_;
     return "contains a NUL or line break" if defined($value) && $value =~ /[\0\r\n]/;
-    return "contains shell-control characters" if defined($value) && $value =~ /[;&|`\$<>]/;
+    return "contains shell-control characters" if defined($value) && $value =~ /[;&|`\$<>"'\\(){}*?\[\]~]/;
+    return "starts with an option prefix" if defined($value) && $value =~ /^-/;
     return "contains whitespace, which this pipeline's legacy command layer cannot safely preserve" if defined($value) && $value =~ /\s/;
     return "";
 }
 
 sub validate_cli_safety {
+    die "Unknown -CL '$ClusterPipe_pre'. Choose UPARSE, VSEARCH, CD-HIT, SWARM, UNOISE, DADA2, or SAVONT.\n"
+        unless $ClusterPipe_pre =~ /^(?:\?|[0-4]|[6-9]|CD-?HIT|VSEARCH|UPARSE|UNOISE3?|DADA2|SWARM|DNACLUST|SAVONT)$/i;
+    die "-highmem 0 is no longer supported; LotuS requires SDM dereplication.\n" if $sdmDerepDo == 0;
+    die "-exe must be 0 or 1.\n" unless $exec =~ /^[01]$/;
+    die "-useMini4map must be 0 or 1.\n" unless $useMini4map =~ /^[01]$/;
+    die "-saveDemultiplex must be 0, 1, or 2.\n" unless $saveDemulti =~ /^[012]$/;
+    die "-ontDemux must be 0 or barbell.\n" unless $ontDemux eq '0' || $ontDemux eq 'barbell';
+    die "-ontDemux barbell requires -p ONT.\n" if $ontDemux ne '0' && lc($platform) ne 'ont';
+    die "-CL savont requires -p ONT.\n" if $ClusterPipe_pre =~ /^(?:savont|9)$/i && lc($platform) ne 'ont';
+    die "-ontKit is required with -ontDemux barbell.\n" if $ontDemux eq 'barbell' && $ontKit eq '';
+    die "Invalid -ontKit; expected a kit name such as SQK-RBK114-96.\n"
+        if $ontKit ne '' && $ontKit !~ /^[A-Za-z0-9][A-Za-z0-9_.-]*$/;
+    die "-ontBarcodeCol must be a nonempty column name.\n" if $ontBarcodeCol eq '' || $ontBarcodeCol =~ /[\t\r\n\0]/;
+    die "-ontMinReads must be nonnegative.\n" if $ontMinReads < 0;
+    die "-ontWriteFastqCol must be 0 or 1.\n" unless $ontWriteFastqCol =~ /^[01]$/;
+    die "-savontSingleStrand must be 0 or 1.\n" unless $savontSingleStrand =~ /^[01]$/;
+    die "-savontQualCutoff must be between 0 and 100.\n" unless $savontQualCutoff >= 0 && $savontQualCutoff <= 100;
+    die "-savontMinBaseQual must be between 0 and 93.\n" unless $savontMinBaseQual >= 0 && $savontMinBaseQual <= 93;
+    die "-savontChimeraErrors must be nonnegative.\n" if $savontChimeraErrors < 0;
     if (defined($ClusterPipe_pre) && $ClusterPipe_pre =~ /^(?:DNACLUST|4)$/i) {
         die "DNACLUST/reference-based OTU clustering has been removed. Choose UPARSE, VSEARCH, CD-HIT, SWARM, UNOISE, or DADA2.\n";
     }
@@ -6617,7 +6833,7 @@ sub validate_cli_safety {
         ["dependency report path", $depReportFile], ["manifest path", $manifestFile],
         ["off-target database path", $custContamCheckDB], ["in-target database path", $custKeepOTUDB],
         ["reference chimera database path", $chimRefDBcust];
-    push @values, ["taxonomy-only path", $TaxOnly] if defined($TaxOnly) && $TaxOnly ne "0";
+    push @values, ["taxonomy-only path", $TaxOnly] if defined($TaxOnly) && $TaxOnly ne "0" && $TaxOnly ne "1";
     push @values, ["custom reference database", $refDBwanted] if defined($refDBwanted) && -e $refDBwanted;
     for my $item (@values) {
         my ($label,$value) = @$item;
@@ -6635,7 +6851,7 @@ sub validate_runtime_path_safety {
         ["Rscript",$Rscript], ["sdm",$sdmBin], ["LCA",$LCABin], ["vsearch",$VSBin],
         ["usearch",$usBin], ["DADA2 script",$dada2Scr], ["LULU script",$LULUscript],
         ["ASV clustering script",$ASVclscript], ["phyloseq script",$phyloLnk], ["swarm",$swarmBin],
-        ["CD-HIT",$cdhitBin], ["minimap2",$mini2Bin], ["RDP",$rdpjar], ["multi-RDP",$mjar],
+        ["savont",$savontBin], ["barbell",$barbellBin], ["CD-HIT",$cdhitBin], ["minimap2",$mini2Bin], ["RDP",$rdpjar], ["multi-RDP",$mjar],
         ["BLAST",$blastBin], ["makeblastdb",$mkBldbBin], ["lambda3",$lambda3Bin],
         ["mafft",$mafftBin], ["clustalo",$clustaloBin], ["FastTree",$fasttreeBin], ["IQ-TREE",$iqTreeBin],
         ["FLASH",$flashBin], ["ITSx",$itsxBin], ["hmmsearch",$hmmsrchBin], ["VXtractor",$vxtrBin]
@@ -6749,6 +6965,7 @@ sub validate_dry_run_output_target {
 
     my $would_reset = ($TaxOnly eq "0" && $exec == 0 && $onlyTaxRedo == 0) ? 1 : 0;
     validate_output_directory_compatibility($target, $would_reset) if -d $target;
+    _assert_directory_excludes_inputs($target) if $would_reset;
     if ($TaxOnly ne "0" && -f $TaxOnly && -d $target) {
         opendir my $tod, $target or die "Cannot inspect taxonomy-only output directory $target: $!\n";
         my @existing = grep { $_ ne "." && $_ ne ".." } readdir($tod);
@@ -6928,7 +7145,32 @@ sub _minimum_input_file_issues {
 sub validate_inputs_before_execution {
     my ($map_href, $comb_href) = @_;
     my @problems; my @warnings;
+    if ($platform eq 'ont' && ($ClusterPipe == 9 || $ontDemux ne '0')) {
+        die "ONT processing requires single-end FASTQ input.\n" if $numInput != 1 || $inq ne '';
+        if ($ontDemux eq 'barbell') {
+            die "-ontDemux barbell requires one multiplexed FASTQ file via -i.\n"
+                unless @inputArray == 1 && -f $inputArray[0];
+            die "barbell executable unavailable; set 'barbell <path>' in lOTUs.cfg.\n"
+                unless $onlyTaxRedo || (-f $barbellBin && -x $barbellBin);
+            ontBarcodeMap($map_href);
+            my (undef, $issues) = fastq_validation_scan($inputArray[0], 1);
+            die join("\n", @$issues) . "\n" if @$issues;
+        }
+    }
     my @files = _collect_input_files_for_validation($map_href);
+    if ($platform eq 'ont' && ($ClusterPipe == 9 || $ontDemux ne '0') && !$onlyTaxRedo) {
+        my @headers = @{$map_href->{'#SampleID'}};
+        die "ONT processing requires FASTQ input, not a fnaFile/qualFile mapping column.\n"
+            if grep { $_ eq 'fnaFile' || $_ eq 'qualFile' } @headers;
+        die "Savont backmapping requires SDM dereplication (-highmem must be nonzero).\n"
+            if $ClusterPipe == 9 && !$sdmDerepDo && $saveDemulti != 1;
+        if ($ontDemux eq '0') {
+            for my $file (@files[0 .. ($#files < 9 ? $#files : 9)]) {
+                my (undef, $issues) = fastq_validation_scan($file, 1);
+                die join("\n", @$issues) . "\n" if @$issues;
+            }
+        }
+    }
     if (!@files && defined($input) && $input ne "" && !-d $input) {
         push @problems, "No readable input FASTA/FASTQ files found from -i $input";
     }
@@ -6952,7 +7194,9 @@ sub validate_inputs_before_execution {
         for (my $i=0; $i<@hdr; $i++) {
             if ($hdr[$i] eq 'fastqFile' || $hdr[$i] eq 'fnaFile') { $seq_col = $i; last; }
         }
-        if ($seq_col >= 0) {
+        if ($ontDemux eq "barbell") {
+            # File entries are replaced after demultiplexing; raw input was checked above.
+        } elsif ($seq_col >= 0) {
             for my $s (sort keys %samples) {
                 my $entry = $map_href->{$s}->[$seq_col] // "";
                 if ($entry eq "") { push @problems, "Mapping SampleID '$s' has an empty sequence-file entry in fastqFile/fnaFile column"; next; }
@@ -7034,7 +7278,7 @@ sub dependency_report {
         ["vsearch", $VSBin], ["usearch", $usBin], ["blastn", $blastBin],
         ["lambda3", $lambda3Bin], ["mafft", $mafftBin], ["clustalo", $clustaloBin],
         ["FastTree", $fasttreeBin], ["IQ-TREE", $iqTreeBin], ["swarm", $swarmBin],
-        ["cd-hit", $cdhitBin], ["minimap2", $mini2Bin],
+        ["savont", $savontBin], ["barbell", $barbellBin], ["cd-hit", $cdhitBin], ["minimap2", $mini2Bin],
         ["ITSx", $itsxBin], ["hmmsearch", $hmmsrchBin], ["VXtractor", $vxtrBin],
         ["java", command_exists("java") // ""], ["RDP", $rdp_dependency]
     );
@@ -7067,6 +7311,7 @@ sub write_repro_manifest {
     push @lines, "Amplicon type: $ampliconType";
     push @lines, "Platform: $platform";
     push @lines, "Threads: $uthreads";
+    push @lines, "Original input: $userInput";
     push @lines, "Input: $input";
     push @lines, "Map file: " . ($mapFile // "") . " [" . file_signature($mapFile) . "]";
     push @lines, "";
@@ -7079,7 +7324,7 @@ sub write_repro_manifest {
     push @lines, "  PhiX: $CONT_REFDB_PHIX [" . file_signature($CONT_REFDB_PHIX) . "]";
     push @lines, "";
     push @lines, "Binaries:";
-    for my $d (["Rscript",$Rscript],["sdm",$sdmBin],["LCA",$LCABin],["vsearch",$VSBin],["usearch",$usBin],["blastn",$blastBin],["lambda3",$lambda3Bin],["mafft",$mafftBin],["clustalo",$clustaloBin],["FastTree",$fasttreeBin],["IQ-TREE",$iqTreeBin],["swarm",$swarmBin],["cd-hit",$cdhitBin],["minimap2",$mini2Bin]) {
+    for my $d (["Rscript",$Rscript],["sdm",$sdmBin],["LCA",$LCABin],["vsearch",$VSBin],["usearch",$usBin],["blastn",$blastBin],["lambda3",$lambda3Bin],["mafft",$mafftBin],["clustalo",$clustaloBin],["FastTree",$fasttreeBin],["IQ-TREE",$iqTreeBin],["swarm",$swarmBin],["cd-hit",$cdhitBin],["minimap2",$mini2Bin],["savont",$savontBin],["barbell",$barbellBin]) {
         push @lines, "  $d->[0]: " . ($d->[1] // "") . " [" . file_signature($d->[1]) . "]";
     }
     atomic_write_text($out, join("\n", @lines) . "\n");
@@ -7183,6 +7428,7 @@ sub safe_remove_tree {
     die "Refusing to remove the home directory as $label: $abs\n"
         if $home ne "" && $home eq $abs;
 
+    _assert_directory_excludes_inputs($abs);
     remove_tree($abs, { safe => 1, error => \my $err });
     if (@$err) {
         my @msgs;
@@ -7203,6 +7449,27 @@ sub _path_is_same_or_parent {
     return index($child . "/", $parent . "/") == 0 ? 1 : 0;
 }
 
+# Shared by output reset and temporary-directory cleanup. Check both a symlink's
+# location and its target, and include configured data files before readPaths runs.
+sub _assert_directory_excludes_inputs {
+    my ($dir) = @_;
+    my $absolute = abs_path($dir) // File::Spec->rel2abs($dir);
+    my @assets = ($mapFile, $barcodefile, $sdmOpt, $lotusCfg, @TAX_REFDB, @TAX_RANKS,
+        $UCHIME_REFDB, $CONT_REFDB_PHIX);
+    push @assets, map { split /,/, $_ // "" }
+        ($userInput, $inq, $refDBwanted, $refDBwantedTaxo, $custContamCheckDB, $custKeepOTUDB, $chimRefDBcust);
+    push @assets, $TaxOnly if defined($TaxOnly) && $TaxOnly ne "0" && $TaxOnly ne "1";
+    my $configured = selftest_config_values($lotusCfg);
+    push @assets, map { configDataPath($_) } values %$configured;
+    for my $asset (@assets) {
+        next unless defined($asset) && $asset ne "" && -e $asset;
+        my $resolved = abs_path($asset) // File::Spec->rel2abs($asset);
+        my $location = File::Spec->catfile(abs_path(dirname($asset)) // dirname($asset), basename($asset));
+        die "Refusing to reset or remove directory '$dir': it contains input or configuration '$asset'. Choose a separate output/temporary directory.\n"
+            if _path_is_same_or_parent($absolute, $resolved) || _path_is_same_or_parent($absolute, $location);
+    }
+}
+
 sub _assert_safe_temp_directory_target {
     my ($path) = @_;
     my $abs = -e $path ? (abs_path($path) // $path) : File::Spec->rel2abs($path);
@@ -7220,6 +7487,7 @@ sub _assert_safe_temp_directory_target {
         if _path_is_same_or_parent($abs, $output_root);
     die "Temporary directory must not be the home directory: $abs\n"
         if $home ne "" && $abs eq $home;
+    _assert_directory_excludes_inputs($path);
     return $abs;
 }
 
@@ -7953,6 +8221,23 @@ sub buildOTUs($) {
 		$cdhit_ver = "unknown" unless defined $cdhit_ver;
 		$citations .= "CD-HIT v$cdhit_ver ${OTU_prefix} clustering: Fu L, Niu B, Zhu Z, Wu S, Li W. 2012. CD-HIT: Accelerated for clustering the next-generation sequencing data. Bioinformatics 28: 3150–3152.\n";
 		
+	}elsif ( $ClusterPipe == 9 ) { #savont (ONT long-read ASVs)
+        # Feed full, primer-trimmed FASTQ reads to Savont; use normal backmapping
+        # below for per-sample abundances, as in the default DADA2 path.
+        my $savontTmp = "$lotus_tempDir/savont_out";
+        my $savontIn = "$lotus_tempDir/savont_in.fq";
+        if ($exec == 0) {
+            die "savont executable unavailable: $savontBin\n" unless -f $savontBin && -x $savontBin;
+            safe_remove_tree($savontTmp, 'Savont output');
+        }
+        my @savontArgs = ($savontBin, 'asv', $savontIn, '-o', $savontTmp, '-t', $uthreads,
+            '--quality-value-cutoff', $savontQualCutoff, '--minimum-base-quality', $savontMinBaseQual,
+            '--chimera-allowable-errors', $savontChimeraErrors);
+        push @savontArgs, '--single-strand' if $savontSingleStrand;
+        $entrMessage = "savont ${OTU_prefix} clustering (ONT)\ncheck progress at $progOutPut";
+        $cmd = 'cat ' . shell_quote($sdmDemultiDir) . '/*.fq > ' . shell_quote($savontIn) . '; ';
+        $cmd .= join(' ', map { shell_quote($_) } @savontArgs) . ';';
+        $citations .= "savont ASV clustering (ONT): https://github.com/bluenote-1577/savont\n";
 	}elsif ( $ClusterPipe == 5 ) {    #micca
 		die "-CL 5 not supported\n";
 		 #"$otuclustBin $derepl -s $id_OTU  --out-clust $otuclust_clust --out-rep $OTUfastaTmp -f fasta -c"; #-d: fast
@@ -7977,6 +8262,16 @@ sub buildOTUs($) {
 			}
 			$exitMsg = "$d2rep";
 		}
+        if ($ClusterPipe == 9) {
+            my $savontRaw = "$lotus_tempDir/savont_out/final_asvs.fasta";
+            die "savont produced no ASVs ($savontRaw missing/empty).\n" unless -s $savontRaw;
+            my ($nASV, $problems) = fasta_validation_scan($savontRaw, 1_000_000_000);
+            die "Invalid savont ASVs:\n" . join("\n", @$problems) . "\n" if @$problems;
+            numberOTUs($savontRaw, $OTUfastaTmp, $OTU_prefix);
+            $exitMsg = "Found $nASV ASVs (savont)";
+            unlink("$lotus_tempDir/savont_in.fq") or die "Cannot remove Savont input: $!\n";
+            safe_remove_tree($sdmDemultiDir, 'Savont demultiplexed reads') if $saveDemulti == 0;
+        }
 		printL(frame($exitMsg,1,3),0);
 		#die "$progOutPut\n$d2rep\n";
     }
@@ -8001,7 +8296,8 @@ sub buildOTUs($) {
 	if ($sdmDerepDo){
 		if (   ( $usearchVer < 8 && $ClusterPipe == 1 )
             || $ClusterPipe == 2 || $ClusterPipe == 6  #|| $ClusterPipe == 3 #2=swarm, 3=cdhit, 6=unoise
-			||( $ClusterPipe == 7 && $useBackmap4dada2) ) #dada2
+			||( $ClusterPipe == 7 && $useBackmap4dada2) #dada2
+			|| $ClusterPipe == 9 ) #savont: backmap reads onto ASVs (Option B), like dada2-default
 		{  
 			$backMapDerep = 1;
 		}
