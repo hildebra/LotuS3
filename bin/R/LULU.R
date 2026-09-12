@@ -294,12 +294,17 @@ info <- file.info(matchL)
 if (info$size == 0) { q("no") }
 
 matchs <- read.table(matchL, header = FALSE, as.is = TRUE)
-otuM   <- read.table(otuF,   header = TRUE,  as.is = TRUE, row.names = 1)
+otuM   <- read.table(otuF,   header = TRUE,  as.is = TRUE, row.names = 1, check.names = FALSE)
 if (dim(otuM)[1] <= 1 || dim(otuM)[2] <= 1) { q("no") }
 
 lulu <- lulu(otuM, matchs)
-write.table(lulu$curated_table, quote = FALSE, sep = "\t",
-            file = otuF, col.names = NA)
+curated_out <- data.frame(
+    OTU = rownames(lulu$curated_table),
+    lulu$curated_table,
+    check.names = FALSE
+)
+write.table(curated_out, quote = FALSE, sep = "\t",
+            file = otuF, col.names = TRUE, row.names = FALSE)
 write.table(lulu$discarded_otus, quote = FALSE, sep = "\t",
             file = paste0(matchL, ".rm"),
             col.names = FALSE, row.names = FALSE)
