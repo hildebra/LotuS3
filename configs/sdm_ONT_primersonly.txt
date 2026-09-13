@@ -1,12 +1,8 @@
-#sdm options file for the ONT + barbell + savont LotuS3 path (-ontDemux barbell).
-#DIVISION OF LABOUR (differs from sdm_ONT_savont.txt): here BARBELL has already done
-#demultiplexing AND barcode trimming on the raw multiplexed FASTQ, producing one
-#primer-bearing read file per sample. sdm therefore performs ONLY 16S primer detection
-#and removal - it does NOT demultiplex and it does NOT trim barcodes (there are none
-#left in the reads). As in the savont path, quality filtering / clustering / consensus /
-#chimera removal are all done by savont downstream, so every quality-based filter below
-#is deliberately opened wide (pass-through). Do NOT tighten the quality options - that
-#would double-filter and starve savont of the reads it needs.
+# Legacy permissive SDM preset for ONT + Barbell + Savont.
+# Retained for explicit -s use; LotuS no longer selects this file automatically.
+# The default is now sdm_ONT_SAVONT_opt.txt, which filters quality as well as
+# removing primers/barcodes, and passes individual reads to Savont without dereplication.
+# Quality filters below remain permissive for compatibility with previous runs.
 #* indicates alternative quality filtering options, saved in *.add.fna etc. files separately
 
 #--- length bounds: kept permissive; savont applies its own --min/--max-read-length ---
@@ -44,6 +40,8 @@ maxAccumulatedError	-1
 #--- BARCODE handling: NOT used in this path (barbell already demultiplexed + trimmed
 #    barcodes). No BarcodeSequence column is expected in the mapping file; per-sample
 #    files are supplied directly. These are left at harmless values. ---
+#With -ontMode 1: barcode errors are edit distance per end (0-3, including indels).
+#Primer errors remain substitutions/IUPAC; primer indels are not supported.
 maxBarcodeErrs	0
 #keep Barcode Sequence in output (irrelevant here; no barcodes present) - off
 keepBarcodeSeq	0

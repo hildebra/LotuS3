@@ -1,12 +1,8 @@
-#sdm options file for the ONT + savont LotuS3 path.
-#DIVISION OF LABOUR: in this path sdm performs ONLY demultiplexing + primer/barcode
-#removal. Quality filtering, clustering, consensus and chimera removal are all done by
-#savont downstream, which requires the FULL read set (it uses per-read SNPmer coverage
-#statistics). Therefore all quality-based filters below are deliberately opened wide
-#(pass-through) so that sdm does not discard any read on quality grounds before savont
-#sees it. Do NOT tighten the quality options here - that would double-filter and starve
-#savont of the reads it needs. Primer/barcode handling is kept strict (same as the
-#PacBio/ONT LSSU configs) because savont expects primer-trimmed input.
+# Legacy permissive SDM preset for ONT + Savont.
+# Retained for explicit -s use; LotuS no longer selects this file automatically.
+# The default is now sdm_ONT_SAVONT_opt.txt, which filters quality as well as
+# removing primers/barcodes, and passes individual reads to Savont without dereplication.
+# Quality filters below remain permissive for compatibility with previous runs.
 #* indicates alternative quality filtering options, saved in *.add.fna etc. files separately
 
 #--- length bounds: kept permissive; savont applies its own --min/--max-read-length ---
@@ -43,6 +39,8 @@ maxAccumulatedError	-1
 
 #--- BARCODE / PRIMER handling: kept active (this is sdm's job in the savont path) ---
 #Max Barcode / Primer Errors (tolerant, ONT reads are noisier than Illumina)
+#With -ontMode 1: barcode errors are edit distance per end (0-3, including indels).
+#Primer errors remain substitutions/IUPAC; primer indels are not supported.
 maxBarcodeErrs	1
 maxPrimerErrs	2
 

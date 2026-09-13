@@ -47,7 +47,7 @@ sub dependency_report; sub validate_reference_databases; sub validate_option_com
 sub run_self_test;
 sub checkLtsVer; sub announce_options;sub announce_self;sub prepLtsOptions; sub usage;
 sub printWarnings; 
-sub readMap; 
+sub readMap; sub writeMap($$);
 sub buildOTUs;
 sub buildTree;
 sub runPhyloObj;
@@ -166,17 +166,21 @@ my $sdm454CDHITOpt = "$RealBin/configs/sdm_454_cdhit.txt";
 my $sdmHiseqOpt = "$RealBin/configs/sdm_hiSeq.txt";
 my $sdmPacBioOpt = "$RealBin/configs/sdm_PacBio_LSSU.txt";
 my $sdmPacBioITSOpt = "$RealBin/configs/sdm_PacBio_ITS.txt";
-my $sdmONTsavontOpt = "$RealBin/configs/sdm_ONT_savont.txt"; #ONT path: sdm demux+primer-trim only, savont owns QC
-my $sdmONTprimersOpt = "$RealBin/configs/sdm_ONT_primersonly.txt"; #ONT+barbell path: sdm strips primers only (barbell already demuxed; savont owns QC)
-my $ontDemux      = "0";          #ONT demultiplexer: "0"=off (input already per-sample), "barbell"=run barbell first
+my $sdmONTsavontOpt = "$RealBin/configs/sdm_ONT_SAVONT_opt.txt"; #Filtered, primer-trimmed individual reads for Savont
+my $ontDemux      = "0";          #ONT: SDM handles input by default; "barbell" runs demultiplexing first
 my $ontKit        = "";           #barbell kit, e.g. SQK-RBK114-96 (required when -ontDemux barbell)
+my $ontBarbellMaximize = 0;       #opt in to Barbell's more permissive assignments
+my $ontPrimerState = "present";   #PCR primers present or already removed before SDM
+my $ontBarcodeSearchWindow = 200; #SDM start offsets measured inward from each read end
+my $ontBarcodeEnds = "either";    #SDM barcode evidence required at either or both ends
 my $ontBarcodeCol = "ONTBarcode"; #mapping-file column holding the per-sample barcode LABEL (e.g. BC38)
 my $ontMinReads   = 0;            #drop a declared barcode if barbell yields < this many reads (0 = keep all)
 my $ontWriteFastqCol = 1;         #add fastqFile to the working map; mode 0 requires that column to exist already
-my $savontSingleStrand  = 0;   #0=both-strand (default for raw ONT); 1=forward-only (pre-oriented data)
+my $savontSingleStrand  = 1;   #SDM can orient reads and drops original rc header tags; use strand-specific SNPmer mode.
 my $savontQualCutoff    = 80;  #min estimated read accuracy % (savont --quality-value-cutoff)
 my $savontMinBaseQual   = 15;  #min base Q for SNPmer detection (savont --minimum-base-quality)
 my $savontChimeraErrors = 0;   #allowable errors in chimera detection (0=strict; 1=savont default)
+my $savontMaxAmbiguousPercent; #Optional per-read percentage from the Savont SDM preset.
 
 my $ClusterPipe_pre = "?"; #default is unknown..
 my $ClusterPipe     = 1; #use UPARSE (1), SWARM (2), cd-hit (3), UNOISE (6), DADA2 (7), VSEARCH (8), or savont (9)
@@ -377,6 +381,10 @@ GetOptions(
 	"p|platform=s"          => \$platform,		#miSeq,hiSeq,pacbio,pacbio_GA
 	"ontDemux=s"            => \$ontDemux,        #ONT: "barbell" to demultiplex a raw multiplexed FASTQ before sdm
 	"ontKit=s"              => \$ontKit,          #ONT: barbell kit name (e.g. SQK-RBK114-96)
+	"ontBarbellMaximize=i"  => \$ontBarbellMaximize,
+	"ontPrimerState=s"      => \$ontPrimerState,
+	"barcodeSearchWindow=s" => \$ontBarcodeSearchWindow,
+	"ontBarcodeEnds=s"      => \$ontBarcodeEnds,
 	"ontBarcodeCol=s"       => \$ontBarcodeCol,   #ONT: mapping-file column holding the per-sample barcode label
 	"ontMinReads=i"         => \$ontMinReads,     #ONT: min reads/barcode to keep a demuxed sample (0=keep all)
 	"ontWriteFastqCol=i"    => \$ontWriteFastqCol,
@@ -539,6 +547,7 @@ die( "Failed to make tmp dir or doesn't exist: \"" . $lotus_tempDir . "\"\n" ) i
 #ONT pre-step: if requested, demultiplex the raw multiplexed FASTQ with barbell BEFORE
 #sdm runs, then route the resulting per-sample files into the normal per-sample-file path.
 ontBarbellDemux($mapHref, $combHref);
+my $sdmInputMap = prepare_ont_sdm_input($mapHref);
 %mapH = %{$mapHref};
 
 
@@ -628,13 +637,25 @@ $mainMapping = "-optimalRead2Cluster $tmpOTU.clstr " if ($ClusterPipe == 3);
 #----------------  SEED extension -------------------
 #sdm based Seed extension of OTU clusters
 if ( $exec == 0 && $onlyTaxRedo == 0 && $TaxOnly eq "0" ) {
-	if ($sdmDerepDo) {
+    if ($ClusterPipe == 9) {
+        # Register all samples, including those with no hits. SDM counts each
+        # mapped read from its sample-prefixed ID, without a dereplication map.
+        my %count_map = ('#SampleID' => ['SampleIDinHead']);
+        for my $sample (sort grep { $_ ne '#SampleID' } keys %$mapHref) {
+            $count_map{$sample} = [$sample . $sep_smplID];
+        }
+        my $count_map_file = "$outdir/primary/savont_counting.map";
+        writeMap({'counts' => \%count_map}, $count_map_file);
+        # Counts come from the read mappings; supply ASVs as seeds to avoid
+        # rereading/storing every input read or replacing inferred consensus.
+        $sdmcmd = "$sdmBin -i_fna $tmpOTU $sdmOut2 $mainMapping -paired 1 -sample_sep $sep_smplID -map $count_map_file -log $logDir/SeedExtensionStats.log -OTU_fallback $tmpOTU -otu_matrix $OTUmFile $mapRestr -count_chimeras $chimCnt";
+    } elsif ($sdmDerepDo) {
 		$sdmIn = "-i_fastq $derepOutHQ";
 		#$finalClustMap $finalAddMap $finalRestMap
 		if ( $numInput == 2 ) { $sdmIn = "-i_fastq $derepOutHQ,$derepOutHQ2"; }
 		$sdmcmd ="$sdmBin $sdmIn $sdmOut2 $upVer $mainMapping -paired $numInput -sample_sep $sep_smplID -derep_map $derepOutMap -options $sdmOpt $mergeOptions $qualOffset -mergedPairs $didMerge -log $logDir/SeedExtensionStats.log  -OTU_fallback $tmpOTU -ucAdditionalCounts $ucFinalFile[1] -ucAdditionalCounts1 $ucFinalFile[2] -otu_matrix $OTUmFile $mapRestr -count_chimeras $chimCnt ";
 	} else {
-		$sdmcmd = "$sdmBin $sdmIn $sdmOut2 $upVer $mainMapping -paired $numInput -sample_sep $sep_smplID -map $cpMapFile -options $sdmOpt $qualOffset $mergeOptions -mergedPairs $didMerge -log $logDir/SeedExtensionStats.log -OTU_fallback $tmpOTU -otu_matrix $OTUmFile -ucAdditionalCounts $ucFinalFile[1] -ucAdditionalCounts1 $ucFinalFile[2] $mapRestr -count_chimeras $chimCnt ";
+		$sdmcmd = "$sdmBin $sdmIn $sdmOut2 $upVer $mainMapping -paired $numInput -sample_sep $sep_smplID -map $sdmInputMap -options $sdmOpt $qualOffset $mergeOptions -mergedPairs $didMerge -log $logDir/SeedExtensionStats.log -OTU_fallback $tmpOTU -otu_matrix $OTUmFile -ucAdditionalCounts $ucFinalFile[1] -ucAdditionalCounts1 $ucFinalFile[2] $mapRestr -count_chimeras $chimCnt ";
 	}
 	#some specific demulti treatment for DADA2 specifically (faster to leave files non-gz till here)
 	if ($ClusterPipe == 7 && ( $saveDemulti == 1 || $saveDemulti == 2 )  && glob("$sdmDemultiDir/*.fq")>0 ) {    #gzip stuff
@@ -644,9 +665,10 @@ if ( $exec == 0 && $onlyTaxRedo == 0 && $TaxOnly eq "0" ) {
 
 	my $status = 0;
 	my $mrgSentence = ""; $mrgSentence = "and merging pairs of " if ($mergeOptions ne "");
-    printL (frame("Extending ${mrgSentence}${OTU_prefix} Seeds"), 0);
+    printL (frame($ClusterPipe == 9 ? "Counting filtered reads per Savont ASV" : "Extending ${mrgSentence}${OTU_prefix} Seeds"), 0);
     $status = systemL($sdmcmd, "Seed extension", 0); #actual sdm derep step; recoverable fallback on failure
 	if ($status) {
+		printL "SDM failed to build the Savont abundance matrix; see SeedExtensionStats.log and LotuS_progout.log.\n", 31 if $ClusterPipe == 9;
 		printL "Failed $sdmcmd\n",                    0;
 		printL "Fallback to ${OTU_prefix} median sequences.\n", 0;
 		$seedExtDone = 0;
@@ -654,6 +676,7 @@ if ( $exec == 0 && $onlyTaxRedo == 0 && $TaxOnly eq "0" ) {
 		#exit(11);
 	} else {
 		$seedExtDone = 1;
+		preserve_savont_consensus($tmpOTU, $OTUSEED, $OTUmFile, $mapHref) if $ClusterPipe == 9;
 	}
 } elsif ($onlyTaxRedo) { 
 	printL "Skipping Seed extension step\n", 0; 
@@ -927,6 +950,121 @@ sub ontBarcodeMap {
     return \%barcodes;
 }
 
+# SDM accepts integer ambiguity counts. LotuS interprets percentages only in
+# the Savont path, after SDM has established each read's trimmed length.
+sub read_sdm_ambiguity_options {
+    my ($file) = @_;
+    open my $in, '<', $file or die "Cannot read SDM options $file: $!\n";
+    my $text = do { local $/; <$in> };
+    close $in or die "Cannot close SDM options $file: $!\n";
+    my %percentages;
+    for my $line (split /\n/, $text) {
+        my ($key, $value) = split /\t/, $line;
+        next unless defined($key) && $key =~ /^\*?maxAmbiguousNT$/;
+        $value //= ''; $value =~ s/\r$//;
+        if ($value =~ /^(\d+(?:\.\d+)?)%$/ && $1 <= 100) {
+            die "Percentage maxAmbiguousNT requires Savont.\n" unless $ClusterPipe == 9;
+            $percentages{$key} = 0 + $1;
+        } elsif ($value =~ /^-?\d+$/) {
+            delete $percentages{$key};
+        } else {
+            die "maxAmbiguousNT in '$file' must be an integer count or a percentage from 0% to 100%.\n";
+        }
+    }
+    return ($text, \%percentages);
+}
+
+# Keep full sample metadata in primary/in.map; only SDM receives this derived map.
+sub prepare_ont_sdm_input {
+    my ($map) = @_;
+    return $cpMapFile unless $platform eq 'ont'
+        && $exec == 0 && !$onlyTaxRedo && $TaxOnly eq '0';
+    my @headers = @{$map->{'#SampleID'}};
+    my $remove_primers = $ontPrimerState eq 'removed';
+    # Keep original sample prefixes unique throughout mapping. Combine columns
+    # after counting, including SDM's special case where every group is the same.
+    my $combine_later = $ClusterPipe == 9 && $saveDemulti != 1
+        && grep { $_ eq 'CombineSamples' } @headers;
+    my $sdm_map_path = $cpMapFile;
+    if ($remove_primers || $combine_later) {
+        my @keep = grep {
+            !($remove_primers && $headers[$_] =~ /^(?:ForwardPrimer|LinkerPrimerSequence|ReversePrimer)$/)
+            && !($combine_later && $headers[$_] eq 'CombineSamples')
+        } 0 .. $#headers;
+        my %sdm_map = map { $_ => [@{$map->{$_}}[@keep]] } keys %$map;
+        my (undef, $grouped) = addSeqRun(\%sdm_map);
+        $sdm_map_path = "$outdir/primary/sdm_input.map";
+        writeMap($grouped, $sdm_map_path);
+    }
+    return $sdm_map_path if $saveDemulti == 1;
+    my ($original, $percentages) = read_sdm_ambiguity_options($sdmOpt);
+    $savontMaxAmbiguousPercent = $percentages->{'maxAmbiguousNT'} if $ClusterPipe == 9;
+    return $sdm_map_path unless $remove_primers || keys %$percentages;
+
+    my %override;
+    if ($remove_primers) {
+        %override = (
+            RejectSeqWithoutFwdPrim => 'F', '*RejectSeqWithoutFwdPrim' => 'F',
+            RejectSeqWithoutRevPrim => 'F', '*RejectSeqWithoutRevPrim' => 'F',
+            ExtensivePrimerChecks => 'F', CheckForReversedSeqs => 'F',
+        );
+    }
+    # Disable the native count limit only for percentage-valued entries.
+    $override{$_} = -1 for keys %$percentages;
+    my $effective = "# Generated SDM options; original preset is in primary/sdm_original_options.txt\n";
+    for my $line (split /(?<=\n)/, $original) {
+        my ($key) = $line =~ /^\s*(\S+)/;
+        $effective .= $line unless defined($key) && exists $override{$key};
+    }
+    $effective .= "\n" unless $effective =~ /\n$/;
+    $effective .= join('', map { "$_\t$override{$_}\n" } sort keys %override);
+    atomic_write_text("$outdir/primary/sdm_original_options.txt", $original);
+    $sdmOpt = $remove_primers ? "$outdir/primary/sdm_ONT_removed.txt"
+        : "$outdir/primary/sdm_ONT_SAVONT_effective.txt";
+    atomic_write_text($sdmOpt, $effective);
+    printL "ONT primers already removed: SDM skips primer searching/rejection; effective map $sdm_map_path\n", 0
+        if $remove_primers;
+    return $sdm_map_path;
+}
+
+# Stream through SDM output without changing retained records or dereplicating.
+# Replace atomically only after a complete read/write; memory is one FASTQ record.
+sub filter_fastq_ambiguity_percent {
+    my ($file, $percent) = @_;
+    return (0, 0) unless -f $file;
+    my $in = _open_maybe_gzip($file) or die "Cannot read FASTQ $file\n";
+    my ($out, $temporary) = tempfile('ambiguity-XXXXXX', DIR => dirname($file), UNLINK => 1);
+    my ($kept, $rejected) = (0, 0);
+    while (my $header = <$in>) {
+        my $sequence = <$in>; my $plus = <$in>; my $quality = <$in>;
+        die "Truncated SDM FASTQ record in $file\n" unless defined($sequence) && defined($plus) && defined($quality);
+        (my $bases = $sequence) =~ s/[\r\n]+$//;
+        my $ambiguous = () = $bases =~ /[^ACGT]/ig;
+        if ($ambiguous * 100 > length($bases) * $percent) {
+            ++$rejected;
+            next;
+        }
+        print {$out} $header, $sequence, $plus, $quality or die "Cannot write $temporary: $!\n";
+        ++$kept;
+    }
+    close $in or die "Cannot close FASTQ $file: $!\n";
+    close $out or die "Cannot close FASTQ $temporary: $!\n";
+    rename $temporary, $file or die "Cannot replace FASTQ $file: $!\n";
+    return ($kept, $rejected);
+}
+
+# Record actual tool use immediately, including demultiplex-only runs.
+sub record_ont_citation {
+    my ($tool) = @_;
+    my %references = (
+        barbell => "Barbell ONT demultiplexing: Beeloo R, Groot Koerkamp R, Jia X, Broekhuizen-Stins MJ, van IJken L, Broens EM, Zomer A, Dutilh BE. (2026). Barbell reveals and resolves demultiplexing and trimming issues in Nanopore data. Bioinformatics 42(6):btag349. https://doi.org/10.1093/bioinformatics/btag349\n",
+        savont => "Savont ASV clustering: Shaw J, Riisgaard-Jensen M, Andersen KS, Kirkegaard R, Dueholm MKD, Li H. (2026). Sensitive long-read amplicon sequence variant recovery with savont. bioRxiv 2026.05.26.727271 (preprint). https://doi.org/10.64898/2026.05.26.727271\n",
+    );
+    die "Unknown ONT citation: $tool\n" unless exists $references{$tool};
+    $citations .= $references{$tool} if index($citations, $references{$tool}) < 0;
+    atomic_write_text("$logDir/citations.txt", $citations);
+}
+
 # Demultiplex one raw ONT FASTQ, then reuse the normal per-sample SDM path.
 sub ontBarbellDemux {
     my ($map, $combined) = @_;
@@ -938,9 +1076,11 @@ sub ontBarbellDemux {
     safe_remove_tree($bbDmx, 'ONT demultiplexed input');
     ensure_dir($bbDmx);
     printL frame("ONT demultiplexing with barbell (kit $ontKit)\n",1,2),0;
-    my $cmd = join(' ', map { shell_quote($_) }
-        ($barbellBin, 'kit', '-k', $ontKit, '-i', $inputArray[0], '-o', $bbRaw, '--maximize', '-t', $uthreads));
+    my @args = ($barbellBin, 'kit', '-k', $ontKit, '-i', $inputArray[0], '-o', $bbRaw, '-t', $uthreads);
+    push @args, '--maximize' if $ontBarbellMaximize;
+    my $cmd = join(' ', map { shell_quote($_) } @args);
     systemL($cmd, 'Barbell demultiplexing');
+    record_ont_citation('barbell');
 
     my %kept; my @missing;
     for my $barcode (sort keys %$barcodes) {
@@ -983,7 +1123,6 @@ sub ontBarbellDemux {
     my (undef, $grouped) = addSeqRun($map);
     writeMap($grouped, $cpMapFile);
     $input = $bbDmx; @inputArray = ($input); $numInput = 1;
-    $citations .= "Barbell ONT demultiplexing: https://github.com/rickbeeloo/barbell\n";
 }
 
 sub sdmStep1{
@@ -1010,6 +1149,13 @@ sub sdmStep1{
 	
 	
 	my $sdmOut     = "$filOutCmd $filterOut $filOutCmdAdd $filterOutAdd  ";
+    if ($ClusterPipe == 9 && $saveDemulti != 1) {
+        # Primary output passes the main SDM filters and retains sample labels.
+        # Every read copy and its qualities go directly to Savont and backmapping.
+        $filterOut = "$lotus_tempDir/savont_reads.fq";
+        $filterOutAdd = "";
+        $sdmOut = "-o_fastq $filterOut -suppressOutput 2";
+    }
 	my $sdmIn      = "";
 	my $paired     = $numInput;
 
@@ -1035,7 +1181,10 @@ sub sdmStep1{
 
 	my $sdmDemultiDir = "";
 	my $sdmOptStr     = "-options $sdmOpt ";
-	if ( $saveDemulti == 2 || $saveDemulti == 1 || $ClusterPipe == 7 || $ClusterPipe == 9 ) { #dada2 & savont also require filtered raw reads
+	# ONT end matching applies only to primary read preparation, never HQ seeds/matrices.
+	my $ontMatchOpt = $platform eq "ont"
+		? "-ontMode 1 -barcodeSearchWindow $ontBarcodeSearchWindow -ontBarcodeEnds $ontBarcodeEnds" : "";
+	if ( $saveDemulti == 2 || $saveDemulti == 1 || $ClusterPipe == 7 ) {
 		$sdmDemultiDir = "$outdir/demultiplexed/";
 		if ( $saveDemulti == 1 ) { 
 			printL frame("Demultiplexed input files into single samples, no quality filtering done\nWill abort after demultiplexing (mode \"1\" is only for preparing publication ready, raw sequences)!\n"),0;
@@ -1045,15 +1194,15 @@ sub sdmStep1{
 		#for valid paired output, need to keep them together..
 		$sdmOptStr .= "-pairedDemulti 1 " if ($paired > 1);
 
-		#leave demux files non-gzipped for dada2 and savont (both read per-sample files directly; saveDemulti==1 exits before clustering)
+		# Retain existing uncompressed per-sample output for DADA2 and Savont; Savont itself uses primary FASTQ.
 		$sdmOptStr .= "-o_demultiplex_gz 1 " if (($ClusterPipe != 7 && $ClusterPipe != 9) || $saveDemulti == 1);
 		if ($ClusterPipe == 7){ #dada2.. no rd pair info in head!
 			$sdmOptStr .= "-pairedRD_HD_out 0 -derep_format fq -derepPerSR 1 -DemultiBPperSR 1e8 ";
 			$sdmOptStr .= "-onlyCanonicalNTs 1 -strictPositiveQualsOut 1 ";
 			$sdmDemultiDir = "$lotus_tempDir/demultiplexed/" if ($saveDemulti == 0);
 		}
-		if ($ClusterPipe == 9){ #savont: single-end long reads, needs full (non-dereplicated) per-sample fq
-			$sdmOptStr .= "-DemultiBPperSR 1e9 ";
+		if ($ClusterPipe == 9){ #Keep all requested per-sample output, without a base cap.
+			$sdmOptStr .= "-DemultiBPperSR 0 ";
 			$sdmDemultiDir = "$lotus_tempDir/demultiplexed/" if ($saveDemulti == 0);
 		}
 	}
@@ -1121,14 +1270,16 @@ sub sdmStep1{
 	my $multCore = ""; $multCore = " -threads $sdmThreads";
 #--------------------------------------------------------------------------
 	#primary sequence filtering + demultiplexing + dereplication
-	$sdmcmd = "$sdmBin $sdmIn $sdmOut -sample_sep $sep_smplID  -log $mainSDMlog -map $cpMapFile $sdmMergeOpt $sdmOptStr $demultiSaveCmd $derepCmd $dmgCmd $qualOffset -paired $paired $paired_sdm -oneLineFastaFormat 1 $mrgOpt $multCore ";
+	$sdmcmd = "$sdmBin $sdmIn $sdmOut -sample_sep $sep_smplID  -log $mainSDMlog -map $sdmInputMap $sdmMergeOpt $sdmOptStr $demultiSaveCmd $derepCmd $dmgCmd $qualOffset -paired $paired $paired_sdm $ontMatchOpt -oneLineFastaFormat 1 $mrgOpt $multCore ";
 	#die $sdmcmd."\n";
 #--------------------------------------------------------------------------
 
 	if ( $exec == 0 && $onlyTaxRedo == 0 && $TaxOnly eq "0" ) {
 		#$duration = time - $start;
-		printL( frame("Demultiplexing, filtering, dereplicating input files, this might take some time..\ncheck progress at $progOutPut\n",1,2),0 );
-		systemL("cp $sdmOpt $outdir/primary");
+        my $processing = $sdmDerepDo ? "Demultiplexing, filtering, dereplicating" : "Demultiplexing and filtering";
+        printL(frame("$processing input files, this might take some time..\ncheck progress at $progOutPut\n",1,2),0);
+		systemL("cp $sdmOpt $outdir/primary")
+            unless abs_path(dirname($sdmOpt)) eq abs_path("$outdir/primary");
 		if ( systemL($sdmcmd) != 0 ) {
 			printL "FAILED sdm demultiplexing step: " . $sdmcmd . "\n";
 			exit(4);
@@ -1160,6 +1311,16 @@ sub sdmStep1{
 		
 		my $shrtRpt = parse_sdm_short_report($readSdmLog, $readSdmDereLog);
 		printL( frame("Finished primary read processing with sdm:\n".$shrtRpt."\nFor an extensive report see $mainSDMlog\n",1,3),0 );
+
+        if ($ClusterPipe == 9 && defined($savontMaxAmbiguousPercent) && $saveDemulti != 1) {
+            my ($kept, $rejected) = filter_fastq_ambiguity_percent($filterOut, $savontMaxAmbiguousPercent);
+            my $report = "Savont ambiguity filter (maximum $savontMaxAmbiguousPercent% of trimmed bases): kept $kept; rejected $rejected.\n";
+            printL $report, 0;
+            atomic_write_text("$logDir/savont_ambiguity_filter.log", $report);
+            if ($saveDemulti == 2) {
+                filter_fastq_ambiguity_percent($_, $savontMaxAmbiguousPercent) for glob("$sdmDemultiDir/*.fq");
+            }
+        }
 
 		#postprocessing of demulti output files
 		
@@ -2945,7 +3106,7 @@ sub announce_options{
 	#printL "$clustMode sequence clustering with $clusteringNameStr into ${OTU_prefix}'s\n",0;
 	printL "Sequencing platform     $platform\n", 0 ;
 	printL "Amplicon target         $organism, $ampliconType\n", 0;
-	printL "Dereplication filter    -derepMin $dereplicate_minsize\n", 0;
+	printL($ClusterPipe == 9 ? "SDM dereplication      disabled for Savont; retaining individual filtered reads\n" : "Dereplication filter    -derepMin $dereplicate_minsize\n", 0);
 	printL "Clustering algorithm    $clusteringNameStr -> ${OTU_prefix}'s\n",0;
 	
 	printL "Read mapping to ${OTU_prefix}     $internalMapper, at $backMapID %id cutoff\n",0 if $TaxOnly eq "0";
@@ -3177,6 +3338,7 @@ sub setClusterAlgo{
 		printL "Clustering cannot be disabled for a full LotuS run; use -taxOnly <fasta> for taxonomy-only mode.\n", 64;
 	}elsif ( $ClusterPipe_pre eq "SAVONT" || $ClusterPipe_pre eq "9" ) {
 		$ClusterPipe = 9; $clusteringNameStr = "savont";
+        $sdmDerepDo = 0;
 		${OTU_prefix} = "ASV";
 		if ( $saveDemulti != 1 && !$onlyTaxRedo && (!-f $savontBin || !-x $savontBin) ) {
 			printL "No valid savont binary found at $savontBin\n (set 'savont <path>' in lOTUs.cfg)\n", 88;
@@ -3450,15 +3612,14 @@ sub prepLtsOptions{
 	} elsif ($platform eq "aviti"){
 		$sdmOpt =$sdmAVITIOpt;
 	} elsif ($platform eq "ont"){
-		#ONT long-read amplicons: demux+primer-trim via sdm, ASVs via savont.
-		#  -ontDemux barbell: barbell does demux+barcode-trim first, so sdm strips
-		#  16S primers ONLY (primers-only config); otherwise sdm does demux+primer-trim.
+        # SDM filters and trims ONT reads. Barbell optionally removes barcodes first;
+        # the same Savont preset applies because its map has no barcode sequences.
 		$dereplicate_minsize_def = 0;
 		$mini2RdPreset = "-x map-ont -u b --secondary=no -c ";
 		$ClusterPipe_pre = "SAVONT" if ($ClusterPipe_pre eq "?");#default, user can override with -CL
 		if ($sdmOpt eq ""){
 			$sdmOpt = ($ClusterPipe_pre eq "SAVONT" || $ClusterPipe_pre eq "9")
-				? (($ontDemux eq "barbell") ? $sdmONTprimersOpt : $sdmONTsavontOpt)
+				? $sdmONTsavontOpt
 				: "$RealBin/configs/sdm_ONT_LSSU.txt";
 		}
 	}
@@ -3648,10 +3809,14 @@ my @further_options = (
   ['-p|-platform <454|miSeq|hiSeq|PacBio|PacBio_GA|AVITI|ONT>', 'Sequencing platform preset. Default: miSeq.'],
   ['-ontDemux <0|barbell>', 'ONT only: optionally demultiplex one raw FASTQ with Barbell before SDM. Default: 0 (SDM handles supplied input).'],
   ['-ontKit <name>', 'Barbell kit, e.g. SQK-RBK114-96. Required with -ontDemux barbell.'],
+  ['-ontBarbellMaximize <0|1>', 'Opt in to Barbell --maximize assignments. Default: 0 (conservative). Requires -ontDemux barbell.'],
+  ['-barcodeSearchWindow <bp>', 'ONT only: SDM barcode/primer start-offset window at each end (1-10000). Default: 200.'],
+  ['-ontBarcodeEnds <either|both>', 'ONT only: require consistent barcode evidence at either or both ends. Default: either; ignored for per-file sample assignment.'],
+  ['-ontPrimerState <present|removed>', 'ONT primer state entering SDM, after optional Barbell trimming. Default: present. Removed skips SDM primer searches and rejection.'],
   ['-ontBarcodeCol <name>', 'Mapping column containing Barbell labels such as BC38. Default: ONTBarcode.'],
   ['-ontMinReads <num>', 'Drop declared Barbell samples with fewer reads. Default: 0.'],
   ['-ontWriteFastqCol <0|1>', 'Add fastqFile to the Barbell working map. Default: 1. Mode 0 requires an existing fastqFile column. File entries are always updated; dropped samples are removed.'],
-  ['-savontSingleStrand <0|1>', 'Search both strands (0, default), or only forward reads (1, for pre-oriented input).'],
+  ['-savontSingleStrand <0|1>', 'Savont strand-specific SNPmer mode (1, default for SDM-prepared reads). Set 0 only when reads entering Savont retain both original orientations.'],
   ['-savontQualCutoff <0-100>', 'Savont quality-value cutoff. Default: 80 (from the ONT branch).'],
   ['-savontMinBaseQual <0-93>', 'Savont minimum base quality for SNPmer detection. Default: 15.'],
   ['-savontChimeraErrors <num>', 'Savont allowable chimera errors. Default: 0.'],
@@ -3720,7 +3885,7 @@ my @clustering_options = (
   ['-chim_skew <num>', 'Abundance skew parameter for UCHIME. Default: 2.'],
   ['-count_chimeras <T|F>', 'Include chimeras in OTU/ASV counts. Default: F.'],
   ['-deactivateChimeraCheck <0|1|2|3>', '(0) run all chimera checks; (1) deactivate all chimera checks; (2) deactivate de novo chimera checks; (3) deactivate reference-based chimera checks. Default: 0.'],
-  ['-derepMin <rule>', 'Minimum abundance rule for dereplicated clusters before clustering/noise removal. Rules can be compound, e.g. 8:1,4:2,3:3.'],
+  ['-derepMin <rule>', 'Minimum abundance rule for dereplicated clusters before clustering/noise removal (ignored by Savont). Rules can be compound, e.g. 8:1,4:2,3:3.'],
   ['-readOverlap <num>', 'Maximum expected overlap between paired reads. Default: 300.'],
   ['-endRem <string>', 'Sequence, usually reverse primer/adaptor, after which OTU sequence output is trimmed. This duplicates the ReversePrimer mapping-file option but gives manual control. Default: none.'],
   ['-xtalk <0|1>', '(1) check for index cross-talk. This requires USEARCH v11. Default: 0.']
@@ -4578,6 +4743,51 @@ sub getTaxForOTUfromRefBlast($ $ $) {
     return ($retRef);
 }
 
+# SDM 3.51 emits single-end seeds in OTU_fallback input order (setupDefSeeds /
+# writeNewSeeds), but assigns matrix IDs in hash order. Retain those IDs and
+# restore Savont's inferred sequences; ordinary OTU seed polishing must not
+# replace an ASV with an original, possibly erroneous read.
+sub preserve_savont_consensus {
+    my ($consensus_file, $seed_file, $matrix_file, $sample_map) = @_;
+    my (@consensus_ids, @seed_ids);
+    my $consensus = readFasta($consensus_file, \@consensus_ids);
+    my $seeds = readFasta($seed_file, \@seed_ids);
+    my ($counts, $matrix_ids) = readOTUmat($matrix_file);
+    die "SDM seed/matrix count does not match Savont ASVs; cannot preserve consensus identifiers.\n"
+        unless @consensus_ids && @consensus_ids == @seed_ids && @seed_ids == @$matrix_ids;
+    for my $id (@$matrix_ids) {
+        die "SDM matrix ID '$id' is missing from its seeds; cannot preserve Savont consensus.\n"
+            unless exists $seeds->{$id};
+    }
+    my $text = '';
+    for my $i (0 .. $#seed_ids) {
+        $text .= ">$seed_ids[$i]\n$consensus->{$consensus_ids[$i]}\n";
+    }
+    atomic_write_text($seed_file, $text);
+    if ($sample_map) {
+        my @headers = @{$sample_map->{'#SampleID'}};
+        my ($group_col) = grep { $headers[$_] eq 'CombineSamples' } 0 .. $#headers;
+        my %group_counts;
+        for my $sample (sort keys %$counts) {
+            die "Unknown sample '$sample' in Savont abundance matrix.\n" unless exists $sample_map->{$sample};
+            my $group = defined($group_col) ? $sample_map->{$sample}->[$group_col] : '';
+            $group = $sample unless defined($group) && $group ne '';
+            for my $asv (@$matrix_ids) {
+                $group_counts{$group}{$asv} += $counts->{$sample}{$asv};
+            }
+        }
+        if (defined $group_col) {
+            my @groups = sort keys %group_counts;
+            my $matrix_text = join("\t", 'OTU', @groups) . "\n";
+            for my $asv (@$matrix_ids) {
+                $matrix_text .= join("\t", $asv, map { $group_counts{$_}{$asv} } @groups) . "\n";
+            }
+            atomic_write_text($matrix_file, $matrix_text);
+        }
+    }
+    printL "Preserved Savont consensus sequences with SDM abundance-matrix identifiers.\n", 0;
+}
+
 sub numberOTUs($ $ $) {    #rewrites OTUs with new header (numbered header)
     my ( $inf, $outf, $pref ) = @_;
     open X,  "<", $inf or die "Could not read FASTA $inf: $!\n";
@@ -4697,8 +4907,9 @@ sub revComplFasta {
     systemL "rm -f $inF; mv $inF.tmp $inF;";
 }
 
-sub readFasta($) {
-    my ($fil) = @_;
+sub readFasta($;$) {
+    my ($fil, $order) = @_;
+    @$order = () if defined $order;
     my %Hseq;
     printL("Couldn't open FASTA file $fil: file does not exist\n", 88) unless defined($fil) && -e $fil;
     return \%Hseq if -z $fil;
@@ -4713,6 +4924,7 @@ sub readFasta($) {
 			}
 			$current = $1;
 			$current =~ s/;size=\d+;.*//;
+		push @$order, $current if defined $order;
 			$sequence = "";
 		} elsif ($line =~ /\S/) {
 			printL "FASTA sequence encountered before the first header in $fil\n", 88 unless defined $current;
@@ -5038,18 +5250,26 @@ sub writeBlastHiera($ $ $) {
 
 sub checkLtsVer($) {
     my ($lver)  = @_;
-    my $sdmVstr = checked_program_output($sdmBin, "-v");
+    my $sdmVstr = checked_program_output($sdmBin, $platform eq "ont" ? "-version" : "-v");
+    my $ont_capable = $sdmVstr =~ /ONT amplicon end matching:\s*enabled/i;
     my $sdmVer  = 1;
-    if ( $sdmVstr =~ m/sdm (\d\.\d+) \D+/ ) {
+    if ( $sdmVstr =~ m/\bsdm\s+(\d+(?:\.\d+)+)/i ) {
         $sdmVer = $1;
     }
     else {
         $sdmVstr = checked_program_output($sdmBin);
 
         #die $sdmVstr;
-        if ( $sdmVstr =~ m/This is sdm version (\d\.\d+) \D+/ ) {
+        if ( $sdmVstr =~ m/This is sdm version (\d+(?:\.\d+)+)/i ) {
             $sdmVer = $1;
         }
+    }
+
+    if ($platform eq 'ont' && $TaxOnly eq '0' && !$onlyTaxRedo
+            && !version_at_least($sdmVer, '3.51')
+            && !$ont_capable) {
+        die "ONT preprocessing requires SDM >= 3.51 or a build advertising 'ONT amplicon end matching: enabled'.\n"
+            . "Found SDM $sdmVer at $sdmBin. Update the sdm executable configured in '$lotusCfg'.\n";
     }
 
     # compare to server version
@@ -5339,7 +5559,7 @@ sub readMap {
 				if (m/ForwardPrimer/ || m/LinkerPrimerSequence/){$hasFwd=1;}
 				if (m/ReversePrimer/){$hasRev=1;}
             }
-            if ($hasFwd==0  && !$insertPrimers){
+            if ($hasFwd==0 && !$insertPrimers && !($platform eq 'ont' && $ontPrimerState eq 'removed')){
 				$warnTrig = 1;
 				printL("No forward PCR primer for amplicon found in mapping file (column header \"ForwardPrimer\". This might invalidate chimera checks).\n","w");
 			}
@@ -6804,7 +7024,9 @@ sub _unsafe_shell_token_reason {
 sub validate_cli_safety {
     die "Unknown -CL '$ClusterPipe_pre'. Choose UPARSE, VSEARCH, CD-HIT, SWARM, UNOISE, DADA2, or SAVONT.\n"
         unless $ClusterPipe_pre =~ /^(?:\?|[0-4]|[6-9]|CD-?HIT|VSEARCH|UPARSE|UNOISE3?|DADA2|SWARM|DNACLUST|SAVONT)$/i;
-    die "-highmem 0 is no longer supported; LotuS requires SDM dereplication.\n" if $sdmDerepDo == 0;
+    my $savont_selected = lc($platform) eq 'ont' && $ClusterPipe_pre =~ /^(?:\?|savont|9)$/i;
+    die "-highmem 0 is not supported for this clusterer; LotuS requires SDM dereplication outside Savont.\n"
+        if $sdmDerepDo == 0 && !$savont_selected;
     die "-exe must be 0 or 1.\n" unless $exec =~ /^[01]$/;
     die "-useMini4map must be 0 or 1.\n" unless $useMini4map =~ /^[01]$/;
     die "-saveDemultiplex must be 0, 1, or 2.\n" unless $saveDemulti =~ /^[012]$/;
@@ -6815,6 +7037,15 @@ sub validate_cli_safety {
     die "Invalid -ontKit; expected a kit name such as SQK-RBK114-96.\n"
         if $ontKit ne '' && $ontKit !~ /^[A-Za-z0-9][A-Za-z0-9_.-]*$/;
     die "-ontBarcodeCol must be a nonempty column name.\n" if $ontBarcodeCol eq '' || $ontBarcodeCol =~ /[\t\r\n\0]/;
+    die "-ontBarbellMaximize must be 0 or 1.\n" unless $ontBarbellMaximize =~ /^[01]$/;
+    die "-ontBarbellMaximize 1 requires -ontDemux barbell.\n" if $ontBarbellMaximize && $ontDemux ne 'barbell';
+    die "-ontPrimerState must be present or removed.\n" unless $ontPrimerState eq 'present' || $ontPrimerState eq 'removed';
+    die "-ontPrimerState removed requires -p ONT.\n" if $ontPrimerState eq 'removed' && lc($platform) ne 'ont';
+    die "-barcodeSearchWindow must be an integer from 1 to 10000.\n"
+        unless $ontBarcodeSearchWindow =~ /^\d+$/ && $ontBarcodeSearchWindow >= 1 && $ontBarcodeSearchWindow <= 10000;
+    die "-ontBarcodeEnds must be either or both.\n" unless $ontBarcodeEnds eq 'either' || $ontBarcodeEnds eq 'both';
+    die "-barcodeSearchWindow and -ontBarcodeEnds require -p ONT.\n"
+        if lc($platform) ne 'ont' && _option_was_provided('barcodeSearchWindow', 'ontBarcodeEnds');
     die "-ontMinReads must be nonnegative.\n" if $ontMinReads < 0;
     die "-ontWriteFastqCol must be 0 or 1.\n" unless $ontWriteFastqCol =~ /^[01]$/;
     die "-savontSingleStrand must be 0 or 1.\n" unless $savontSingleStrand =~ /^[01]$/;
@@ -7145,8 +7376,9 @@ sub _minimum_input_file_issues {
 sub validate_inputs_before_execution {
     my ($map_href, $comb_href) = @_;
     my @problems; my @warnings;
-    if ($platform eq 'ont' && ($ClusterPipe == 9 || $ontDemux ne '0')) {
-        die "ONT processing requires single-end FASTQ input.\n" if $numInput != 1 || $inq ne '';
+    if ($platform eq 'ont' && !$onlyTaxRedo) {
+        read_sdm_ambiguity_options($sdmOpt) if $saveDemulti != 1;
+        die "ONT processing requires single-end FASTQ input.\n" if $numInput != 1 || @inputArray != 1 || $inq ne '' || $barcodefile ne '';
         if ($ontDemux eq 'barbell') {
             die "-ontDemux barbell requires one multiplexed FASTQ file via -i.\n"
                 unless @inputArray == 1 && -f $inputArray[0];
@@ -7158,12 +7390,37 @@ sub validate_inputs_before_execution {
         }
     }
     my @files = _collect_input_files_for_validation($map_href);
-    if ($platform eq 'ont' && ($ClusterPipe == 9 || $ontDemux ne '0') && !$onlyTaxRedo) {
+    if ($platform eq 'ont' && !$onlyTaxRedo) {
         my @headers = @{$map_href->{'#SampleID'}};
         die "ONT processing requires FASTQ input, not a fnaFile/qualFile mapping column.\n"
             if grep { $_ eq 'fnaFile' || $_ eq 'qualFile' } @headers;
-        die "Savont backmapping requires SDM dereplication (-highmem must be nonzero).\n"
-            if $ClusterPipe == 9 && !$sdmDerepDo && $saveDemulti != 1;
+        for my $column (qw(Barcode2ndPair MIDfqFile SampleIDinHead alignmentFile)) {
+            die "ONT SDM matching does not support mapping column '$column', even when empty; remove it from the ONT map.\n"
+                if grep { $_ eq $column } @headers;
+        }
+        my $barcode_errors = 0;
+        # Demultiplex-only mode deliberately omits the preset and uses SDM defaults.
+        if ($saveDemulti != 1) {
+            open my $options, '<', $sdmOpt or die "Cannot read SDM options $sdmOpt: $!\n";
+            while (my $line = <$options>) {
+                # Match SDM's tab-separated keys, including its alternative prefix.
+                $line =~ s/[\r\n]+$//;
+                my ($key, $value) = split(/\t/, $line, -1);
+                next unless defined($key) && $key =~ /^\*?maxBarcodeErrs$/;
+                die "ONT maxBarcodeErrs in '$sdmOpt' must be an integer from 0 to 3.\n"
+                    unless defined($value) && $value =~ /^\d+$/ && $value <= 3;
+                $barcode_errors = 0 + $value;
+            }
+            close $options or die "Cannot close SDM options $sdmOpt: $!\n";
+        }
+        my ($barcode_col) = grep { $headers[$_] eq 'BarcodeSequence' } 0 .. $#headers;
+        if (defined($barcode_col)) {
+            for my $sample (grep { $_ ne '#SampleID' } keys %$map_href) {
+                my $barcode = $map_href->{$sample}->[$barcode_col] // '';
+                die "ONT BarcodeSequence for '$sample' must contain only A/C/G/T and be longer than maxBarcodeErrs ($barcode_errors).\n"
+                    unless $barcode =~ /^[ACGT]+$/i && length($barcode) > $barcode_errors;
+            }
+        }
         if ($ontDemux eq '0') {
             for my $file (@files[0 .. ($#files < 9 ? $#files : 9)]) {
                 my (undef, $issues) = fastq_validation_scan($file, 1);
@@ -7310,6 +7567,18 @@ sub write_repro_manifest {
     push @lines, "Strict mode: $strictMode";
     push @lines, "Amplicon type: $ampliconType";
     push @lines, "Platform: $platform";
+    push @lines, "SDM dereplication: " . ($sdmDerepDo ? "enabled" : "disabled");
+    push @lines, "Savont input: SDM primary filtered FASTQ (individual reads)" if $ClusterPipe == 9;
+    push @lines, "Savont single-strand mode: $savontSingleStrand" if $ClusterPipe == 9;
+    push @lines, "Savont maximum ambiguous bases: $savontMaxAmbiguousPercent% of trimmed length" if defined $savontMaxAmbiguousPercent;
+    if ($platform eq 'ont') {
+        push @lines, "ONT demultiplexer: " . ($ontDemux eq '0' ? 'sdm' : $ontDemux);
+        push @lines, "ONT primers entering SDM: $ontPrimerState";
+        push @lines, "SDM ONT end matching: enabled during primary read preparation";
+        push @lines, "SDM barcode/primer search window: $ontBarcodeSearchWindow";
+        push @lines, "SDM barcode ends: $ontBarcodeEnds";
+        push @lines, "Barbell maximize: $ontBarbellMaximize" if $ontDemux eq 'barbell';
+    }
     push @lines, "Threads: $uthreads";
     push @lines, "Original input: $userInput";
     push @lines, "Input: $input";
@@ -8106,10 +8375,10 @@ sub buildOTUs($) {
 		}
 	}
 	my ( $totSeqs, $SeqLength ) = parseSDMlog("$logDir/demulti.log");
-	if ( !$sdmDerepDo ) {
+	if (!$sdmDerepDo && $ClusterPipe != 9) {
 		my ($derepl) = usearchDerepSort($filtered);
 	}
-	else {
+	elsif ($sdmDerepDo) {
 		if ($ClusterPipe != 7 && (!-f $derepl || -z $derepl )) {
 			printL "The sdm dereplicated output file was either empty or not existing, aborting lotus.\n$derepl\n",1;
 		}
@@ -8222,22 +8491,22 @@ sub buildOTUs($) {
 		$citations .= "CD-HIT v$cdhit_ver ${OTU_prefix} clustering: Fu L, Niu B, Zhu Z, Wu S, Li W. 2012. CD-HIT: Accelerated for clustering the next-generation sequencing data. Bioinformatics 28: 3150–3152.\n";
 		
 	}elsif ( $ClusterPipe == 9 ) { #savont (ONT long-read ASVs)
-        # Feed full, primer-trimmed FASTQ reads to Savont; use normal backmapping
-        # below for per-sample abundances, as in the default DADA2 path.
+        # Use SDM's primary filtered FASTQ directly, retaining every read copy.
+        # Backmapping below uses this same file and its sample-prefixed identifiers.
         my $savontTmp = "$lotus_tempDir/savont_out";
-        my $savontIn = "$lotus_tempDir/savont_in.fq";
+        my $savontIn = $filterOut;
         if ($exec == 0) {
             die "savont executable unavailable: $savontBin\n" unless -f $savontBin && -x $savontBin;
+            die "No reads passed SDM filtering for Savont ($savontIn missing/empty).\n" unless -s $savontIn;
             safe_remove_tree($savontTmp, 'Savont output');
         }
         my @savontArgs = ($savontBin, 'asv', $savontIn, '-o', $savontTmp, '-t', $uthreads,
+            '--min-read-length', 1000, '--max-read-length', 2000,
             '--quality-value-cutoff', $savontQualCutoff, '--minimum-base-quality', $savontMinBaseQual,
             '--chimera-allowable-errors', $savontChimeraErrors);
         push @savontArgs, '--single-strand' if $savontSingleStrand;
         $entrMessage = "savont ${OTU_prefix} clustering (ONT)\ncheck progress at $progOutPut";
-        $cmd = 'cat ' . shell_quote($sdmDemultiDir) . '/*.fq > ' . shell_quote($savontIn) . '; ';
-        $cmd .= join(' ', map { shell_quote($_) } @savontArgs) . ';';
-        $citations .= "savont ASV clustering (ONT): https://github.com/bluenote-1577/savont\n";
+        $cmd = join(' ', map { shell_quote($_) } @savontArgs) . ';';
 	}elsif ( $ClusterPipe == 5 ) {    #micca
 		die "-CL 5 not supported\n";
 		 #"$otuclustBin $derepl -s $id_OTU  --out-clust $otuclust_clust --out-rep $OTUfastaTmp -f fasta -c"; #-d: fast
@@ -8263,14 +8532,13 @@ sub buildOTUs($) {
 			$exitMsg = "$d2rep";
 		}
         if ($ClusterPipe == 9) {
+            record_ont_citation('savont');
             my $savontRaw = "$lotus_tempDir/savont_out/final_asvs.fasta";
             die "savont produced no ASVs ($savontRaw missing/empty).\n" unless -s $savontRaw;
             my ($nASV, $problems) = fasta_validation_scan($savontRaw, 1_000_000_000);
             die "Invalid savont ASVs:\n" . join("\n", @$problems) . "\n" if @$problems;
             numberOTUs($savontRaw, $OTUfastaTmp, $OTU_prefix);
             $exitMsg = "Found $nASV ASVs (savont)";
-            unlink("$lotus_tempDir/savont_in.fq") or die "Cannot remove Savont input: $!\n";
-            safe_remove_tree($sdmDemultiDir, 'Savont demultiplexed reads') if $saveDemulti == 0;
         }
 		printL(frame($exitMsg,1,3),0);
 		#die "$progOutPut\n$d2rep\n";
@@ -8292,12 +8560,13 @@ sub buildOTUs($) {
     $vsearchSpcfcOpt = "" if ( !$VSused );
     $vsearchSpcfcOpt .= " --dbmask none --qmask none";
 	my $backMapRep = "";
-	my $backMapDerep = 0;
+    my $backMapDerep = $ClusterPipe == 9 ? 1 : 0;
+    my $mapping_reads = $ClusterPipe == 9 ? $filterOut : $derepl;
+    my $mapping_label = $ClusterPipe == 9 ? 'quality-filtered reads' : 'dereplicated reads';
 	if ($sdmDerepDo){
 		if (   ( $usearchVer < 8 && $ClusterPipe == 1 )
             || $ClusterPipe == 2 || $ClusterPipe == 6  #|| $ClusterPipe == 3 #2=swarm, 3=cdhit, 6=unoise
-			||( $ClusterPipe == 7 && $useBackmap4dada2) #dada2
-			|| $ClusterPipe == 9 ) #savont: backmap reads onto ASVs (Option B), like dada2-default
+			||( $ClusterPipe == 7 && $useBackmap4dada2) ) #dada2
 		{  
 			$backMapDerep = 1;
 		}
@@ -8315,14 +8584,14 @@ sub buildOTUs($) {
 	}
 
 	my $backmapRest=0; my $backmapMids = 0;
-	$backmapRest = 1 if (-s "$derepl.rest");
+	$backmapRest = 1 if ($sdmDerepDo && -s "$derepl.rest");
 	$backmapMids = 1 if (@lotsFiles && (-f $lotsFiles[0] || -f $lotsFiles[1]));
 	
 	
 
 	
 	$entrMessage = "Starting backmapping of ";
-	$entrMessage .= "\n  - dereplicated reads" if ($backMapDerep);
+	$entrMessage .= "\n  - $mapping_label" if ($backMapDerep);
 	$entrMessage .= "\n  - low-abundant dereplicated Reads" if ($backmapRest);
 	$entrMessage .= "\n  - mid-quality reads" if ($backmapMids);
 	$entrMessage .= "\nto ${OTU_prefix}'s using $internalMapper at >= $backMapID identity.";
@@ -8330,9 +8599,8 @@ sub buildOTUs($) {
 
 	$cmd = "";
 	
-    if ($sdmDerepDo) {
-        #only HQ derep need to be mapped, and uparse v8 has this already done
-        #my @lotsFiles = ($derepl); #these are dereplicated files
+    if ($sdmDerepDo || $ClusterPipe == 9) {
+        # Savont maps all primary filtered reads; other clusterers use dereplicates.
 		
         if ( $backMapDerep ) #dada2
 		{    #usearch8 has .up output instead
@@ -8345,17 +8613,23 @@ sub buildOTUs($) {
 			#die "$finalClustMap \t $useMini4map\n";
 			$cmd .= "rm -f $finalClustMap;";
 			if ($useMini4map == 0){
-				$cmd .= "$VSBin --usearch_global ". $derepl. " -db $outfile -uc $finalClustMap $userachDffOpt $vsearchSpcfcOpt;";    #-threads  $BlastCores";
+                if ($ClusterPipe == 9) {
+                    # Older supported VSEARCH/USEARCH versions require FASTA.
+                    # Keep every read and its sample-prefixed ID; do not dereplicate.
+                    $mapping_reads = "$lotus_tempDir/savont_mapping.fna";
+                    convertFastqs2fna([$filterOut], $mapping_reads);
+                }
+				$cmd .= "$VSBin --usearch_global $mapping_reads -db $outfile -uc $finalClustMap $userachDffOpt $vsearchSpcfcOpt;";    #-threads  $BlastCores";
 			} else {
 				$finalClustMap =~ s/\.uc/\.paf/;
-				$cmd .= "$mini2Bin $mini2RdPreset  -t $uthreads -o $finalClustMap  $outfile $derepl;";
+				$cmd .= "$mini2Bin $mini2RdPreset  -t $uthreads -o $finalClustMap  $outfile $mapping_reads;";
 			}
 			
 				   #die $cmd."\n";
 			if ( systemL($cmd) != 0 ) {
 				printL( "$internalMapper backmapping command aborted:\n$cmd\n", 1 );
 			}
-			$backMapRep .= "Backmapping dereplicated reads via $internalMapper: ".parseLastVUsearch($progOutPut)."\n"; 
+			$backMapRep .= "Backmapping $mapping_label via $internalMapper: ".parseLastVUsearch($progOutPut)."\n";
 			
         }
 	} else {         #map all qual filtered files to OTUs
@@ -8426,7 +8700,7 @@ sub buildOTUs($) {
 	$cmd="";
 	#die;
     #add in unique low-abundant reads
-    if ( -s "$derepl.rest" ) {
+    if ($sdmDerepDo && -s "$derepl.rest") {
 #push(@lotsFiles,$derepl.".rest"); #these are sdm "uniques" that were too small to map
 #my @lotsFiles2 = ($derepl,$derepl.".rest");
         my $restUC = "$lotus_tempDir/rests.uc";

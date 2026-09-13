@@ -4,6 +4,8 @@ Download tests substitute fixture digests in a temporary script copy, leaving
 checksum verification, unpacking, executable probing, and config writes intact.
 """
 import hashlib
+import ctypes
+import ctypes.util
 import io
 import json
 import os
@@ -13,8 +15,52 @@ import subprocess
 import tarfile
 import tempfile
 import unittest
+import zipfile
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+def conda_package(contents=None, member='bin/savont', link=False, duplicate=False):
+    """Small real ZIP/Zstandard/tar archive; no Conda or Rust needed."""
+    payload = io.BytesIO()
+    with tarfile.open(fileobj=payload, mode='w') as archive:
+        info = tarfile.TarInfo(member)
+        data = (contents if contents is not None else program('savont')).encode()
+        if link:
+            info.type = tarfile.LNKTYPE if link == 'hard' else tarfile.SYMTYPE
+            info.linkname = '/bin/sh'
+        else:
+            info.size = len(data)
+        for _ in range(2 if duplicate else 1):
+            archive.addfile(info, io.BytesIO(data))
+    data = payload.getvalue()
+    name = ctypes.util.find_library('zstd')
+    if not name:
+        raise unittest.SkipTest('libzstd is needed to create .conda fixtures')
+    lib = ctypes.CDLL(name)
+    lib.ZSTD_compressBound.argtypes = [ctypes.c_size_t]
+    lib.ZSTD_compressBound.restype = ctypes.c_size_t
+    lib.ZSTD_compress.argtypes = [ctypes.c_void_p, ctypes.c_size_t, ctypes.c_void_p, ctypes.c_size_t, ctypes.c_int]
+    lib.ZSTD_compress.restype = ctypes.c_size_t
+    lib.ZSTD_isError.argtypes = [ctypes.c_size_t]
+    lib.ZSTD_isError.restype = ctypes.c_uint
+    capacity = lib.ZSTD_compressBound(len(data))
+    compressed = ctypes.create_string_buffer(capacity)
+    size = lib.ZSTD_compress(compressed, capacity, data, len(data), 3)
+    if lib.ZSTD_isError(size):
+        raise RuntimeError('Unable to compress test fixture')
+    package = io.BytesIO()
+    with zipfile.ZipFile(package, 'w') as archive:
+        archive.writestr('metadata.json', '{"conda_pkg_format_version": 2}')
+        archive.writestr('pkg-savont-fixture.tar.zst', compressed.raw[:size])
+    return package.getvalue()
+
+
+def zstd_tool():
+    path = os.environ.get('LOTUS_TEST_ZSTD') or shutil.which('zstd')
+    if not path or not os.path.isfile(path) or not os.access(path, os.X_OK):
+        raise unittest.SkipTest('zstd is needed for extraction tests; set LOTUS_TEST_ZSTD or add it to PATH')
+    return str(Path(path).resolve())
 
 
 def program(name, crash=False):
@@ -36,6 +82,7 @@ class ONTInstaller(unittest.TestCase):
         (self.install/'lotus3').write_text('# test installation root\n')
         self.installer = self.install/'helpers/autoInstall.pl'
         shutil.copyfile(ROOT/'helpers/autoInstall.pl', self.installer)
+        shutil.copyfile(ROOT/'helpers/extract_conda_executable.pl', self.install/'helpers/extract_conda_executable.pl')
         self.default = self.install/'configs/LotuS.cfg.def'
         self.default.write_text('UID ??\nusearch unavailable\n# preserve this\nTAX_REFDB_KSGP /my/reference.fasta\n')
         self.cfg = self.install/'lOTUs.cfg'
@@ -51,8 +98,9 @@ class ONTInstaller(unittest.TestCase):
     def installed_tools(self):
         for name in ('minimap2','savont','barbell'): self.tool(name)
 
-    def run_installer(self, extra=(), ok=True):
-        result = subprocess.run(['/usr/bin/perl',str(self.installer),'--ont-only',*extra], env=self.env, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=30)
+    def run_installer(self, extra=(), ok=True, *, ont_only=True, answers=None):
+        mode = ['--ont-only'] if ont_only else []
+        result = subprocess.run(['/usr/bin/perl',str(self.installer),*mode,*extra], input=answers, env=self.env, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=30)
         if ok: self.assertEqual(result.returncode, 0, result.stdout)
         else: self.assertNotEqual(result.returncode, 0, result.stdout)
         return result
@@ -67,6 +115,25 @@ class ONTInstaller(unittest.TestCase):
             self.assertEqual(config[name], str(self.tools/name))
         self.assertEqual(config['TAX_REFDB_KSGP'], '/my/reference.fasta')
         self.assertFalse((self.install/'DB').exists())
+
+    def test_default_install_downloads_barbell_without_rust(self):
+        self.setup_downloads()
+        self.tool('minimap2'); self.tool('savont')
+        for name in ('cargo', 'rustc', 'cc', 'c++', 'cmake'):
+            (self.tools/name).unlink()
+        self.run_installer()
+        self.assertEqual(dict(self.entries())['barbell'], str(self.install/'bin/barbell'))
+        self.assertTrue(os.access(self.install/'bin/barbell', os.X_OK))
+        self.assertFalse((self.root/'build.json').exists())
+
+    def test_default_install_reuses_configured_barbell(self):
+        self.installed_tools(); self.tool('barbell', crash=True)
+        configured = self.install/'custom-barbell'
+        configured.write_text(program('barbell')); configured.chmod(0o755)
+        self.cfg.write_text(self.default.read_text()+'barbell custom-barbell\n')
+        result = self.run_installer()
+        self.assertEqual(dict(self.entries())['barbell'], str(configured))
+        self.assertNotIn(str(self.tools/'barbell'), result.stdout)
 
     def test_old_config_duplicates_backup_and_rerun(self):
         self.installed_tools()
@@ -90,16 +157,19 @@ class ONTInstaller(unittest.TestCase):
 
     def test_missing_build_tools_preserves_config(self):
         self.tool('minimap2'); self.tool('barbell')
+        self.tool('rustc', '#!/bin/sh\necho "rustc 1.88.0"\n')
+        self.tool('cargo')
         self.cfg.write_bytes(self.default.read_bytes()); before = self.cfg.read_bytes()
         result = self.run_installer(ok=False)
-        self.assertIn('ONT source builds require cargo', result.stdout)
+        self.assertIn('ONT source builds require', result.stdout)
         self.assertEqual(self.cfg.read_bytes(), before)
         self.assertFalse(Path(str(self.cfg)+'.bak').exists())
 
     def test_crashing_program_is_not_registered(self):
         self.installed_tools(); self.tool('savont', crash=True)
         result = self.run_installer(ok=False)
-        self.assertIn('require cargo', result.stdout)
+        self.assertIn('install the zstd command-line tool', result.stdout)
+        self.assertIn('Install Rust >= 1.88', result.stdout)
         self.assertFalse(self.cfg.exists())
 
     def test_rejects_conflicting_modes(self):
@@ -158,6 +228,152 @@ p.parent.mkdir(parents=True); p.write_text('''+repr(program('savont'))+'''); p.c
         self.assertIn('Checksum mismatch', result.stdout)
         self.assertEqual(dict(self.entries())['barbell'], 'previous-install')
         self.assertFalse((self.install/'bin/barbell').exists())
+
+    def setup_bioconda(self, payload=None):
+        self.setup_downloads()
+        for name in ('cargo', 'rustc', 'cc', 'c++', 'cmake'):
+            (self.tools/name).unlink()
+        (self.tools/'zstd').symlink_to(zstd_tool())
+        payload = conda_package() if payload is None else payload
+        (self.root/'fixtures/savont').write_bytes(payload)
+        self.installer.write_text(self.installer.read_text().replace(
+            'e7ea28b084d176379d9fa273a3cb349c9e58e54436e2efd02c295acf91edbdd7',
+            hashlib.sha256(payload).hexdigest()))
+        self.cfg.write_text(self.default.read_text()+'savont previous-install\n')
+
+    def assert_bioconda_failure(self, result):
+        self.assertIn('Savont Bioconda binary fallback failed', result.stdout)
+        self.assertIn('Install Rust >= 1.88 (including Cargo)', result.stdout)
+        self.assertEqual(dict(self.entries())['savont'], 'previous-install')
+        self.assertFalse((self.install/'bin/savont').exists())
+        self.assertFalse((self.install/'bin/barbell').exists())
+        self.assertFalse((self.root/'build.json').exists())
+
+    def test_bioconda_without_rust_installs_and_reruns(self):
+        self.setup_bioconda()
+        for name in ('python', 'python3', 'conda', 'cargo', 'rustc'):
+            self.assertIsNone(shutil.which(name, path=self.env['PATH']))
+        self.run_installer()
+        for name in ('minimap2', 'savont', 'barbell'):
+            self.assertEqual(dict(self.entries())[name], str(self.install/'bin'/name))
+        self.assertFalse((self.root/'build.json').exists())
+        saved = self.cfg.read_bytes()
+        (self.tools/'wget').unlink(); (self.tools/'zstd').unlink()
+        self.run_installer()
+        self.assertEqual(self.cfg.read_bytes(), saved)
+
+    def test_bioconda_with_old_rust(self):
+        self.setup_bioconda()
+        self.tool('cargo', '#!/bin/sh\nexit 1\n')
+        self.tool('rustc', '#!/bin/sh\necho "rustc 1.87.0"\n')
+        self.run_installer()
+        self.assertEqual(dict(self.entries())['savont'], str(self.install/'bin/savont'))
+
+    def test_bioconda_without_cargo(self):
+        self.setup_bioconda()
+        self.tool('rustc', '#!/bin/sh\necho "rustc 1.88.0"\n')
+        self.run_installer()
+        self.assertEqual(dict(self.entries())['savont'], str(self.install/'bin/savont'))
+
+    def test_bioconda_corrupt_download_aborts(self):
+        self.setup_bioconda()
+        (self.root/'fixtures/savont').write_bytes(b'corrupt download')
+        result = self.run_installer(ok=False)
+        self.assert_bioconda_failure(result)
+        self.assertIn('Checksum mismatch', result.stdout)
+
+    def test_bioconda_failed_download_aborts(self):
+        self.setup_bioconda()
+        self.tool('minimap2')
+        self.tool('wget', '#!/bin/sh\nexit 1\n')
+        self.assert_bioconda_failure(self.run_installer(ok=False))
+
+    def test_bioconda_bad_archive_aborts(self):
+        self.setup_bioconda(b'not a ZIP archive')
+        result = self.run_installer(ok=False)
+        self.assert_bioconda_failure(result)
+        self.assertIn('Cannot extract Bioconda executable', result.stdout)
+
+    def test_bioconda_crashing_executable_aborts(self):
+        self.setup_bioconda(conda_package(program('savont', crash=True)))
+        self.assert_bioconda_failure(self.run_installer(ok=False))
+
+    def test_bioconda_missing_cli_flags_aborts(self):
+        self.setup_bioconda(conda_package('#!/bin/sh\necho "savont 0.7.0"\n'))
+        self.assert_bioconda_failure(self.run_installer(ok=False))
+
+    def test_bioconda_missing_zstd_aborts_before_config_update(self):
+        self.setup_bioconda(); (self.tools/'zstd').unlink()
+        before = self.cfg.read_bytes()
+        self.assert_bioconda_failure(self.run_installer(ok=False))
+        self.assertEqual(self.cfg.read_bytes(), before)
+
+    def test_bioconda_unsupported_platform_aborts(self):
+        self.setup_bioconda()
+        self.installer.write_text(self.installer.read_text().replace('my $arch = lc($host[4]);', "my $arch = 'unsupported';"))
+        result = self.run_installer(ok=False)
+        self.assert_bioconda_failure(result)
+        self.assertIn('No pinned Savont Bioconda binary', result.stdout)
+
+
+class CondaExtraction(unittest.TestCase):
+    def extract(self, package, destination, script=None):
+        env = dict(os.environ, PATH=str(Path(zstd_tool()).parent))
+        return subprocess.run(['/usr/bin/perl', str(script or ROOT/'helpers/extract_conda_executable.pl'), str(package), 'bin/savont', str(destination)], env=env, capture_output=True, text=True)
+
+    def test_rejects_missing_or_linked_executable(self):
+        for kwargs in ({'member': 'bin/other'}, {'link': True}, {'link': 'hard'}, {'contents': ''}, {'duplicate': True}):
+            with self.subTest(kwargs=kwargs), tempfile.TemporaryDirectory() as temp:
+                package = Path(temp)/'savont.conda'; destination = Path(temp)/'savont'
+                package.write_bytes(conda_package(**kwargs))
+                result = self.extract(package, destination)
+                self.assertNotEqual(result.returncode, 0, result.stdout)
+                self.assertFalse(destination.exists())
+
+    def test_refuses_to_overwrite_existing_file(self):
+        for linked in (False, True):
+            with self.subTest(linked=linked), tempfile.TemporaryDirectory() as temp:
+                package = Path(temp)/'savont.conda'; destination = Path(temp)/'savont'
+                package.write_bytes(conda_package())
+                target = Path(temp)/'original'; target.write_text('preserve')
+                if linked: destination.symlink_to(target)
+                else: destination.write_text('preserve')
+                result = self.extract(package, destination)
+                self.assertNotEqual(result.returncode, 0, result.stdout)
+                self.assertEqual(destination.read_text(), 'preserve')
+                self.assertEqual(target.read_text(), 'preserve')
+
+    def test_rejects_duplicate_zip_payloads(self):
+        with tempfile.TemporaryDirectory() as temp:
+            package = Path(temp)/'savont.conda'; destination = Path(temp)/'savont'
+            package.write_bytes(conda_package())
+            with zipfile.ZipFile(package, 'a') as archive:
+                archive.writestr('pkg-second.tar.zst', archive.read('pkg-savont-fixture.tar.zst'))
+            result = self.extract(package, destination)
+            self.assertNotEqual(result.returncode, 0, result.stdout)
+            self.assertIn('exactly one pkg-', result.stderr)
+            self.assertFalse(destination.exists())
+
+    def test_zstd_failure_leaves_no_executable(self):
+        with tempfile.TemporaryDirectory() as temp:
+            package = Path(temp)/'savont.conda'; destination = Path(temp)/'savont'
+            with zipfile.ZipFile(package, 'w') as archive:
+                archive.writestr('pkg-broken.tar.zst', b'not a zstd frame')
+            result = self.extract(package, destination)
+            self.assertNotEqual(result.returncode, 0, result.stdout)
+            self.assertIn('Zstandard decompression failed', result.stderr)
+            self.assertFalse(destination.exists())
+
+    def test_decompressed_size_limit(self):
+        with tempfile.TemporaryDirectory() as temp:
+            package = Path(temp)/'savont.conda'; destination = Path(temp)/'savont'
+            package.write_bytes(conda_package())
+            script = Path(temp)/'extract.pl'
+            script.write_text((ROOT/'helpers/extract_conda_executable.pl').read_text().replace('256 * 1024 * 1024', '4096'))
+            result = self.extract(package, destination, script)
+            self.assertNotEqual(result.returncode, 0, result.stdout)
+            self.assertIn('Oversized decompressed package', result.stderr)
+            self.assertFalse(destination.exists())
 
 
 if __name__ == '__main__':

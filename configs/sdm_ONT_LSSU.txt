@@ -33,6 +33,8 @@ maxAccumulatedError	-1
 
 
 #Max Barcode Errors 
+#With -ontMode 1: barcode errors are edit distance per end (0-3, including indels).
+#Primer errors remain substitutions/IUPAC; primer indels are not supported.
 maxBarcodeErrs	1
 maxPrimerErrs	2
 

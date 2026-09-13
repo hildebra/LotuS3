@@ -73,6 +73,7 @@ my $compile_lambda=0;
 my $usearchInstall = "";
 my $noTelemetry = 0;
 my $ontOnly = 0;
+my $withBarbell = 0; #accepted for compatibility; Barbell is included with ONT tools
 
 GetOptions(
 	"forceUpdate"     => \$forceUpdate,
@@ -82,10 +83,15 @@ GetOptions(
 	"link_usearch=s"  => \$usearchInstall,
 	"no-telemetry"    => \$noTelemetry,
 	"ont-only"        => \$ontOnly,
+	"with-barbell"    => \$withBarbell,
 ) or die "Invalid command line options\n";
 
 if ($ontOnly && ($forceUpdate || $condaDBinstall || $compile_lambda || $downloadLmbdIdx || $usearchInstall ne "")) {
 	die "--ont-only cannot be combined with database, update, or USEARCH-link modes.\n";
+}
+
+if ($withBarbell && ($condaDBinstall || $compile_lambda || $downloadLmbdIdx || $usearchInstall ne "")) {
+    die "--with-barbell requires a program installation (normal install or --ont-only).\n";
 }
 
 if ($compile_lambda && $downloadLmbdIdx){
@@ -119,6 +125,7 @@ my $configBackupWritten = 0;
 my $onlyDbinstall = 0;
 #options on programs to install..
 my $installBlast = 2; my @refDBinstall = (0) x 10; my $ITSready = 1;my $getUTAX=1;$refDBinstall[8]=1;
+my $installONT = 1; #ONT-only mode includes the whole set; detailed setup may opt out
 
 #DEBUG
 #get_programs();die;
@@ -1124,11 +1131,17 @@ sub capture_cmd {
 }
 
 sub read_user_input {
-	my ($context) = @_;
-	my $line = <STDIN>;
-	die "End of input while waiting for $context; installation aborted.\n" unless defined($line);
-	chomp($line);
-	return $line;
+	my ($context, $choices, $default) = @_;
+	while (1) {
+		my $line = <STDIN>;
+		die "End of input while waiting for $context; installation aborted.\n" unless defined($line);
+		chomp($line);
+		return $line unless defined($choices);
+		$line =~ s/^\s+|\s+$//g;
+		$line = $default if $line eq "" && defined($default);
+		return $line if grep { $line eq $_ } @$choices;
+		print "Invalid answer; enter " . join(" or ", @$choices) . ": ";
+	}
 }
 
 sub ensure_dir {
@@ -1434,12 +1447,47 @@ sub ont_tool_spec {
     return @{$spec{$name}};
 }
 
-sub ont_release_binary {
-    my ($name) = @_;
+sub ont_architecture {
     my @host = uname();
     my $arch = lc($host[4]);
     $arch = 'aarch64' if $arch eq 'arm64';
     $arch = 'x86_64' if $arch eq 'amd64';
+    return $arch;
+}
+
+sub ont_rust_available {
+    return 0 unless command_exists('cargo') && command_exists('rustc');
+    my ($version, $status) = eval { capture_cmd(command_exists('rustc'), '--version') };
+    return 0 if $@ || !defined($status) || $status != 0;
+    my ($v) = $version =~ /rustc\s+(\d+\.\d+\.\d+)/;
+    return defined($v) && !version_is_newer('1.88.0', $v);
+}
+
+sub savont_bioconda_binary {
+    my $target = ($isMac ? 'osx-' : 'linux-') . ont_architecture();
+    # Exact Bioconda 0.7.0 build-0 packages, including platform-specific digests.
+    my %packages = (
+        'linux-x86_64' => ['linux-64', 'hec9b1f2_0', 'e7ea28b084d176379d9fa273a3cb349c9e58e54436e2efd02c295acf91edbdd7'],
+        'linux-aarch64' => ['linux-aarch64', 'h2013a2e_0', '6481120075ab330342dc15f856ae5a7cf2833d096275e53ec2af9189978bd80b'],
+        'osx-x86_64' => ['osx-64', 'h121cdbd_0', '5270bb6e38f9eb315d88bd574df0bc0259d1cc3cb764a901f0197a53908feb01'],
+        'osx-aarch64' => ['osx-arm64', 'ha819e4a_0', '3be62545d8ee9fa3b8ecd2e0b1c2aa4785075c915190468f71888ef571e3242f'],
+    );
+    die "No pinned Savont Bioconda binary is available for $target.\n" unless exists $packages{$target};
+    my ($subdir, $build, $sha) = @{$packages{$target}};
+    my ($version) = ont_tool_spec('savont');
+    return ("https://api.anaconda.org/download/bioconda/savont/$version/$subdir/savont-$version-$build.conda", $sha);
+}
+
+sub savont_binary_failure {
+    my ($reason) = @_;
+    die "Savont Bioconda binary fallback failed:\n$reason\n"
+        . "Install Rust >= 1.88 (including Cargo), a C/C++ compiler and CMake, then rerun the installer to compile Savont from source.\n"
+        . "The existing savont configuration entry was preserved.\n";
+}
+
+sub ont_release_binary {
+    my ($name) = @_;
+    my $arch = ont_architecture();
     if ($name eq 'minimap2' && !$isMac && $arch eq 'x86_64') {
         return ('https://github.com/lh3/minimap2/releases/download/v2.28/minimap2-2.28_x64-linux.tar.bz2',
             '51f2cf0e486d0f9f88ace1aa58fdc56571382a676ea0889ae607301c60693377', 'minimap2-2.28_x64-linux/minimap2');
@@ -1460,15 +1508,15 @@ sub ont_release_binary {
 sub compatible_ont_program {
     my ($name, $path) = @_;
     return 0 unless defined($path) && -f $path && -x $path;
-    my ($version, $status) = capture_cmd($path, '--version');
-    return 0 if $status != 0;
+    my ($version, $status) = eval { capture_cmd($path, '--version') };
+    return 0 if $@ || !defined($status) || $status != 0;
     if ($name eq 'minimap2') {
         my ($v) = $version =~ /(\d+\.\d+)/;
         return defined($v) && !version_is_newer('2.17', $v);
     }
     return 0 unless $version =~ /\b\Q$name\E\b/i;
-    my ($help, $help_status) = capture_cmd($path, $name eq 'savont' ? 'asv' : 'kit', '--help');
-    return 0 if $help_status != 0;
+    my ($help, $help_status) = eval { capture_cmd($path, $name eq 'savont' ? 'asv' : 'kit', '--help') };
+    return 0 if $@ || !defined($help_status) || $help_status != 0;
     my @flags = $name eq 'savont'
         ? qw(--quality-value-cutoff --minimum-base-quality --chimera-allowable-errors --single-strand)
         : qw(--kit --input --output --maximize --threads);
@@ -1498,10 +1546,24 @@ sub find_ont_program {
     return;
 }
 
+sub ont_programs_to_install {
+    # Minimap2 is also the default mapper for non-ONT workflows.
+    return ('minimap2', ($installONT ? ('savont', 'barbell') : ()));
+}
+
 sub check_ont_build_requirements {
     my $needs_rust = 0; my $needs_make = 0;
-    for my $name (qw(savont barbell minimap2)) {
+    for my $name (ont_programs_to_install()) {
         next if find_ont_program($name);
+        if ($name eq 'savont' && !ont_rust_available()) {
+            eval {
+                savont_bioconda_binary(); #fail early on unsupported platforms
+                run_cmd($^X, "$ldir/helpers/extract_conda_executable.pl", '--check');
+                1;
+            } or savont_binary_failure($@);
+            print "Usable Rust/Cargo not found; Savont will use the prebuilt Bioconda package.\n";
+            next;
+        }
         my @release = ont_release_binary($name);
         next if @release;
         if ($name eq 'minimap2') { $needs_make = 1; } else { $needs_rust = 1; }
@@ -1525,50 +1587,65 @@ sub check_ont_build_requirements {
 sub install_ont_program {
     my ($name) = @_;
     if (my $existing = find_ont_program($name)) { return $existing; }
-    my ($version, $repo, $sha) = ont_tool_spec($name);
-    my $stage = tempdir("$name-install-XXXXXXXX", DIR => $bdir, CLEANUP => 1);
-    my @release = ont_release_binary($name);
-    my $exe;
-    if (@release) {
-        my ($url, $digest, $member) = @release;
-        my $archive = "$stage/download";
-        getS2($url, $archive);
-        verify_sha256($archive, $digest);
-        if ($member ne '') {
-            run_cmd('tar', '-xjf', $archive, '-C', $stage);
-            $exe = "$stage/$member";
-        } else { $exe = $archive; }
-    } else {
-        my $archive = "$stage/source.tar.gz";
-        getS2("https://codeload.github.com/$repo/tar.gz/refs/tags/v$version", $archive);
-        verify_sha256($archive, $sha);
-        run_cmd('tar', '-xzf', $archive, '-C', $stage);
-        my $source = "$stage/$name-$version";
-        if ($name eq 'minimap2') {
-            my @host = uname();
-            my @make = ('make', '-C', $source);
-            push @make, 'arm_neon=1', 'aarch64=1' if $host[4] =~ /^(?:arm64|aarch64)$/;
-            run_cmd(@make);
-            $exe = "$source/minimap2";
+    my $bioconda = $name eq 'savont' && !ont_rust_available();
+    my $installed = eval {
+        my ($version, $repo, $sha) = ont_tool_spec($name);
+        my $stage = tempdir("$name-install-XXXXXXXX", DIR => $bdir, CLEANUP => 1);
+        my @release = ont_release_binary($name);
+        my $exe;
+        if ($bioconda) {
+            my ($url, $digest) = savont_bioconda_binary();
+            my $archive = "$stage/savont.conda";
+            getS2($url, $archive);
+            verify_sha256($archive, $digest);
+            $exe = "$stage/savont";
+            run_cmd($^X, "$ldir/helpers/extract_conda_executable.pl", $archive, 'bin/savont', $exe);
+        } elsif (@release) {
+            my ($url, $digest, $member) = @release;
+            my $archive = "$stage/download";
+            getS2($url, $archive);
+            verify_sha256($archive, $digest);
+            if ($member ne '') {
+                run_cmd('tar', '-xjf', $archive, '-C', $stage);
+                $exe = "$stage/$member";
+            } else { $exe = $archive; }
         } else {
-            my @build = (command_exists('cargo'), 'build', '--release', '--locked', '--manifest-path', "$source/Cargo.toml", '--target-dir', "$stage/target");
-            push @build, '--config', "$source/.cargo/config.toml" if -f "$source/.cargo/config.toml";
-            run_cmd(@build);
-            $exe = "$stage/target/release/$name";
+            my $archive = "$stage/source.tar.gz";
+            getS2("https://codeload.github.com/$repo/tar.gz/refs/tags/v$version", $archive);
+            verify_sha256($archive, $sha);
+            run_cmd('tar', '-xzf', $archive, '-C', $stage);
+            my $source = "$stage/$name-$version";
+            if ($name eq 'minimap2') {
+                my @host = uname();
+                my @make = ('make', '-C', $source);
+                push @make, 'arm_neon=1', 'aarch64=1' if $host[4] =~ /^(?:arm64|aarch64)$/;
+                run_cmd(@make);
+                $exe = "$source/minimap2";
+            } else {
+                my @build = (command_exists('cargo'), 'build', '--release', '--locked', '--manifest-path', "$source/Cargo.toml", '--target-dir', "$stage/target");
+                push @build, '--config', "$source/.cargo/config.toml" if -f "$source/.cargo/config.toml";
+                run_cmd(@build);
+                $exe = "$stage/target/release/$name";
+            }
         }
+        die "Installation did not produce $name at $exe\n" unless -s $exe;
+        run_cmd('chmod', '+x', $exe);
+        die "Installed $name is not executable or lacks the CLI required by LotuS. See the tool's output above. The existing $name configuration entry was preserved.\n"
+            unless compatible_ont_program($name, $exe);
+        my $destination = "$bdir/$name";
+        copy_file_atomic($exe, $destination);
+        run_cmd('chmod', '+x', $destination);
+        abs_path($destination);
+    };
+    if (my $error = $@) {
+        savont_binary_failure($error) if $bioconda;
+        die $error;
     }
-    die "Installation did not produce $name at $exe\n" unless -s $exe;
-    run_cmd('chmod', '+x', $exe);
-    die "Installed $name is not executable or lacks the CLI required by LotuS. See the tool's output above. The existing $name configuration entry was preserved.\n"
-        unless compatible_ont_program($name, $exe);
-    my $destination = "$bdir/$name";
-    copy_file_atomic($exe, $destination);
-    run_cmd('chmod', '+x', $destination);
-    return abs_path($destination);
+    return $installed;
 }
 
 sub install_ont_programs {
-    for my $name (qw(minimap2 savont barbell)) {
+    for my $name (ont_programs_to_install()) {
         my $path = install_ont_program($name);
         @txt = addInfoLtS($name, $path, \@txt, 1);
     }
@@ -1958,63 +2035,42 @@ sub user_options(){
 		}
 	}
 	#auto update END
-	my $skipAll = 0 ; #debug option.. nerv
+	my $installAll = 0;
 	if ($onlyDbinstall){
 		print "Installing LotuS tax databases anew.. \nplease choose which databases to install in the following dialogs\n\n";
-	}else{
-		print "Total space required will be 0.3 - 5 GB.\nSome programs require a recent C++ compiler. Existing files are retained until their replacements download successfully, and lOTUs.cfg will be updated.\nContinue (y/n)?\nAnswer: ";
-		my $confirmation = lc(read_user_input("installation confirmation"));
-		if ($confirmation eq "y" || $confirmation eq "yes"){
-			# continue
-		} elsif ($confirmation eq "x") {
-			$skipAll=1;
-		} elsif ($confirmation eq "xx") {
-			$skipAll=1;
-			$refDBinstall[0] = 1;$refDBinstall[8] = 0;$ITSready=0;$getUTAX=0;
-		} elsif ($confirmation eq "n" || $confirmation eq "no") {
-			die "Installation cancelled by user.\n";
-		} else {
-			die "Invalid installation confirmation '$confirmation'.\n";
-		}
-		#print "\nThis is an experimental installer. Please send feedback and bug reports to: falk.hildebrand [at] gmail.com\n\n";
+	} else {
+		print "Some programs require a recent C++ compiler. Existing files are retained until their replacements download successfully, and lOTUs.cfg will be updated.\n";
+		print "Install LotuS3 with all possible dependencies (all databases, ITS, ONT related workflows)?\nSimply enter or \"1\" for yes, \"0\" for detailed configuration via question.\nAnswer: ";
+		$installAll = read_user_input("the all-dependencies choice", [0, 1], 1);
 		if ($isMac){print "Mac system detected, installing corresponding mac software.\n";}
-
-	#decide on blast
-		if ($skipAll){
-			return;
+		if ($installAll) {
+			$installBlast = 3; #both BLAST and Lambda
+			@refDBinstall = (0) x 10;
+			$refDBinstall[8] = 1; #all supported similarity-reference databases
+			$ITSready = 1;
+			$getUTAX = 1;
+			$installONT = 1;
+			print "Selected all supported dependencies: all reference databases, ITS/UTAX resources, BLAST and Lambda, ONT tools, and the standard programs/R packages.\n";
+		} else {
+			print "\n\nFor similarity based taxonomic assignments LotuS can either use \n (1) Blastn \n (2) Lambda \n (3) both, decide at runtime which to use or\n (0) none\n Answer:";
+			$installBlast = read_user_input("the similarity-search program choice", [0, 1, 2, 3]);
 		}
-		print "\n\nFor similarity based taxonomic assignments LotuS can either use \n (1) Blastn \n (2) Lambda \n (3) both, decide at runtime which to use or\n (0) none\n Answer:";
-		while (1){
-			my $choice = read_user_input("the similarity-search program choice");
-			if ($choice =~ m/^[0123]$/){
-				$installBlast = $choice;
-				last;
-			}
-			print "Invalid answer; enter 0, 1, 2, or 3: ";
-		}
-	
 	}
 
-
-	#decide on database options
-
-	print "\n\nDo you want to install a reference database 16S database for similarity based 16S annotations?\n";
-	print " (1) KSGP (~1.5 GB), covering SSU for Archaea, Bacteria and Eukaryotes, 2026 release. \n (2) SILVA (~2.5 GB), contains LSU as well as SSU, 138.1 2020 release.\n (3) GreenGenes2 (~1 GB), 2022 release.\n (4) HITdb (~100 MB) 16S bacterial database specialized on the gut environment.\n";
-	print " (5) PR2 (~100 MB), an SSU database specialized for marine eukaryotes.\n";
-	print " (6) beeTax (~2 MB) database specialized (and named) on taxonomy specific to the bee gut.\n";
-	print " (8) KSGP + SILVA + GG2 + PR2 + HITdb + beeTax (select a specific DB in each LotuS3 run)\n (0) no database.\n";
-	print "Answer:";
-	while (1){
-		my $choice = read_user_input("the reference-database choice");
-		if ($choice =~ m/^[0-6]$/ || $choice eq "8"){
-			$refDBinstall[8] = 0;
-			$refDBinstall[$choice] = 1;
-			last;
-		}
-		die "Invalid reference-database choice '$choice'.\n";
+	if (!$installAll) {
+		print "\n\nDo you want to install a reference database for similarity based annotations?\n";
+		print " (1) KSGP (~1.5 GB), covering SSU for Archaea, Bacteria and Eukaryotes, 2026 release. \n (2) SILVA (~2.5 GB), contains LSU as well as SSU, 138.1 2020 release.\n (3) GreenGenes2 (~1 GB), 2022 release.\n (4) HITdb (~100 MB) 16S bacterial database specialized on the gut environment.\n";
+		print " (5) PR2 (~100 MB), an SSU database specialized for marine eukaryotes.\n";
+		print " (6) beeTax (~2 MB) database specialized (and named) on taxonomy specific to the bee gut.\n";
+		print " (8) KSGP + SILVA + GG2 + PR2 + HITdb + beeTax (select a specific DB in each LotuS3 run)\n (0) no database.\n";
+		print "Answer:";
+		my $choice = read_user_input("the reference-database choice", [0 .. 6, 8]);
+		@refDBinstall = (0) x 10;
+		$refDBinstall[$choice] = 1;
 	}
+
 	#SILVA license
-	if (!$skipAll && ($refDBinstall[2] || $refDBinstall[8])){
+	if ($refDBinstall[2] || $refDBinstall[8]){
 		print "Please read the SILVA license: https://www.arb-silva.de/fileadmin/silva_databases/LICENSE.txt. Do you accept (y/n)? \n";
 		while (1){
 			my $choice = lc(read_user_input("the SILVA license response"));
@@ -2027,26 +2083,16 @@ sub user_options(){
 		}
 	}
 
+	return if $installAll; #the license response above is still required
+
 	print "\n\n -- ITS -- Do you want to\n (1) install databases and programs required to process ITS data (including fungi ITS UNITE database)\n (0) no ITS related packages\n Answer:";
+	$ITSready = read_user_input("the ITS package choice", [0, 1]);
 
-	while (1){
-		my $choice = read_user_input("the ITS package choice");
-		if ($choice eq "1" || $choice eq "0"){
-			$ITSready = $choice;
-			last;
-		}
-		print "Invalid answer; enter 0 or 1: ";
-	}
-
-	#UTAX ref DBs..
 	print "\n\n -- UTAX -- Do you want to\n (1) install utax taxonomic classification databases (16S, ITS)?\n (0) no utax related databases\n Answer:";
-	while (1){
-		my $choice = read_user_input("the UTAX database choice");
-		if ($choice eq "1" || $choice eq "0"){
-			$getUTAX = $choice;
-			last;
-		}
-		print "Invalid answer; enter 0 or 1: ";
-	}
+	$getUTAX = read_user_input("the UTAX database choice", [0, 1]);
 
+	if (!$onlyDbinstall) {
+		print "\n\n -- ONT -- Install ONT tools (Savont and Barbell)?\nSimply enter or \"1\" for yes, \"0\" for no.\nMinimap2 is included in the core installation for read mapping.\nAnswer: ";
+		$installONT = read_user_input("the ONT tools choice", [0, 1], 1);
+	}
 }

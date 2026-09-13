@@ -1,0 +1,58 @@
+# SDM preprocessing for LotuS3 -p ONT -CL savont (also after optional Barbell).
+# Demultiplex, remove barcodes/primers and quality-filter individual reads.
+# LotuS supplies the primary filtered FASTQ directly to Savont WITHOUT dereplication.
+# Savont still performs its own quality checks, ASV inference and chimera removal.
+# LotuS defaults to Savont --single-strand because SDM can orient reads and
+# replaces original header annotations (including Savont's trailing rc marker).
+# These are starting defaults for modern ONT reads; use -s to tune for your data.
+
+# Length after barcode/primer removal; LotuS also passes 1000-2000 bp to Savont.
+minSeqLength	1000
+maxSeqLength	2000
+*minSeqLength	1000
+
+# Moderate average-quality cutoff (the general ONT LSSU preset uses Q27).
+# SDM's average Phred score is not Savont's estimated percentage accuracy.
+minAvgQuality	15
+*minAvgQuality	15
+
+# Reject reads containing a low-quality 150-base window.
+QualWindowWidth	150
+QualWindowThreshhold	14
+
+# Preserve the amplicon boundaries: reject poor reads rather than shortening them.
+TruncateSequenceLength	-1
+TrimWindowWidth	100
+TrimWindowThreshhold	-1
+maxAccumulatedError	-1
+*maxAccumulatedError	-1
+TrimStartNTs	0
+
+# Allow up to 5% non-ACGT bases per trimmed read. Percentage syntax is a
+# LotuS Savont extension: checked after SDM, before Savont and abundance mapping.
+# Integer values retain SDM's native absolute-count behavior.
+maxAmbiguousNT	5%
+*maxAmbiguousNT	5%
+maxHomonucleotide	100
+trimHomonucleotide	0
+
+# ONT barcode matching is configured by LotuS's -ont* options and the sample map.
+# After Barbell the map has no barcode sequences, so these settings are inactive.
+maxBarcodeErrs	1
+maxPrimerErrs	2
+keepBarcodeSeq	0
+keepPrimerSeq	0
+fastqVersion	1
+TechnicalAdapter
+PEheaderPairFmt	1
+
+# Both primers are required for primer-bearing input. LotuS overrides these
+# controls when -ontPrimerState removed is selected, retaining quality settings.
+RejectSeqWithoutRevPrim	T
+*RejectSeqWithoutRevPrim	T
+RejectSeqWithoutFwdPrim	T
+*RejectSeqWithoutFwdPrim	T
+CheckForMixedPairs	T
+CheckForReversedSeqs	T
+AmpliconShortPE	T
+ExtensivePrimerChecks	T
