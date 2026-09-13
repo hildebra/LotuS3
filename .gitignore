@@ -1,4 +1,5 @@
 *.sh
+tests/__pycache__/*
 runs
 runs/*
 sqLOGs
