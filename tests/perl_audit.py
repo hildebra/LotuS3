@@ -124,6 +124,21 @@ class PerlAudit(unittest.TestCase):
     def test_semantic_version_comparison(self):
         self.probe('die "wrong version order" if version_at_least("0.9", "0.25") || version_at_least("3.9", "3.43") || !version_at_least("2.28.1", "2.28");')
 
+    def test_duplicate_reference_ids_are_warnings(self):
+        fasta = self.root/'duplicate.fasta'
+        taxonomy = self.root/'duplicate.tax'
+        fasta.write_text(''.join('>dup\nACGT\n' for _ in range(5)))
+        taxonomy.write_text(''.join('dup\tk__Bacteria\n' for _ in range(5)))
+        self.env['AUDIT_DUP_FASTA'] = str(fasta)
+        self.env['AUDIT_DUP_TAX'] = str(taxonomy)
+        body = '''my ($fn,$fp,$fw,$fi) = fasta_validation_scan($ENV{AUDIT_DUP_FASTA}, 10);
+my ($tn,$tp,$tw) = taxonomy_validation_scan($ENV{AUDIT_DUP_TAX}, 10);
+die join("\n", @$fp, @$tp) if @$fp || @$tp;
+print "RESULT:", join("\n", @$fw, @$tw);'''
+        result = self.probe(body)
+        self.assertIn('4 duplicate FASTA IDs', result.stdout)
+        self.assertIn('4 duplicate taxonomy IDs', result.stdout)
+
     def taxonomy(self, rows, biom=True, hit=True, lca=True):
         f = self.root/'hierarchy.tsv'; f.write_text('header\n'+rows)
         self.env['AUDIT_TAX'] = str(f)

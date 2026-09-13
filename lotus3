@@ -7295,7 +7295,7 @@ sub validate_fastq_pair {
 sub fasta_validation_scan {
     my ($file, $max_records) = @_;
     $max_records ||= 5000;
-    my @problems; my @warnings; my %seen; my @ids; my $records = 0; my $current = ""; my $saw_seq = 0;
+    my @problems; my @warnings; my %seen; my @ids; my $records = 0; my $current = ""; my $saw_seq = 0; my $dupIDs = 0;
     my $fh = _open_maybe_gzip($file);
     return (0, ["Cannot open FASTA file for validation: $file" . ($file =~ /\.gz$/i ? " ($GunzipError)" : "")], [], []) unless $fh;
     while (my $line = <$fh>) {
@@ -7304,7 +7304,7 @@ sub fasta_validation_scan {
             push @problems, "FASTA entry '$current' has no sequence in $file" if $current ne "" && !$saw_seq;
             if ($records >= $max_records) { $current = ""; last; }
             $current = $1; $saw_seq = 0; $records++; push @ids, $current;
-            if ($seen{$current}++) { push @problems, "Duplicate FASTA ID observed in $file: $current"; }
+            if ($seen{$current}++) { $dupIDs++; push @warnings, "Duplicate FASTA ID observed in $file: $current" if $dupIDs <= 3; }
         } elsif ($current ne "" && $line =~ /\S/) {
             $saw_seq = 1;
             push @problems, "Whitespace in FASTA sequence for $current in $file" if $line =~ /\s/;
@@ -7317,13 +7317,14 @@ sub fasta_validation_scan {
     push @problems, "Error while closing/reading FASTA file $file" unless close $fh;
     push @problems, "FASTA entry '$current' has no sequence in $file" if $current ne "" && !$saw_seq;
     push @problems, "No FASTA entries found in $file" if $records == 0;
+    push @warnings, "$dupIDs duplicate FASTA IDs in $file (normal for SILVA: one accession can hold several rRNA operon copies)" if $dupIDs > 3;
     return ($records, \@problems, \@warnings, \@ids);
 }
 
 sub taxonomy_validation_scan {
     my ($file, $max_records) = @_;
     $max_records ||= 1000;
-    my @problems; my @warnings; my %seen; my $records = 0;
+    my @problems; my @warnings; my %seen; my $records = 0; my $dupTax = 0;
     open my $fh, "<", $file or return (0, ["Cannot open taxonomy file for validation: $file"], []);
     while (my $line = <$fh>) {
         $line =~ s/[\r\n]+$//;
@@ -7335,7 +7336,7 @@ sub taxonomy_validation_scan {
         } else {
             my $id = $fields[0];
             push @problems, "Empty taxonomy ID at record $records in $file" if $id eq "";
-            push @problems, "Duplicate taxonomy ID '$id' in the first $records records of $file" if $id ne "" && $seen{$id}++;
+            if ($id ne "" && $seen{$id}++) { $dupTax++; push @warnings, "Duplicate taxonomy ID '$id' in $file" if $dupTax <= 3; }
             my $taxonomy = join("\t", @fields[1..$#fields]);
             push @problems, "Empty taxonomy annotation for '$id' in $file" if $taxonomy !~ /\S/;
             push @warnings, "Control character in taxonomy annotation for '$id' in $file" if $taxonomy =~ /[\x00-\x08\x0B\x0C\x0E-\x1F]/;
@@ -7344,6 +7345,7 @@ sub taxonomy_validation_scan {
     }
     close $fh or push @problems, "Error reading taxonomy file $file";
     push @problems, "No taxonomy records found in $file" if $records == 0;
+    push @warnings, "$dupTax duplicate taxonomy IDs in $file (normal for SILVA)" if $dupTax > 3;
     return ($records, \@problems, \@warnings);
 }
 

@@ -58,7 +58,7 @@ keepPrimerSeq	0
 fastqVersion	1
 
 #if one or more files have a technical adapter still included this can be removed here
-TechnicalAdapter	
+TechnicalAdapter
 
 #delete X NTs from start (e.g. if the first bases are known to have biases)
 TrimStartNTs	0
