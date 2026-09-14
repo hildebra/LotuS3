@@ -124,6 +124,28 @@ class PerlAudit(unittest.TestCase):
     def test_semantic_version_comparison(self):
         self.probe('die "wrong version order" if version_at_least("0.9", "0.25") || version_at_least("3.9", "3.43") || !version_at_least("2.28.1", "2.28");')
 
+    def test_duplicate_ids_rejected_by_default(self):
+        fasta = self.root/'validation.fasta'
+        taxonomy = self.root/'validation.tax'
+        self.env['AUDIT_DUP_FASTA'] = str(fasta)
+        self.env['AUDIT_DUP_TAX'] = str(taxonomy)
+        body = '''my ($fn,$fp,$fw,$fi) = fasta_validation_scan($ENV{AUDIT_DUP_FASTA}, 10);
+my ($tn,$tp,$tw) = taxonomy_validation_scan($ENV{AUDIT_DUP_TAX}, 10);
+print "RESULT:", JSON::PP->new->encode({fasta => $fp, taxonomy => $tp});'''
+        for duplicate in (False, True):
+            with self.subTest(duplicate=duplicate):
+                ids = ['asv1', 'asv1' if duplicate else 'asv2']
+                fasta.write_text(''.join(f'>{name}\nACGT\n' for name in ids))
+                taxonomy.write_text(''.join(f'{name}\tk__Bacteria\n' for name in ids))
+                errors = self.result(self.probe(body))
+                if duplicate:
+                    self.assertEqual(len(errors['fasta']), 1)
+                    self.assertIn('Duplicate FASTA ID', errors['fasta'][0])
+                    self.assertEqual(len(errors['taxonomy']), 1)
+                    self.assertIn('Duplicate taxonomy ID', errors['taxonomy'][0])
+                else:
+                    self.assertEqual(errors, {'fasta': [], 'taxonomy': []})
+
     def taxonomy(self, rows, biom=True, hit=True, lca=True):
         f = self.root/'hierarchy.tsv'; f.write_text('header\n'+rows)
         self.env['AUDIT_TAX'] = str(f)
@@ -290,6 +312,9 @@ elif name == 'vsearch' and '-userout' in a:
 ''' + checkpoint)
         (self.tools/'vsearch').write_text(vsearch)
         self.run_lotus(["-ontMinReads","2"] if barbell else [], barbell=barbell)
+        citations = (self.out/'LotuSLogS/citations.txt').read_text()
+        self.assertEqual(citations.count('10.64898/2026.05.26.727271'), 1)
+        self.assertEqual(citations.count('10.1093/bioinformatics/btag349'), int(barbell))
         table=(self.out/'OTU.txt').read_text().splitlines()
         self.assertEqual(table, ['OTU\ts1\ts2','ASV1\t4\t3'])
         biom=json.loads((self.out/'OTU.biom').read_text())
