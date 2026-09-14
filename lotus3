@@ -270,6 +270,7 @@ my $uthreads                = -1;
 my $sdmThreads              = -1;
 my $dereplicate_minsize_def = "8:1,4:2,3:3"; # Discard clusters < dereplicate_minsize in error correction round #Default: 2 for UPARSE, 4 for otupipe
 my $dereplicate_minsize = -1;
+my $coarseDerep; # Optional SDM coarse-dereplication ANI, expressed as a fraction.
 my $ASVpostClust = 0;
 my $doXtalk             = -1;    #check for cross talk in OTU tables
 my $usearchVer          = 0; my $usearchsubV = 0; my $vsearchVer = 0;
@@ -396,6 +397,7 @@ GetOptions(
 	"keepUnclassified=i"    => \$keepUnclassified,
 	"keepOfftargets=i"      => \$keepOfftargets,
 	"derepMin=s"            => \$dereplicate_minsize,
+	"coarseDerep=s"         => \$coarseDerep,
 	"doBlast|simBasedTaxo|taxAligner=s"=> \$doBlasting_pre,
 	"refDB=s"               => \$refDBwanted,
 	"recalcTaxDB=i"         => \$redoTaxDB,
@@ -650,6 +652,14 @@ if ( $exec == 0 && $onlyTaxRedo == 0 && $TaxOnly eq "0" ) {
         # rereading/storing every input read or replacing inferred consensus.
         $sdmcmd = "$sdmBin -i_fna $tmpOTU $sdmOut2 $mainMapping -paired 1 -sample_sep $sep_smplID -map $count_map_file -log $logDir/SeedExtensionStats.log -OTU_fallback $tmpOTU -otu_matrix $OTUmFile $mapRestr -count_chimeras $chimCnt";
     } elsif ($sdmDerepDo) {
+        if (defined $coarseDerep) {
+            for my $fastq ($derepOutHQ, ($numInput == 2 ? ($derepOutHQ2) : ())) {
+                die "Missing or empty coarse-dereplication seed FASTQ: $fastq\n" unless -s $fastq;
+            }
+            # This mode resolves .subN IDs to parent assignments and counts the
+            # parent's sample vector once while considering all exact variants.
+            $mergeOptions .= "-seedSubclusters 1 ";
+        }
 		$sdmIn = "-i_fastq $derepOutHQ";
 		#$finalClustMap $finalAddMap $finalRestMap
 		if ( $numInput == 2 ) { $sdmIn = "-i_fastq $derepOutHQ,$derepOutHQ2"; }
@@ -668,6 +678,8 @@ if ( $exec == 0 && $onlyTaxRedo == 0 && $TaxOnly eq "0" ) {
     printL (frame($ClusterPipe == 9 ? "Counting filtered reads per Savont ASV" : "Extending ${mrgSentence}${OTU_prefix} Seeds"), 0);
     $status = systemL($sdmcmd, "Seed extension", 0); #actual sdm derep step; recoverable fallback on failure
 	if ($status) {
+        die "SDM coarse-subcluster seed extension failed; see $logDir/SeedExtensionStats.log and $progOutPut.\n"
+            if defined $coarseDerep;
 		printL "SDM failed to build the Savont abundance matrix; see SeedExtensionStats.log and LotuS_progout.log.\n", 31 if $ClusterPipe == 9;
 		printL "Failed $sdmcmd\n",                    0;
 		printL "Fallback to ${OTU_prefix} median sequences.\n", 0;
@@ -1223,6 +1235,16 @@ sub sdmStep1{
 		$derepOutHQ  = "$lotus_tempDir/derep.1.hq.fq";
 		$derepOutMap = "$lotus_tempDir/derep.map";
 		$derepOutHQ2 = "$lotus_tempDir/derep.2.hq.fq";
+        if (defined $coarseDerep) {
+            my $identity_pct = sprintf("%.12g", 100 * $coarseDerep);
+            # Store exact variants and selected qualities in diffDNA; SDM exports
+            # every subcluster, including parents below the abundance cutoff.
+            $derepCmd .= " -derepIdentity $identity_pct -derepStoreQuals 1 -derepPerSR 0";
+            $sdmMergeOpt = "-merge_pairs_derep 0 -merge_pairs_filter 0 -merge_pairs_demulti 0";
+            $derepOutHQ = $paired == 2 ? "$lotus_tempDir/derep.subclusters.1.fq"
+                : "$lotus_tempDir/derep.subclusters.fq";
+            $derepOutHQ2 = $paired == 2 ? "$lotus_tempDir/derep.subclusters.2.fq" : "";
+        }
 		if ( $saveDemulti == 3 ) {   #temp deactivated, since I have  $sdmDemultiDir
 			$derepCmd .= " -suppressOutput 0";
 		} else {
@@ -3107,6 +3129,7 @@ sub announce_options{
 	printL "Sequencing platform     $platform\n", 0 ;
 	printL "Amplicon target         $organism, $ampliconType\n", 0;
 	printL($ClusterPipe == 9 ? "SDM dereplication      disabled for Savont; retaining individual filtered reads\n" : "Dereplication filter    -derepMin $dereplicate_minsize\n", 0);
+	printL "Coarse dereplication ANI $coarseDerep\n", 0 if defined $coarseDerep;
 	printL "Clustering algorithm    $clusteringNameStr -> ${OTU_prefix}'s\n",0;
 	
 	printL "Read mapping to ${OTU_prefix}     $internalMapper, at $backMapID %id cutoff\n",0 if $TaxOnly eq "0";
@@ -3885,6 +3908,7 @@ my @clustering_options = (
   ['-chim_skew <num>', 'Abundance skew parameter for UCHIME. Default: 2.'],
   ['-count_chimeras <T|F>', 'Include chimeras in OTU/ASV counts. Default: F.'],
   ['-deactivateChimeraCheck <0|1|2|3>', '(0) run all chimera checks; (1) deactivate all chimera checks; (2) deactivate de novo chimera checks; (3) deactivate reference-based chimera checks. Default: 0.'],
+  ['-coarseDerep <ANI>', 'Enable SDM coarse dereplication at ANI 0.95 through 1.0 (inclusive; disabled by default). Retain exact variants and their qualities for seed extension. Requires SDM 3.52 with subcluster seed support; incompatible with pre-clustering read merging.'],
   ['-derepMin <rule>', 'Minimum abundance rule for dereplicated clusters before clustering/noise removal (ignored by Savont). Rules can be compound, e.g. 8:1,4:2,3:3.'],
   ['-readOverlap <num>', 'Maximum expected overlap between paired reads. Default: 300.'],
   ['-endRem <string>', 'Sequence, usually reverse primer/adaptor, after which OTU sequence output is trimmed. This duplicates the ReversePrimer mapping-file option but gives manual control. Default: none.'],
@@ -5270,6 +5294,15 @@ sub checkLtsVer($) {
             && !$ont_capable) {
         die "ONT preprocessing requires SDM >= 3.51 or a build advertising 'ONT amplicon end matching: enabled'.\n"
             . "Found SDM $sdmVer at $sdmBin. Update the sdm executable configured in '$lotusCfg'.\n";
+    }
+
+    if (defined($coarseDerep) && $TaxOnly eq '0' && !$onlyTaxRedo) {
+        die "-coarseDerep requires SDM >= 3.52 with -seedSubclusters support; found $sdmVer at $sdmBin.\n"
+            unless version_at_least($sdmVer, '3.52');
+        my $flags = checked_program_output($sdmBin, '-help_flags');
+        die "SDM $sdmVer at $sdmBin exports coarse subclusters but does not advertise -seedSubclusters.\n"
+            . "Install the SDM seed-subcluster fix described in docs/sdm_coarse_seed_worker_brief.md before using -coarseDerep.\n"
+            unless $flags =~ /(?:^|\s)-seedSubclusters(?:\s|$)/;
     }
 
     # compare to server version
@@ -6909,6 +6942,14 @@ sub validate_reference_databases {
 }
 
 sub validate_option_combinations {
+    if (defined $coarseDerep) {
+        die "-coarseDerep requires a full run with SDM dereplication; it cannot be used with Savont, taxonomy-only, or demultiplex-only runs.\n"
+            if !$sdmDerepDo || $TaxOnly ne '0' || $onlyTaxRedo || $saveDemulti == 1;
+        die "-coarseDerep is not yet supported with DADA2's per-sequencing-run dereplication.\n"
+            if $ClusterPipe == 7;
+        die "-coarseDerep requires -mergePreClusterReads 0; retained-quality variants must remain unmerged until seed extension.\n"
+            if $mergePreCluster;
+    }
     my @problems;
     if ($TaxOnly eq "0") {
         push @problems, "Missing input (-i)" unless defined($input) && $input ne "";
@@ -7022,6 +7063,9 @@ sub _unsafe_shell_token_reason {
 }
 
 sub validate_cli_safety {
+    die "-coarseDerep must be a numeric ANI between 0.95 and 1.0 (inclusive).\n"
+        if defined($coarseDerep) && ($coarseDerep !~ /\A(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?\z/
+            || $coarseDerep < 0.95 || $coarseDerep > 1);
     die "Unknown -CL '$ClusterPipe_pre'. Choose UPARSE, VSEARCH, CD-HIT, SWARM, UNOISE, DADA2, or SAVONT.\n"
         unless $ClusterPipe_pre =~ /^(?:\?|[0-4]|[6-9]|CD-?HIT|VSEARCH|UPARSE|UNOISE3?|DADA2|SWARM|DNACLUST|SAVONT)$/i;
     my $savont_selected = lc($platform) eq 'ont' && $ClusterPipe_pre =~ /^(?:\?|savont|9)$/i;
@@ -7568,6 +7612,7 @@ sub write_repro_manifest {
     push @lines, "Amplicon type: $ampliconType";
     push @lines, "Platform: $platform";
     push @lines, "SDM dereplication: " . ($sdmDerepDo ? "enabled" : "disabled");
+    push @lines, "Coarse dereplication ANI: $coarseDerep" if defined $coarseDerep;
     push @lines, "Savont input: SDM primary filtered FASTQ (individual reads)" if $ClusterPipe == 9;
     push @lines, "Savont single-strand mode: $savontSingleStrand" if $ClusterPipe == 9;
     push @lines, "Savont maximum ambiguous bases: $savontMaxAmbiguousPercent% of trimmed length" if defined $savontMaxAmbiguousPercent;
