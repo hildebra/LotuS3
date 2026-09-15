@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Coarse dereplication preflight and FASTQ handoff regressions.
+"""Coarse storage parity and explicitly retained-variant FASTQ regressions.
 
 Reuse the ONT fixture and its controlled clusterer/mappers. Preprocessing and
 native seed/count checks use the installed SDM. A separate capture wrapper
@@ -81,10 +81,12 @@ class CoarsePreflight(unittest.TestCase):
         self.assertFalse(self.seed_call.exists())
         self.assertFalse((self.out/'tmpFiles').exists())
 
-    def test_unpatched_352_rejected_before_processing(self):
+    def test_retention_without_seed_capability_rejected_before_processing(self):
         self.capture_wrapper()
         self.env['COARSE_TEST_NO_CAPABILITY'] = '1'
-        result = self.run_lotus(['-CL', 'vsearch', '-coarseDerep', '0.97'], ok=False)
+        options = self.root/'retention.txt'
+        options.write_text('derepStoreQuals\t1\n')
+        result = self.run_lotus(['-CL', 'vsearch', '-coarseDerep', '0.97', '-s', str(options)], ok=False)
         self.assertIn('does not advertise -seedSubclusters', result.stdout)
         self.assertFalse(self.seed_call.exists())
         self.assertFalse((self.out/'tmpFiles').exists())
@@ -100,7 +102,7 @@ class CoarsePreflight(unittest.TestCase):
     def test_incompatible_modes_rejected_even_without_strict(self):
         cases = [
             ('$sdmDerepDo = 0;', 'full run with SDM dereplication'),
-            ('$mergePreCluster = 1;', '-mergePreClusterReads 0'),
+            ('$mergePreCluster = 1; $sdmRetainQuals = 1;', '-mergePreClusterReads 0'),
             ('$saveDemulti = 1;', 'demultiplex-only'),
             ('$TaxOnly = "1";', 'taxonomy-only'),
             ('$onlyTaxRedo = 1;', 'taxonomy-only'),
@@ -153,7 +155,7 @@ class CoarseHandoff(unittest.TestCase):
     capture_wrapper = CoarsePreflight.capture_wrapper
     check_counts = ont.ONTIntegration.check_counts
 
-    def inputs(self, paired, counts=(4, 3)):
+    def inputs(self, paired, counts=(4, 3), retain=True):
         self.map.write_text('#SampleID\tfastqFile\n' + ''.join(
             f'{s}\t{s}.1.fq' + (f',{s}.2.fq' if paired else '') + '\n' for s in ('s1', 's2')))
         for sample, count in zip(('s1', 's2'), counts):
@@ -169,6 +171,9 @@ class CoarseHandoff(unittest.TestCase):
         options.write_text('minSeqLength\t100\nmaxSeqLength\t2000\nminAvgQuality\t0\n'
                            'RejectSeqWithoutFwdPrim\tF\nRejectSeqWithoutRevPrim\tF\n'
                            'TrimWindowThreshhold\t0\nmaxHomonucleotide\t100\n')
+        if retain:
+            with options.open('a') as out:
+                out.write('derepStoreQuals\t1\n')
         return ['-p', 'miSeq', '-CL', 'vsearch', '-s', str(options), '-derepMin', '1', '-sdmThreads', '1']
 
     def check_handoff(self, paired, identity):
@@ -213,12 +218,12 @@ class CoarseHandoff(unittest.TestCase):
         self.capture_wrapper()
         self.env['COARSE_TEST_REMOVE_MATE'] = '1'
         result = self.run_lotus(self.inputs(True)+['-coarseDerep', '0.97'], ok=False)
-        self.assertIn('Missing or empty retained-variant seed FASTQ', result.stdout)
+        self.assertIn('Missing or empty SDM seed FASTQ', result.stdout)
         self.assertFalse(self.seed_call.exists())
         self.assertFalse((self.out/'primary/sdm_dereplication.json').exists())
 
     def test_default_hq_path_still_counts_without_coarse_flags(self):
-        self.run_lotus(self.inputs(False))
+        self.run_lotus(self.inputs(False, retain=False))
         self.check_counts({'s1': 4, 's2': 3})
         commands = (self.out/'LotuSLogS/LotuS_cmds.log').read_text()
         self.assertIn('derep.1.hq.fq', commands)
@@ -288,7 +293,7 @@ class CoarseHandoff(unittest.TestCase):
     def test_coarse_flag_overrides_optional_exports_and_coarse_parent_output(self):
         extra = self.inputs(False)
         with (self.root/'options.txt').open('a') as out:
-            out.write('derepStoreQuals\t0\nderepStoreDiffs\t1\nderepSubclusterFasta\t1\nderepReassign\t1\nderepCoarseClusters\t1\n')
+            out.write('derepStoreQuals\t1\nderepStoreDiffs\t1\nderepSubclusterFasta\t1\nderepReassign\t1\nderepCoarseClusters\t1\n')
         self.run_lotus(extra+['-coarseDerep', '0.97'])
         self.check_counts()
         self.metadata()
@@ -384,7 +389,7 @@ class CoarseHandoff(unittest.TestCase):
         for retained in (False, True):
             with self.subTest(retained=retained):
                 self.out = self.root/f'full_pair_{retained}'
-                extra = self.inputs(True)
+                extra = self.inputs(True, retain=retained)
                 self.map.write_text('#SampleID\tfastqFile\tBarcodeSequence\tBarcode2ndPair\tLinkerPrimerSequence\tReversePrimer\n'
                     + ''.join(f'{sample}\t{sample}.1.fq,{sample}.2.fq\t'
                         + '\t'.join((*barcodes[i], *primers))+'\n' for i,sample in enumerate(('s1', 's2'))))
@@ -462,6 +467,130 @@ assert all(f.read_text().startswith('@') for f in files)
                 self.check_counts({'s1': 4, 's2': 3})
                 self.variant_counts(paired)
                 self.metadata()
+
+
+    def test_storage_only_matches_ordinary_outputs_qualities_and_seed_command(self):
+        # Capture native preprocessing outputs before LotuS can append merged
+        # clustering inputs. Both preprocessing and seed selection use real SDM.
+        wrapper = self.tools/'sdm'
+        wrapper.write_text(r"""#!/usr/bin/env python3
+import json, os, pathlib, subprocess, sys
+args = sys.argv[1:]
+result = subprocess.run([os.environ['COARSE_TEST_REAL_SDM']] + args)
+if result.returncode == 0 and '-o_dereplicate' in args:
+    base = pathlib.Path(args[args.index('-o_dereplicate')+1]).with_suffix('')
+    files = {f.name: f.read_text() for f in base.parent.glob(base.name+'.*') if f.is_file()}
+    pathlib.Path(os.environ['COARSE_TEST_SNAPSHOT']).write_text(json.dumps(files))
+if '-optimalRead2Cluster' in args:
+    pathlib.Path(os.environ['COARSE_TEST_SEED_CALL']).write_text(json.dumps(args))
+sys.exit(result.returncode)
+""")
+        wrapper.chmod(0o755)
+        self.cfg.write_text(self.cfg.read_text().replace(str(ont.SDM), str(wrapper)))
+        clusterer = self.tools/'vsearch'
+        clusterer.write_text(clusterer.read_text().replace(
+            "assert query.name == 'derep.fas'", "assert query.name in ('derep.fas', 'derep.merg.fas')"))
+        snapshot = self.root/'preprocessing.json'
+        seed_call = self.root/'seed_call.json'
+        self.env.update(COARSE_TEST_REAL_SDM=str(ont.SDM), COARSE_TEST_SNAPSHOT=str(snapshot),
+                        COARSE_TEST_SEED_CALL=str(seed_call))
+        # The existing checkpoint precedes FASTA assembly for paired seeds.
+        self.script.write_text(self.script.read_text().replace(
+            'atomic_write_text("$outdir/ont_test_state.json",',
+            'mergeRds() if $numInput == 2;\natomic_write_text("$outdir/ont_test_state.json",', 1))
+        for paired, merge in ((False, 0), (True, 0), (True, 1)):
+            baseline = None
+            for identity, workers in ((None, 1), ('0.97', 1), ('0.97', 4), ('1.0', 1)):
+                with self.subTest(paired=paired, merge=merge, identity=identity, workers=workers):
+                    self.out = self.root/f'ordinary_parity_{paired}_{merge}_{identity}_{workers}'
+                    extra = self.inputs(paired, retain=False)
+                    fragment = self.seq[:420]
+                    self.env['ONT_TEST_CONSENSUS'] = fragment
+                    for sample, count in (('s1', 4), ('s2', 3)):
+                        for mate in range(1, 3 if paired else 2):
+                            rows = []
+                            for i in range(count):
+                                seq = fragment[:260] if paired else fragment
+                                if mate == 2:
+                                    seq = fragment[160:].translate(str.maketrans('ACGT', 'TGCA'))[::-1]
+                                # Different R2s must not expand HQ output into
+                                # every full-pair variant. Unique best qualities
+                                # also verify that selected mate qualities survive.
+                                if i == 0:
+                                    pos = 20 if mate == 2 else 40
+                                    seq = seq[:pos]+next(b for b in 'ACGT' if b != seq[pos])+seq[pos+1:]
+                                quality = chr(33 + 20 + i*3 + (sample == 's2'))
+                                rows.append(f'@{sample}_{i}/{mate}\n{seq}\n+\n'+quality*len(seq)+'\n')
+                            (self.reads/f'{sample}.{mate}.fq').write_text(''.join(rows))
+                    # Two exact keys, one below cutoff; native count recovery
+                    # must still conserve all seven observations.
+                    extra += ['-derepMin', '1' if merge else '3', '-mergePreClusterReads', str(merge), '-sdmThreads', str(workers)]
+                    if identity: extra += ['-coarseDerep', identity]
+                    self.run_lotus(extra)
+                    state = self.check_counts()
+                    files = json.loads(snapshot.read_text())
+                    self.assertEqual(set(files), {'derep.fas', 'derep.fas.rest', 'derep.map', 'derep.1.hq.fq'}
+                                     | ({'derep.2.hq.fq'} if paired else set())
+                                     | ({'derep.merg.fas'} if merge else set()))
+                    self.assertNotIn('.sub1', files['derep.1.hq.fq'])
+                    hq = files['derep.1.hq.fq'].splitlines()
+                    self.assertEqual(len(hq)//4, 2)
+                    self.assertTrue(all(len(seq) == len(qual) > 0 for seq, qual in zip(hq[1::4], hq[3::4])))
+                    metadata = json.loads((self.out/'primary/sdm_dereplication.json').read_text())
+                    self.assertEqual(metadata['quality_retention'], 0)
+                    self.assertEqual(metadata['hq_record_layout'], 'representatives')
+                    args = [arg.replace(str(self.out), '<OUTPUT>') for arg in json.loads(seed_call.read_text())]
+                    self.assertNotIn('-seedSubclusters', args)
+                    outputs = {'primary': files, 'seed_args': args,
+                               'seeds': Path(state['seed']).read_bytes(),
+                               'matrix': (self.out/'OTU.txt').read_bytes(),
+                               'seed_stats': (self.out/'LotuSLogS/SeedExtensionStats.log').read_bytes()}
+                    self.assertTrue(outputs['seeds'])
+                    if baseline is None: baseline = outputs
+                    else: self.assertEqual(outputs, baseline)
+
+
+
+    def test_storage_only_preserves_main_fastq_quality_averaging(self):
+        for paired, merge, min_quality in ((False, 0, 0), (True, 0, 0), (True, 1, 0),
+                                            (False, 0, 27), (True, 0, 27), (True, 1, 27)):
+            self.inputs(paired, retain=False)
+            with (self.root/'options.txt').open('a') as out:
+                out.write(f'minAvgQuality\t{min_quality}\n')
+            fragment = self.seq[:420]
+            for sample, count in (('s1', 4), ('s2', 3)):
+                for mate in range(1, 3 if paired else 2):
+                    seq = fragment if mate == 1 else fragment.translate(str.maketrans('ACGT', 'TGCA'))[::-1]
+                    (self.reads/f'{sample}.{mate}.fq').write_text(''.join(
+                        f'@{sample}_{i}/{mate}\n{seq}\n+\n'
+                        +chr(33+20+i*3+(sample == 's2'))*len(seq)+'\n' for i in range(count)))
+            baseline = None
+            for identity, workers in ((None, 1), ('97', 1), ('97', 4), ('100', 1)):
+                with self.subTest(paired=paired, merge=merge, identity=identity, workers=workers, min_quality=min_quality):
+                    base = self.root/f'fq_parity_{paired}_{merge}_{identity}_{workers}_{min_quality}'
+                    base.mkdir()
+                    args = [str(ont.SDM), '-i_path', str(self.reads), '-map', str(self.map),
+                            '-options', str(self.root/'options.txt'), '-paired', '2' if paired else '1',
+                            '-i_qual_offset', '33', '-o_qual_offset', '33', '-threads', str(workers),
+                            '-o_fastq', str(base/'filtered.fq'), '-o_dereplicate', str(base/'derep.fas'),
+                            '-derep_format', 'fq', '-min_derep_copies', '1', '-suppressOutput', '3',
+                            '-merge_pairs_derep', str(merge)]
+                    if identity: args += ['-derepIdentity', identity]
+                    process = subprocess.run(args, text=True, capture_output=True, timeout=30)
+                    self.assertEqual(process.returncode, 0, process.stderr)
+                    files = {p.name: p.read_text() for p in base.glob('derep.*')}
+                    self.assertTrue(files['derep.1.hq.fq'])
+                    main = files['derep.merg.fas' if merge else 'derep.fas'].splitlines()
+                    self.assertEqual(len(main), 4)
+                    self.assertEqual(len(main[1]), len(main[3]))
+                    # Selection can depend on paired/merged ranking. Preserve
+                    # the ordinary winner's full quality vector, not a presumed
+                    # maximum-quality winner; main FASTQ also collects evidence.
+                    hq = files['derep.1.hq.fq'].splitlines()
+                    self.assertEqual(len(hq[3]), len(fragment))
+                    self.assertTrue(all(20 <= ord(q)-33 <= 29 for q in hq[3]))
+                    if baseline is None: baseline = files
+                    else: self.assertEqual(files, baseline)
 
 
 if __name__ == '__main__':

@@ -2,6 +2,18 @@
 
 This is the integration contract for the SDM build containing the standard HQ output update. Apply these instructions in the LotuS3 repository; this SDM change does not edit LotuS3 itself. The SDM version label alone may not distinguish earlier development builds. Its `-help_flags` output describes retained qualities as `Standard HQ output: .1.hq.fq; paired additionally .2.hq.fq`.
 
+## Storage-only coarse mode (current LotuS policy)
+
+`-coarseDerep` changes internal SDM grouping only. It must preserve ordinary exact
+outputs, selected representative qualities, main FASTQ quality averaging and
+seed extension. It no longer enables `derepStoreQuals=1` or disables preprocessing
+merging. The default uses `derepStoreQuals=0` and the ordinary seed reader.
+Representative HQ qualities are still retained with this setting.
+
+The retained-variant commands below describe a separate, explicitly requested
+`derepStoreQuals=1` mode. They must not be enabled automatically for memory-saving
+coarse storage. See [the current coarse guide](coarse_dereplication.md).
+
 ## Files to use
 
 Given `-o_dereplicate /scratch/run/derep.fas`, use the same paths for ordinary and coarse dereplication:
@@ -21,7 +33,7 @@ By default, coarse groups are internal search and compression references. The ma
 
 With `-derepStoreQuals 0`, HQ files contain one selected representative per parent, as before. With `-derepStoreQuals 1`, they contain all retained exact variants and their selected quality vectors. The paired records represent full available `(R1,R2)` variants after physical preprocessing cuts: identical R1 with different R2 can share a parent while remaining separate seed candidates. No additional parent-only HQ copy or `.subclusters.fq`/`.subclusters.1.fq`/`.subclusters.2.fq` is written. There is no file-level split between cluster reads and subreads: the representative's own 100% variant, other retained variants, and singleton clusters are all written together. Each exact variant has its own count and appears once; never append a second cluster-count record for its representative.
 
-## Preprocessing command changes
+## Explicit retained-variant preprocessing commands
 
 1. Use the updated SDM executable for both preprocessing and seed extension.
 2. Keep `-o_dereplicate`, `-derepPerSR`, copy thresholds, sample delimiter, output quality offset, and normal filtered-output paths. Existing `-suppressOutput` settings do not suppress dereplication files.
@@ -29,7 +41,7 @@ With `-derepStoreQuals 0`, HQ files contain one selected representative per pare
 4. Keep `-derepStoreDiffs 0 -derepSubclusterFasta 0 -derepReassign 0 -derepCoarseClusters 0` unless those optional outputs or reassignment are required. Binary differences are not required for retained-quality output or seed extension. Default partitioned coarse processing adds no final cluster-merging pass.
 5. Replace any coarse-specific FASTQ path selection with the normal `.1.hq.fq` and `.2.hq.fq` paths. Update expected-output checks, file-size checks, cleanup/archive lists, and resume metadata together. Do not wait for `.subclusters` FASTQ files.
 
-The relevant part of the user's paired preprocessing command remains:
+An explicitly requested retained-variant paired command is:
 
 ```sh
 sdm -i_path INPUT_DIRECTORY -map primary/in.map -options sdm_miSeq.txt \

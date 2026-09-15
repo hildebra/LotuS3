@@ -990,7 +990,7 @@ sub configure_sdm_dereplication {
     }
     if (defined $coarseDerep) {
         $sdmDerepSettings{derepIdentity} = sprintf("%.12g", 100 * $coarseDerep);
-        $sdmDerepSettings{derepStoreQuals} = 1;
+        # Coarse grouping is internal storage; preserve the configured HQ layout.
         $sdmDerepSettings{$_} = 0 for qw(derepStoreDiffs derepSubclusterFasta derepReassign derepCoarseClusters);
     }
     for my $key (grep { $_ ne 'derepIdentity' } keys %sdmDerepSettings) {
@@ -1003,9 +1003,9 @@ sub configure_sdm_dereplication {
 }
 
 sub validate_sdm_seed_files {
-    return unless $sdmRetainQuals;
+    return unless $sdmRetainQuals || defined $coarseDerep;
     for my $fastq (@_) {
-        die "Missing or empty retained-variant seed FASTQ: $fastq\n" unless -s $fastq;
+        die "Missing or empty SDM seed FASTQ: $fastq\n" unless -s $fastq;
     }
 }
 
@@ -1314,11 +1314,10 @@ sub sdmStep1{
 		$derepOutMap = "$lotus_tempDir/derep.map";
 		$derepOutHQ2 = "$lotus_tempDir/derep.2.hq.fq";
         if (defined $coarseDerep) {
-            # Coarse grouping compresses the search; clustering/counting keeps
-            # exact R1 parents. All retained variants use the standard HQ files.
-            $derepCmd .= " -derepIdentity $sdmDerepSettings{derepIdentity} -derepStoreQuals 1"
+            # Change internal grouping only. Ordinary representative HQ output,
+            # search/merge policy and seed extraction remain the default.
+            $derepCmd .= " -derepIdentity $sdmDerepSettings{derepIdentity} -derepStoreQuals $sdmRetainQuals"
                 . " -derepStoreDiffs 0 -derepSubclusterFasta 0 -derepReassign 0 -derepCoarseClusters 0";
-            $derepCmd .= " -derep_format fa" unless $ClusterPipe == 7;
         }
 		if ( $saveDemulti == 3 ) {   #temp deactivated, since I have  $sdmDemultiDir
 			$derepCmd .= " -suppressOutput 0";
@@ -1379,7 +1378,11 @@ sub sdmStep1{
             if $sdmDerepDo && $sdmRetainQuals && $paired == 2;
 		systemL("cp $sdmOpt $outdir/primary")
             unless abs_path(dirname($sdmOpt)) eq abs_path("$outdir/primary");
-		if ( systemL($sdmcmd) != 0 ) {
+		my $sdm_log_offset = -s $progOutPut || 0;
+		# Keep stderr available for memory reporting at verbose levels too.
+		my $sdm_run_cmd = $sdmcmd;
+		$sdm_run_cmd .= " >> " . shell_quote($progOutPut) . " 2>&1" if $verbosity >= 2;
+		if ( systemL($sdm_run_cmd) != 0 ) {
 			printL "FAILED sdm demultiplexing step: " . $sdmcmd . "\n";
 			exit(4);
 		}
@@ -1416,8 +1419,22 @@ sub sdmStep1{
 			$citations .= "Poisson binomial model based read filtering: Fernando Puente-Sánchez, Jacobo Aguirre, Víctor Parro (2015).A novel conceptual approach to read-filtering in high-throughput amplicon sequencing studies. Nucleic Acids Res.(2015).\n";
 		}
 		
+		# SDM writes process memory to stderr, captured in the program log.
+		# Read only this invocation so earlier SDM calls cannot supply a stale value.
+		my $sdm_peak_mem = "";
+		if (open my $sdm_prog_fh, "<", $progOutPut) {
+			if (seek($sdm_prog_fh, $sdm_log_offset, 0)) {
+				while (my $line = <$sdm_prog_fh>) {
+					print $line if $verbosity >= 2;
+					if ($line =~ /^Peak process memory:\s*(\d+) bytes/) {
+						$sdm_peak_mem = sprintf(" (%.2f MiB peak mem)", $1 / (1024 * 1024));
+					}
+				}
+			}
+			close $sdm_prog_fh;
+		}
 		my $shrtRpt = parse_sdm_short_report($readSdmLog, $readSdmDereLog);
-		printL( frame("Finished primary read processing with sdm:\n".$shrtRpt."\nFor an extensive report see $mainSDMlog\n",1,3),0 );
+		printL( frame("Finished primary read processing with sdm$sdm_peak_mem:\n".$shrtRpt."\nFor an extensive report see $mainSDMlog\n",1,3),0 );
 
         if ($ClusterPipe == 9 && defined($savontMaxAmbiguousPercent) && $saveDemulti != 1) {
             my ($kept, $rejected) = filter_fastq_ambiguity_percent($filterOut, $savontMaxAmbiguousPercent);
@@ -4003,7 +4020,7 @@ my @clustering_options = (
   ['-chim_skew <num>', 'Abundance skew parameter for UCHIME. Default: 2.'],
   ['-count_chimeras <T|F>', 'Include chimeras in OTU/ASV counts. Default: F.'],
   ['-deactivateChimeraCheck <0|1|2|3>', '(0) run all chimera checks; (1) deactivate all chimera checks; (2) deactivate de novo chimera checks; (3) deactivate reference-based chimera checks. Default: 0.'],
-  ['-coarseDerep <ANI>', 'Enable SDM coarse dereplication at ANI 0.95 through 1.0 (inclusive; disabled by default). Retain exact variants and their qualities for seed extension. Requires SDM with standard retained-quality HQ output and subcluster seed support; incompatible with pre-clustering read merging.'],
+  ['-coarseDerep <ANI>', 'Use internal SDM coarse grouping at ANI 0.95 through 1.0 (inclusive; disabled by default). Preserve ordinary exact dereplicates, representative HQ reads and seed extension. Requires SDM with exact output support.'],
   ['-derepMin <rule>', 'Minimum abundance rule for dereplicated clusters before clustering/noise removal (ignored by Savont). Rules can be compound, e.g. 8:1,4:2,3:3.'],
   ['-readOverlap <num>', 'Maximum expected overlap between paired reads. Default: 300.'],
   ['-endRem <string>', 'Sequence, usually reverse primer/adaptor, after which OTU sequence output is trimmed. This duplicates the ReversePrimer mapping-file option but gives manual control. Default: none.'],
@@ -4403,7 +4420,7 @@ sub calcHighTax($ $ $ $ $) {
 		$cnt++;
 		next if ( $cnt == 1 );    #domain doesn't need a file..
 		if ( $cnt == 2 ) {
-			printL "Total reads in matrix: $totCnt{$l}\nTaxLvl	%Assigned_Reads	%Assigned_${OTU_prefix}s\n", 0;
+			printL "Total reads in matrix: $totCnt{$l}; Total ${OTU_prefix}s: " . scalar(@matOTUs2) . "\nTaxLvl	%Assigned_Reads	%Assigned_${OTU_prefix}s\n", 0;
 		}
 		my $assPerc = 0;
 		$assPerc = $assCnt{$l} / $totCnt{$l} if ( $totCnt{$l} > 0 );
@@ -5399,7 +5416,7 @@ sub checkLtsVer($) {
         my $flags = checked_program_output($sdmBin, '-help_flags');
         die "SDM $sdmVer at $sdmBin exports coarse subclusters but does not advertise -seedSubclusters.\n"
             . "Update SDM to a build with the standard retained-quality HQ interface.\n"
-            unless $flags =~ /(?:^|\s)-seedSubclusters(?:\s|$)/;
+            if $sdmRetainQuals && $flags !~ /(?:^|\s)-seedSubclusters(?:\s|$)/;
         die "SDM $sdmVer at $sdmBin does not advertise the standard retained-quality HQ layout.\n"
             . "Update SDM and regenerate preprocessing and downstream assignments; older coarse outputs are incompatible.\n"
             unless $flags =~ /Standard HQ output:\s*\.1\.hq\.fq;\s*paired additionally\s*\.2\.hq\.fq/
@@ -7054,7 +7071,7 @@ sub validate_option_combinations {
             if !$sdmDerepDo || $TaxOnly ne '0' || $onlyTaxRedo || $saveDemulti == 1;
     }
     die "Retained-quality dereplication requires -mergePreClusterReads 0; variants must remain unmerged until seed extension.\n"
-        if (defined($coarseDerep) || $sdmRetainQuals) && $mergePreCluster;
+        if $sdmRetainQuals && $mergePreCluster;
     my @problems;
     if ($TaxOnly eq "0") {
         push @problems, "Missing input (-i)" unless defined($input) && $input ne "";
