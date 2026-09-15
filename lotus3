@@ -271,6 +271,8 @@ my $sdmThreads              = -1;
 my $dereplicate_minsize_def = "8:1,4:2,3:3"; # Discard clusters < dereplicate_minsize in error correction round #Default: 2 for UPARSE, 4 for otupipe
 my $dereplicate_minsize = -1;
 my $coarseDerep; # Optional SDM coarse-dereplication ANI, expressed as a fraction.
+my $sdmRetainQuals = 0; # Effective preprocessing setting, including the options file.
+my %sdmDerepSettings;
 my $ASVpostClust = 0;
 my $doXtalk             = -1;    #check for cross talk in OTU tables
 my $usearchVer          = 0; my $usearchsubV = 0; my $vsearchVer = 0;
@@ -630,7 +632,7 @@ $upVer = "-uparseVer N11 "if ($ClusterPipe == 6);
 $upVer = "-uparseVer cdhit " if ($ClusterPipe == 3);
 $upVer = "-uparseVer vsearch " if ($ClusterPipe == 8);
 #note that -mergedPairs $didMerge refers to old implementation with read merge done before sdm (not supported any longer, legacy option)
-my $mergeOptions = "-merge_pairs_seed 1 ";
+my $mergeOptions = $numInput == 2 ? "-merge_pairs_seed 1 " : "";
 my $sdmcmd="";
 
 my $mainMapping = "-optimalRead2Cluster $ucFinalFile[0] ";
@@ -652,13 +654,11 @@ if ( $exec == 0 && $onlyTaxRedo == 0 && $TaxOnly eq "0" ) {
         # rereading/storing every input read or replacing inferred consensus.
         $sdmcmd = "$sdmBin -i_fna $tmpOTU $sdmOut2 $mainMapping -paired 1 -sample_sep $sep_smplID -map $count_map_file -log $logDir/SeedExtensionStats.log -OTU_fallback $tmpOTU -otu_matrix $OTUmFile $mapRestr -count_chimeras $chimCnt";
     } elsif ($sdmDerepDo) {
-        if (defined $coarseDerep) {
-            for my $fastq ($derepOutHQ, ($numInput == 2 ? ($derepOutHQ2) : ())) {
-                die "Missing or empty coarse-dereplication seed FASTQ: $fastq\n" unless -s $fastq;
-            }
+        if ($sdmRetainQuals) {
+            validate_sdm_seed_files($derepOutHQ, ($numInput == 2 ? ($derepOutHQ2) : ()));
             # This mode resolves .subN IDs to parent assignments and counts the
             # parent's sample vector once while considering all exact variants.
-            $mergeOptions .= "-seedSubclusters 1 ";
+            $mergeOptions .= "-seedSubclusters 1 -i_qual_offset 33 ";
         }
 		$sdmIn = "-i_fastq $derepOutHQ";
 		#$finalClustMap $finalAddMap $finalRestMap
@@ -674,12 +674,12 @@ if ( $exec == 0 && $onlyTaxRedo == 0 && $TaxOnly eq "0" ) {
 	}
 
 	my $status = 0;
-	my $mrgSentence = ""; $mrgSentence = "and merging pairs of " if ($mergeOptions ne "");
+	my $mrgSentence = ""; $mrgSentence = "and merging pairs of " if ($numInput == 2);
     printL (frame($ClusterPipe == 9 ? "Counting filtered reads per Savont ASV" : "Extending ${mrgSentence}${OTU_prefix} Seeds"), 0);
     $status = systemL($sdmcmd, "Seed extension", 0); #actual sdm derep step; recoverable fallback on failure
 	if ($status) {
-        die "SDM coarse-subcluster seed extension failed; see $logDir/SeedExtensionStats.log and $progOutPut.\n"
-            if defined $coarseDerep;
+        die "SDM retained-variant seed extension failed; see $logDir/SeedExtensionStats.log and $progOutPut.\n"
+            if $sdmRetainQuals;
 		printL "SDM failed to build the Savont abundance matrix; see SeedExtensionStats.log and LotuS_progout.log.\n", 31 if $ClusterPipe == 9;
 		printL "Failed $sdmcmd\n",                    0;
 		printL "Fallback to ${OTU_prefix} median sequences.\n", 0;
@@ -962,18 +962,73 @@ sub ontBarcodeMap {
     return \%barcodes;
 }
 
-# SDM accepts integer ambiguity counts. LotuS interprets percentages only in
-# the Savont path, after SDM has established each read's trimmed length.
-sub read_sdm_ambiguity_options {
+# Preserve option order so duplicate settings have SDM's last-value precedence.
+sub read_sdm_options {
     my ($file) = @_;
     open my $in, '<', $file or die "Cannot read SDM options $file: $!\n";
     my $text = do { local $/; <$in> };
     close $in or die "Cannot close SDM options $file: $!\n";
-    my %percentages;
+    my @entries;
     for my $line (split /\n/, $text) {
+        $line =~ s/\r$//;
         my ($key, $value) = split /\t/, $line;
-        next unless defined($key) && $key =~ /^\*?maxAmbiguousNT$/;
-        $value //= ''; $value =~ s/\r$//;
+        next unless defined($key) && $key ne '' && $key !~ /^#/;
+        push @entries, [$key, $value // ''];
+    }
+    return ($text, \@entries);
+}
+
+sub configure_sdm_dereplication {
+    %sdmDerepSettings = (derepIdentity => 100, map { $_ => 0 }
+        qw(derepStoreQuals derepStoreDiffs derepSubclusterFasta derepReassign derepCoarseClusters derepPerSR));
+    if ($TaxOnly eq '0' && !$onlyTaxRedo && $saveDemulti != 1) {
+        my (undef, $entries) = read_sdm_options($sdmOpt);
+        for my $entry (@$entries) {
+            $sdmDerepSettings{$entry->[0]} = $entry->[1] if exists $sdmDerepSettings{$entry->[0]};
+        }
+    }
+    if (defined $coarseDerep) {
+        $sdmDerepSettings{derepIdentity} = sprintf("%.12g", 100 * $coarseDerep);
+        $sdmDerepSettings{derepStoreQuals} = 1;
+        $sdmDerepSettings{$_} = 0 for qw(derepStoreDiffs derepSubclusterFasta derepReassign derepCoarseClusters);
+    }
+    for my $key (grep { $_ ne 'derepIdentity' } keys %sdmDerepSettings) {
+        die "$key in '$sdmOpt' must be 0 or 1.\n" unless $sdmDerepSettings{$key} =~ /\A[01]\z/;
+    }
+    my $identity = $sdmDerepSettings{derepIdentity};
+    die "derepIdentity in '$sdmOpt' must be a percentage greater than 0 and at most 100.\n"
+        unless $identity =~ /\A(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?\z/ && $identity > 0 && $identity <= 100;
+    $sdmRetainQuals = 0 + $sdmDerepSettings{derepStoreQuals};
+}
+
+sub validate_sdm_seed_files {
+    return unless $sdmRetainQuals;
+    for my $fastq (@_) {
+        die "Missing or empty retained-variant seed FASTQ: $fastq\n" unless -s $fastq;
+    }
+}
+
+sub sdm_dereplication_metadata {
+    return {
+        contract => 'standard_hq_v1',
+        quality_retention => $sdmRetainQuals,
+        hq_record_layout => $sdmRetainQuals ? 'exact variants' : 'representatives',
+        output_granularity => ($sdmDerepSettings{derepCoarseClusters} || $sdmDerepSettings{derepReassign})
+            ? 'coarse clusters' : 'exact R1',
+        identity_percent => 0 + $sdmDerepSettings{derepIdentity},
+        derep_per_sequencing_run => $ClusterPipe == 7 ? 1 : 0 + $sdmDerepSettings{derepPerSR},
+    };
+}
+
+# SDM accepts integer ambiguity counts. LotuS interprets percentages only in
+# the Savont path, after SDM has established each read's trimmed length.
+sub read_sdm_ambiguity_options {
+    my ($file) = @_;
+    my ($text, $entries) = read_sdm_options($file);
+    my %percentages;
+    for my $entry (@$entries) {
+        my ($key, $value) = @$entry;
+        next unless $key =~ /^\*?maxAmbiguousNT$/;
         if ($value =~ /^(\d+(?:\.\d+)?)%$/ && $1 <= 100) {
             die "Percentage maxAmbiguousNT requires Savont.\n" unless $ClusterPipe == 9;
             $percentages{$key} = 0 + $1;
@@ -1236,14 +1291,14 @@ sub sdmStep1{
 		$derepOutMap = "$lotus_tempDir/derep.map";
 		$derepOutHQ2 = "$lotus_tempDir/derep.2.hq.fq";
         if (defined $coarseDerep) {
-            my $identity_pct = sprintf("%.12g", 100 * $coarseDerep);
-            # Store exact variants and selected qualities in diffDNA; SDM exports
-            # every subcluster, including parents below the abundance cutoff.
-            $derepCmd .= " -derepIdentity $identity_pct -derepStoreQuals 1 -derepPerSR 0";
+            # Coarse grouping compresses the search; clustering/counting keeps
+            # exact R1 parents. All retained variants use the standard HQ files.
+            $derepCmd .= " -derepIdentity $sdmDerepSettings{derepIdentity} -derepStoreQuals 1"
+                . " -derepStoreDiffs 0 -derepSubclusterFasta 0 -derepReassign 0 -derepCoarseClusters 0";
+            $derepCmd .= " -derep_format fa" unless $ClusterPipe == 7;
+        }
+        if ($sdmRetainQuals) {
             $sdmMergeOpt = "-merge_pairs_derep 0 -merge_pairs_filter 0 -merge_pairs_demulti 0";
-            $derepOutHQ = $paired == 2 ? "$lotus_tempDir/derep.subclusters.1.fq"
-                : "$lotus_tempDir/derep.subclusters.fq";
-            $derepOutHQ2 = $paired == 2 ? "$lotus_tempDir/derep.subclusters.2.fq" : "";
         }
 		if ( $saveDemulti == 3 ) {   #temp deactivated, since I have  $sdmDemultiDir
 			$derepCmd .= " -suppressOutput 0";
@@ -1306,6 +1361,14 @@ sub sdmStep1{
 			printL "FAILED sdm demultiplexing step: " . $sdmcmd . "\n";
 			exit(4);
 		}
+        if ($sdmDerepDo) {
+            my $metadata = sdm_dereplication_metadata();
+            $metadata->{status} = 'complete';
+            $metadata->{sdm_binary} = file_signature($sdmBin);
+            $metadata->{hq_files} = [$derepOutHQ, ($paired == 2 ? ($derepOutHQ2) : ())];
+            validate_sdm_seed_files(@{$metadata->{hq_files}});
+            atomic_write_text("$outdir/primary/sdm_dereplication.json", JSON::PP->new->canonical->pretty->encode($metadata));
+        }
 		my $fileNum = `ls -1 $mainSDMlog* | wc -l`;
 		my @sdmOfiles = glob("${mainSDMlog}0*");
 
@@ -3709,6 +3772,7 @@ sub prepLtsOptions{
 	}
 	#----- part 2 ----------
 	
+    configure_sdm_dereplication();
 	checkProgVersions();
 	
 
@@ -3908,7 +3972,7 @@ my @clustering_options = (
   ['-chim_skew <num>', 'Abundance skew parameter for UCHIME. Default: 2.'],
   ['-count_chimeras <T|F>', 'Include chimeras in OTU/ASV counts. Default: F.'],
   ['-deactivateChimeraCheck <0|1|2|3>', '(0) run all chimera checks; (1) deactivate all chimera checks; (2) deactivate de novo chimera checks; (3) deactivate reference-based chimera checks. Default: 0.'],
-  ['-coarseDerep <ANI>', 'Enable SDM coarse dereplication at ANI 0.95 through 1.0 (inclusive; disabled by default). Retain exact variants and their qualities for seed extension. Requires SDM 3.52 with subcluster seed support; incompatible with pre-clustering read merging.'],
+  ['-coarseDerep <ANI>', 'Enable SDM coarse dereplication at ANI 0.95 through 1.0 (inclusive; disabled by default). Retain exact variants and their qualities for seed extension. Requires SDM with standard retained-quality HQ output and subcluster seed support; incompatible with pre-clustering read merging.'],
   ['-derepMin <rule>', 'Minimum abundance rule for dereplicated clusters before clustering/noise removal (ignored by Savont). Rules can be compound, e.g. 8:1,4:2,3:3.'],
   ['-readOverlap <num>', 'Maximum expected overlap between paired reads. Default: 300.'],
   ['-endRem <string>', 'Sequence, usually reverse primer/adaptor, after which OTU sequence output is trimmed. This duplicates the ReversePrimer mapping-file option but gives manual control. Default: none.'],
@@ -5296,13 +5360,19 @@ sub checkLtsVer($) {
             . "Found SDM $sdmVer at $sdmBin. Update the sdm executable configured in '$lotusCfg'.\n";
     }
 
-    if (defined($coarseDerep) && $TaxOnly eq '0' && !$onlyTaxRedo) {
-        die "-coarseDerep requires SDM >= 3.52 with -seedSubclusters support; found $sdmVer at $sdmBin.\n"
+    if (($sdmRetainQuals || defined($coarseDerep) || $sdmDerepSettings{derepIdentity} < 100
+            || $sdmDerepSettings{derepReassign} || $sdmDerepSettings{derepCoarseClusters})
+            && $TaxOnly eq '0' && !$onlyTaxRedo) {
+        die "Coarse dereplication/quality retention requires SDM >= 3.52 with standard HQ support; found $sdmVer at $sdmBin.\n"
             unless version_at_least($sdmVer, '3.52');
         my $flags = checked_program_output($sdmBin, '-help_flags');
         die "SDM $sdmVer at $sdmBin exports coarse subclusters but does not advertise -seedSubclusters.\n"
-            . "Install the SDM seed-subcluster fix described in docs/sdm_coarse_seed_worker_brief.md before using -coarseDerep.\n"
+            . "Update SDM to a build with the standard retained-quality HQ interface.\n"
             unless $flags =~ /(?:^|\s)-seedSubclusters(?:\s|$)/;
+        die "SDM $sdmVer at $sdmBin does not advertise the standard retained-quality HQ layout.\n"
+            . "Update SDM and regenerate preprocessing and downstream assignments; older coarse outputs are incompatible.\n"
+            unless $flags =~ /Standard HQ output:\s*\.1\.hq\.fq;\s*paired additionally\s*\.2\.hq\.fq/
+                && $flags =~ /(?:^|\s)-derepCoarseClusters(?:\s|$)/;
     }
 
     # compare to server version
@@ -6945,11 +7015,9 @@ sub validate_option_combinations {
     if (defined $coarseDerep) {
         die "-coarseDerep requires a full run with SDM dereplication; it cannot be used with Savont, taxonomy-only, or demultiplex-only runs.\n"
             if !$sdmDerepDo || $TaxOnly ne '0' || $onlyTaxRedo || $saveDemulti == 1;
-        die "-coarseDerep is not yet supported with DADA2's per-sequencing-run dereplication.\n"
-            if $ClusterPipe == 7;
-        die "-coarseDerep requires -mergePreClusterReads 0; retained-quality variants must remain unmerged until seed extension.\n"
-            if $mergePreCluster;
     }
+    die "Retained-quality dereplication requires -mergePreClusterReads 0; variants must remain unmerged until seed extension.\n"
+        if (defined($coarseDerep) || $sdmRetainQuals) && $mergePreCluster;
     my @problems;
     if ($TaxOnly eq "0") {
         push @problems, "Missing input (-i)" unless defined($input) && $input ne "";
@@ -7613,6 +7681,13 @@ sub write_repro_manifest {
     push @lines, "Platform: $platform";
     push @lines, "SDM dereplication: " . ($sdmDerepDo ? "enabled" : "disabled");
     push @lines, "Coarse dereplication ANI: $coarseDerep" if defined $coarseDerep;
+    if ($sdmDerepDo && $TaxOnly eq '0' && !$onlyTaxRedo) {
+        my $metadata = sdm_dereplication_metadata();
+        push @lines, "SDM dereplication output: $metadata->{output_granularity}";
+        push @lines, "SDM quality retention: $metadata->{quality_retention}";
+        push @lines, "SDM HQ record layout: $metadata->{hq_record_layout}";
+        push @lines, "SDM dereplication IO contract: $metadata->{contract}";
+    }
     push @lines, "Savont input: SDM primary filtered FASTQ (individual reads)" if $ClusterPipe == 9;
     push @lines, "Savont single-strand mode: $savontSingleStrand" if $ClusterPipe == 9;
     push @lines, "Savont maximum ambiguous bases: $savontMaxAmbiguousPercent% of trimmed length" if defined $savontMaxAmbiguousPercent;

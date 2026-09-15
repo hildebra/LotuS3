@@ -142,7 +142,7 @@ The README is intentionally short. Detailed documentation is split across the [`
 - [`docs/installation.md`](docs/installation.md) - installation routes, dependencies, autoinstaller use and manual `sdm` compilation;
 - [`docs/mapping_files.md`](docs/mapping_files.md) - mapping file purpose, minimal structure and common checks;
 - [`docs/outputs.md`](docs/outputs.md) - expected output categories and where to find run-level information;
-- [`docs/coarse_dereplication.md`](docs/coarse_dereplication.md) - optional coarse dereplication and its pending SDM seed-reader dependency;
+- [`docs/coarse_dereplication.md`](docs/coarse_dereplication.md) - coarse dereplication, retained-quality seed candidates and SDM compatibility;
 - [`docs/custom_reference_databases.md`](docs/custom_reference_databases.md) - custom FASTA/taxonomy databases and multi-database annotation;
 - [`docs/pacbio.md`](docs/pacbio.md) - PacBio CCS/HiFi amplicon processing;
 - [`docs/ont.md`](docs/ont.md) - ONT amplicons with Savont ASVs and optional Barbell demultiplexing;
