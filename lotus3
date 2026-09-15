@@ -32,6 +32,7 @@ use Fcntl qw(:flock);
 use POSIX qw(strftime);
 use IO::Uncompress::Gunzip qw($GunzipError);
 use JSON::PP ();
+use Digest::SHA ();
 
 
 #use threads;
@@ -1008,13 +1009,40 @@ sub validate_sdm_seed_files {
     }
 }
 
+sub sdm_preprocessing_merge_options {
+    return {map { $_ => 0 } qw(merge_pairs_derep merge_pairs_filter merge_pairs_demulti)}
+        if $sdmRetainQuals;
+    return {} unless $mergePreCluster;
+    return {merge_pairs_derep => 1, ($ClusterPipe == 7 ? (merge_pairs_demulti => 1) : ())};
+}
+
 sub sdm_dereplication_metadata {
+    my (undef, $entries) = read_sdm_options($sdmOpt);
+    my %options = map { @$_ } @$entries;
+    my $merge = sdm_preprocessing_merge_options();
     return {
-        contract => 'standard_hq_v1',
+        contract => 'standard_hq_v2',
         quality_retention => $sdmRetainQuals,
         hq_record_layout => $sdmRetainQuals ? 'exact variants' : 'representatives',
+        hq_sequence_policy => 'full available mates after physical cuts; logical tails retained',
         output_granularity => ($sdmDerepSettings{derepCoarseClusters} || $sdmDerepSettings{derepReassign})
-            ? 'coarse clusters' : 'exact R1',
+            ? 'coarse clusters' : 'exact search keys with configured prefix consolidation',
+        search_source => ($sdmRetainQuals || $numInput == 1) ? 'R1' : 'merged when available, otherwise R1',
+        preprocessing_merge_flags => {map { $_ => $merge->{$_} // 0 }
+            qw(merge_pairs_derep merge_pairs_filter merge_pairs_demulti)},
+        # This flag is presence-based in SDM. LotuS does not pass it; retained
+        # qualities independently force R1 search. It is not an options-file key.
+        noSearchWithMerge => {present => JSON::PP::false, value => undef},
+        search_options => {map { $_ => $options{$_} }
+            qw(derepSrchLen derepPrefix TruncateSequenceLength minSeqLength maxSeqLength)},
+        # Preserve all configured filtering/cut settings and their last-value
+        # precedence; absent values use the recorded executable's defaults.
+        sdm_options => \%options,
+        sdm_options_sha256 => file_signature($sdmOpt, 'sha256'),
+        sdm_binary_sha256 => file_signature($sdmBin, 'sha256'),
+        minimum_copies => $dereplicate_minsize,
+        sample_separator => $sep_smplID,
+        output_quality_offset => 33,
         identity_percent => 0 + $sdmDerepSettings{derepIdentity},
         derep_per_sequencing_run => $ClusterPipe == 7 ? 1 : 0 + $sdmDerepSettings{derepPerSR},
     };
@@ -1238,13 +1266,8 @@ sub sdmStep1{
 	my $derepOutMap = "";
 
 	#sdm merge options: -merge_pairs_filter -merge_pairs_demulti -merge_pairs_derep
-	my $sdmMergeOpt = "";
-	if ($mergePreCluster){
-		$sdmMergeOpt = "-merge_pairs_derep 1 ";
-		if ($ClusterPipe == 7){#dada2 requires more output..
-		$sdmMergeOpt .= "-merge_pairs_demulti 1 ";
-		}
-	}
+    my $merge_flags = sdm_preprocessing_merge_options();
+    my $sdmMergeOpt = join(' ', map { "-$_ $merge_flags->{$_}" } sort keys %$merge_flags);
 
 	my $sdmDemultiDir = "";
 	my $sdmOptStr     = "-options $sdmOpt ";
@@ -1296,9 +1319,6 @@ sub sdmStep1{
             $derepCmd .= " -derepIdentity $sdmDerepSettings{derepIdentity} -derepStoreQuals 1"
                 . " -derepStoreDiffs 0 -derepSubclusterFasta 0 -derepReassign 0 -derepCoarseClusters 0";
             $derepCmd .= " -derep_format fa" unless $ClusterPipe == 7;
-        }
-        if ($sdmRetainQuals) {
-            $sdmMergeOpt = "-merge_pairs_derep 0 -merge_pairs_filter 0 -merge_pairs_demulti 0";
         }
 		if ( $saveDemulti == 3 ) {   #temp deactivated, since I have  $sdmDemultiDir
 			$derepCmd .= " -suppressOutput 0";
@@ -1355,6 +1375,8 @@ sub sdmStep1{
 		#$duration = time - $start;
         my $processing = $sdmDerepDo ? "Demultiplexing, filtering, dereplicating" : "Demultiplexing and filtering";
         printL(frame("$processing input files, this might take some time..\ncheck progress at $progOutPut\n",1,2),0);
+        printL("Retained-quality dereplication uses R1 search with preprocessing merging disabled; paired seeds are merged after clustering.\n", 0)
+            if $sdmDerepDo && $sdmRetainQuals && $paired == 2;
 		systemL("cp $sdmOpt $outdir/primary")
             unless abs_path(dirname($sdmOpt)) eq abs_path("$outdir/primary");
 		if ( systemL($sdmcmd) != 0 ) {
@@ -1546,7 +1568,7 @@ sub parse_sdm_short_report {
 			$metrics{singletons} = \@values;
 		} elsif ($label eq "low-quality reads recovered (dereplication)") {
 			$metrics{low_quality_recovered} = \@values;
-		} elsif ($label eq "minimum pairs with both reads accepted") {
+		} elsif ($label =~ /^(?:minimum|maximum) pairs with both reads accepted$/) {
 			$metrics{accepted_pairs} = \@values;
 		}
 	}
@@ -1566,7 +1588,8 @@ sub parse_sdm_short_report {
 	}
 	push @report, _sdm_metric_line("Rejected", $metrics{rejected}) if $metrics{rejected};
 	if ($metrics{accepted_pairs} && @{$metrics{accepted_pairs}}) {
-		push @report, "Pairs accepted on both ends: $metrics{accepted_pairs}->[0]";
+        # Both SDM labels describe min(accepted R1, accepted R2), an upper bound.
+		push @report, "Pairs accepted on both ends (upper bound): $metrics{accepted_pairs}->[0]";
 	}
 	push @report, $merged_line if $merged_line ne "";
 	if ($metrics{singletons} && grep { _sdm_value_count($_) > 0 } @{$metrics{singletons}}) {
@@ -1577,21 +1600,29 @@ sub parse_sdm_short_report {
 	}
 
 	my @derep_rows;
+    my @abundance_report;
 	for my $line (split /\r?\n/, $derep_text) {
 		$line =~ s/^\s+|\s+$//g;
 		$line =~ s/\s+/ /g;
 		if ($line =~ /Dereplication:\s*([\d,]+)\s+unique sequences\s*\(avg(?:erage)? size\s+([\d.]+);\s*([\d,]+)\s+counts(?:,\s*([\d,]+)\s+merged)?\s*\)/i) {
 			push @derep_rows, [map { defined($_) ? _sdm_pretty_value($_) : "" } ($1, $2, $3, $4)];
 		}
+        if ($line =~ /^Dereplication abundance:\s*([\d,]+) total in map;\s*([\d,]+) passing;\s*([\d,]+) in rest$/i) {
+            my ($total, $passing, $rest) = map { _sdm_pretty_value($_) } ($1, $2, $3);
+            push @abundance_report, "Dereplication abundance: $total total in map; $passing passing (main + merged); $rest in rest";
+        } elsif ($line =~ /^Retention exclusions:\s*([\d,]+) pairs with (?:physically )?empty R2 skipped before admission$/i) {
+            push @abundance_report, "Retention exclusions: " . _sdm_pretty_value($1) . " pairs with physically empty R2";
+        }
 	}
 	for (my $i = 0; $i < @derep_rows; $i++) {
 		my ($unique, $average, $counts, $merged) = @{$derep_rows[$i]};
 		my $label = @derep_rows > 1 ? "Dereplication block " . ($i + 1) : "Dereplication";
-		push @report, "$label: $unique unique sequences from $counts reads";
+		push @report, "$label: $unique passing unique sequences from $counts reads";
 		my $detail = "  Mean abundance: $average";
 		$detail .= "; merged: $merged" if defined($merged) && $merged ne "";
 		push @report, $detail;
 	}
+    push @report, @abundance_report;
 	push @report, @warnings;
 	push @report, "SDM completed; no recognized summary fields were found" unless @report;
 	return join("\n", grep { defined($_) && $_ ne "" } @report);
@@ -6706,9 +6737,9 @@ sub selftest_sdm_summary_parser {
         "High-quality: R1 2,119,036 (90.2%); R2 2,144,455 (91.3%)",
         "Mid-quality: R1 0 (0.0%); R2 22 (0.0%)",
         "Rejected: R1 229,144 (9.8%); R2 203,703 (8.7%)",
-        "Pairs accepted on both ends: 2,119,036 (90.2%)",
+        "Pairs accepted on both ends (upper bound): 2,119,036 (90.2%)",
         "Merged reads: 2,323,327 / 2,348,180 (98.9%)",
-        "Dereplication: 44,209 unique sequences from 1,750,831 reads",
+        "Dereplication: 44,209 passing unique sequences from 1,750,831 reads",
         "  Mean abundance: 39; merged: 44,008",
     );
     my $actual_new = parse_sdm_short_report($new_log, $derep_log);
@@ -6948,8 +6979,14 @@ sub release_output_lock {
 }
 
 sub file_signature {
-    my ($path) = @_;
+    my ($path, $algorithm) = @_;
     return "missing" unless defined $path && $path ne "" && -e $path;
+    if (defined $algorithm && $algorithm eq 'sha256') {
+        open my $in, '<:raw', $path or die "Cannot hash $path: $!\n";
+        my $hash = Digest::SHA->new(256)->addfile($in)->hexdigest;
+        close $in or die "Cannot close $path after hashing: $!\n";
+        return $hash;
+    }
     my @st = stat($path);
     return "size=$st[7];mtime=$st[9]";
 }
@@ -7687,6 +7724,13 @@ sub write_repro_manifest {
         push @lines, "SDM quality retention: $metadata->{quality_retention}";
         push @lines, "SDM HQ record layout: $metadata->{hq_record_layout}";
         push @lines, "SDM dereplication IO contract: $metadata->{contract}";
+        push @lines, "SDM dereplication search: $metadata->{search_source}";
+        push @lines, "SDM HQ sequence policy: $metadata->{hq_sequence_policy}";
+        push @lines, "SDM preprocessing merge flags: " . JSON::PP->new->canonical->encode($metadata->{preprocessing_merge_flags});
+        push @lines, "SDM noSearchWithMerge: absent";
+        push @lines, "SDM search options (null = executable default): " . JSON::PP->new->canonical->encode($metadata->{search_options});
+        push @lines, "SDM executable SHA-256: $metadata->{sdm_binary_sha256}";
+        push @lines, "SDM options SHA-256: $metadata->{sdm_options_sha256}";
     }
     push @lines, "Savont input: SDM primary filtered FASTQ (individual reads)" if $ClusterPipe == 9;
     push @lines, "Savont single-strand mode: $savontSingleStrand" if $ClusterPipe == 9;
