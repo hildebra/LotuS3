@@ -156,6 +156,7 @@ my $mainLogFile = "";
 my $osname      = $^O;
 my $verbosity = 1;
 my $versionOut=0;
+my $lastOutRule = ""; #frame() rule that ended the last printL output; the next frame reuses it
 
 #LotuS file related
 my $lotusCfg  = "$RealBin/lOTUs.cfg";
@@ -610,10 +611,10 @@ my $OTUmFile = "$outdir/OTU.txt";
 my $OTUmRefFile =   "$outdir/OTU_psRef.txt";    #diff to OTU.txt: collapse entries with same taxonomic reference
 $OTUmRefFile = "" unless ($pseudoRefOTU);
 my $seedExtDone = 1;
+my $seedExtRep = ""; #SDM seed extension summary, closes the seed extension block
 my $didMerge = 0; #were reads already merged before this step? -> so far always no
 
-my $mapRestr = "-id " . ($backMapID*100) ." -minQueryCov 0.8 ";
-$mapRestr = "-id " . ($backMapID*100) ." -minQueryCov 0.4 " if ($platform eq "pacbio" || $platform eq "pacbio_ga");
+my $mapRestr = "-id " . ($backMapID*100) ." -minQueryCov " . backmap_min_qcov() . " ";
 	
 #$mapRestr .=  "-GoldenAxe 1 " if ($platform eq "pacbio_ga");
 	
@@ -678,7 +679,8 @@ if ( $exec == 0 && $onlyTaxRedo == 0 && $TaxOnly eq "0" ) {
 
 	my $status = 0;
 	my $mrgSentence = ""; $mrgSentence = "and merging pairs of " if ($numInput == 2);
-    printL (frame($ClusterPipe == 9 ? "Counting filtered reads per Savont ASV" : "Extending ${mrgSentence}${OTU_prefix} Seeds"), 0);
+    printL (frame($ClusterPipe == 9 ? "Counting filtered reads per Savont ASV" : "Extending ${mrgSentence}${OTU_prefix} Seeds",1,2), 0);
+	my $seedLogOffset = -s $progOutPut || 0;
     $status = systemL($sdmcmd, "Seed extension", 0); #actual sdm derep step; recoverable fallback on failure
 	if ($status) {
         die "SDM retained-variant seed extension failed; see $logDir/SeedExtensionStats.log and $progOutPut.\n"
@@ -692,6 +694,8 @@ if ( $exec == 0 && $onlyTaxRedo == 0 && $TaxOnly eq "0" ) {
 	} else {
 		$seedExtDone = 1;
 		preserve_savont_consensus($tmpOTU, $OTUSEED, $OTUmFile, $mapHref) if $ClusterPipe == 9;
+		$seedExtRep = seed_extension_report($seedLogOffset);
+		printL(frame($seedExtRep,1,3),0) if ($numInput != 2); #paired: closed after read merging
 	}
 } elsif ($onlyTaxRedo) { 
 	printL "Skipping Seed extension step\n", 0; 
@@ -2344,6 +2348,7 @@ sub clean_otu_mat($ $ $) {
 	my $cnt = -1;
 
 	my $chimRm      = 0; my $chimRdCnt   = 0;
+	my $inRds = 0; #reads in matrix before filtering
 	my %OTUcnt;
 	my %OTUmat;
 	
@@ -2364,6 +2369,7 @@ sub clean_otu_mat($ $ $) {
 		}
 		my @spl = split( /\t/, $line );
 		my $ot  = shift @spl;
+		$inRds += $_ for @spl;
 		#specific OTU read count
 		if ( exists( $hds{$ot} ) ) {    #exists in non-chimeric set
 			my $rdCnt =0;$rdCnt += $_ for @spl;
@@ -2394,6 +2400,9 @@ sub clean_otu_mat($ $ $) {
 	my @sorted_otus = ( sort { $OTUcnt{$b} <=> $OTUcnt{$a} || $a cmp $b } keys %OTUcnt);    #tie-break keeps numbering reproducible
 	my $OTUcntd = 1;    # my $maxOTUdig = length (keys %OTUcnt)
 	my $intoMatLast = "";
+	my $nSmpls = () = $OTUmat{head} =~ /\t/g;
+	my @smplRds = (0) x $nSmpls; #reads per sample in the written matrix
+	my $addSmplRds = sub { my @v = split /\t/, $_[0]; $smplRds[$_] += $v[$_] for 0 .. $#v; };
 	foreach my $ot (@sorted_otus) {
 		next unless (exists($OTUcnt{$ot})); #chimera
 		if (exists($contT{$ot}) ){
@@ -2406,6 +2415,7 @@ sub clean_otu_mat($ $ $) {
 			if ($keepOfftargets){
 				$intoMatLast .= $contRN{$ot}  ."\t". $OTUmat{$ot} . "\n"; 
 				print OF ">".$contRN{$ot}."\n$hds{$ot}\n";
+				$addSmplRds->($OTUmat{$ot});
 			}
 			next;
 		} 
@@ -2419,6 +2429,7 @@ sub clean_otu_mat($ $ $) {
 		my $newOname = ${OTU_prefix} . $OTUcntd;
 		$OTUcntd++;
 		print O $newOname . "\t" . $OTUmat{$ot} . "\n";
+		$addSmplRds->($OTUmat{$ot});
 		if ( exists( $hds{$ot} ) ) {
 			print OF ">" . $newOname . "\n$hds{$ot}\n";
 			
@@ -2445,8 +2456,9 @@ sub clean_otu_mat($ $ $) {
 	$Lreport .= "Chimeras: $chimRm $chimTag found ($chimRdCnt reads)\n" if ($chimRm);
 	my $strTmp = "Contaminants: ";
 	my $lcnt =0;
+	my $contAction = $keepOfftargets ? "flagged (kept)" : "removed";
 	foreach my $k (keys %contaCnt){
-		$strTmp .=  "$k: $contaCnt{$k} ${OTU_prefix}'s removed ($contaCntRds{$k} reads); ";
+		$strTmp .=  "$k: $contaCnt{$k} ${OTU_prefix}'s $contAction ($contaCntRds{$k} reads); ";
 		$lcnt += $contaCntRds{$k}+$contaCnt{$k};
 	}
 	$Lreport .= "Extended logs active, contaminant and chimeric matrix will be created.\n" if ($extendedLogs);
@@ -2454,7 +2466,15 @@ sub clean_otu_mat($ $ $) {
 	$strTmp ="" if ($lcnt==0);
 	$Lreport .= $strTmp;
 	$Lreport.= "Removed mismapped OTUs ($emptyOTUcnt) with 0 matrix counts..\n" if ( $emptyOTUcnt > 0 );
-$Lreport .= "After filtering $nonChim ${OTU_prefix}'s ($nonChimRds reads) remaining in matrix.\n";
+	my $keptPct = $inRds > 0 ? sprintf(", %.1f%%", 100 * $nonChimRds / $inRds) : "";
+	$Lreport .= "After filtering $nonChim ${OTU_prefix}'s ($nonChimRds reads$keptPct) remaining in matrix.\n";
+	my @depth = sort { $a <=> $b } @smplRds;
+	if (@depth) {
+		my $med = @depth % 2 ? $depth[$#depth / 2] : ($depth[@depth / 2 - 1] + $depth[@depth / 2]) / 2;
+		my $noRds = grep { $_ == 0 } @depth;
+		$Lreport .= "Reads per sample: min " . _sdm_pretty_value($depth[0]) . ", median " . _sdm_pretty_value(int($med + 0.5))
+			. ", max " . _sdm_pretty_value($depth[-1]) . " (" . scalar(@depth) . " samples" . ($noRds ? ", $noRds without reads" : "") . ")\n";
+	}
 
 	if ( $nonChim == 0 && $intoMatLast eq "" ) {
 		#print "$nonChim - $emptyOTUcnt\n";
@@ -2537,7 +2557,7 @@ sub forceMerge_fq2fna($ $ $) {
 		close I;
 	}
     close O;
-	printL frame("Found $seedCnt fasta seed sequences based on seed extension and read merging\n  ($cntMerged from merged pairs, $cntSingles from SDM singles)\n"),0;
+	printL frame("Found $seedCnt fasta seed sequences based on seed extension and read merging\n  ($cntMerged from merged pairs, $cntSingles from SDM singles)\n$seedExtRep",1,3),0;
 }
 
 sub mergeRds{
@@ -3273,7 +3293,7 @@ sub announce_options{
 	printL "Coarse dereplication ANI $coarseDerep\n", 0 if defined $coarseDerep;
 	printL "Clustering algorithm    $clusteringNameStr -> ${OTU_prefix}'s\n",0;
 	
-	printL "Read mapping to ${OTU_prefix}     $internalMapper, at $backMapID %id cutoff\n",0 if $TaxOnly eq "0";
+	printL "Read mapping to ${OTU_prefix}     $internalMapper, at >= " . 100 * $backMapID . "% identity\n",0 if $TaxOnly eq "0";
 	if ( $ClusterPipe == 2 ) {
 		printL "Swarm inter-cluster d   $swarmClus_d\n", 0;
 	} elsif ( $ClusterPipe == 0 && $TaxOnly eq "0" ) {
@@ -7316,6 +7336,9 @@ sub printL($ $) {
         finWarn($msg);
         return;
     }
+    #back-to-back frames share one rule instead of printing two
+    $msg =~ s/^\Q$lastOutRule\E\n// if ($lastOutRule ne "");
+    $lastOutRule = ($msg =~ /(?:^|\n)(-{20,})\n\z/) ? $1 : "" if ($msg ne "");
     print $msg if ($verbosity > 0) ;
     if ( $mainLogFile ne "" && defined fileno(LOG) ) {
         print LOG $msg;
@@ -7587,6 +7610,7 @@ sub systemL {
         $subcmd =~ s/^\s+|\s+$//g;
         next if $subcmd eq "";
         print("[cmd] $subcmd\n") if ($verbosity > 2);
+        $lastOutRule = "" if ($verbosity >= 2); #tool output reaches the terminal
         print cmdLOG "[cmd] $subcmd\n" if defined fileno(cmdLOG);
 
         my $exec_cmd = $subcmd;
@@ -7904,23 +7928,64 @@ sub parseSDMlog($) {
 
 }
 
-sub parseLastVUsearch($){
-	my ($tarF) = @_;
-	
-	#only works for vsearch
-	my $d2rep = `tail -n20 $progOutPut `;
-	if ($d2rep =~ m/Matching unique query sequences: (\d+)/){#$VSused == 1){
-		return $1;
-	} elsif ($d2rep =~ m/.*\% Searching .*, (\d+)/) {
-		return $1;
-		#$d2rep = `tail -n20 $progOutPut | grep '\% Searching ' `;
-		#$d2rep =~ m/.*\% Searching .*,//; chomp $d2rep;
-	} elsif ($d2rep =~ m/worker_pipeline::.*mapped (\d+) sequences/){
-		return $1;
+#minimum query coverage for a backmapped read (sdm -minQueryCov)
+sub backmap_min_qcov {
+	return ($platform eq "pacbio" || $platform eq "pacbio_ga") ? 0.4 : 0.8;
+}
+
+#program log written since byte $offset (empty if tool output went to the terminal)
+sub progout_since {
+	my ($offset) = @_;
+	open my $fh, "<", $progOutPut or return "";
+	seek($fh, $offset, 0) or return "";
+	local $/; my $txt = <$fh>;
+	close $fh;
+	return $txt // "";
+}
+
+#reads with a backmapping hit, and reads searched (undef if unknown)
+sub backmap_counts {
+	my ($mapF, $logOffset) = @_;
+	my ($hits, $total) = (0, 0);
+	my $log = progout_since($logOffset);
+	open my $fh, "<", $mapF or return (0, undef);
+	if ($mapF =~ m/\.paf$/){
+		#minimap2 reports all alignments: apply the cutoffs sdm uses when counting
+		my $minCov = backmap_min_qcov(); my $last = "";
+		while (my $line = <$fh>){
+			my @f = split /\t/, $line, 12;
+			next if (@f < 11 || $f[0] eq $last || $f[1] <= 0 || $f[10] <= 0);
+			next if ($f[9] < $f[10] * $backMapID || $f[10] < $f[1] * $minCov);
+			$last = $f[0]; $hits++;
+		}
+		$total += $_ for ($log =~ m/\] mapped (\d+) sequences/g); #one line per minimap2 batch
+	} else {
+		#uc: H = hit, N = no hit
+		while (my $line = <$fh>){
+			my $type = substr($line, 0, 1);
+			$hits++ if ($type eq "H");
+			$total++ if ($type eq "H" || $type eq "N");
+		}
+		($hits, $total) = ($1, $2) if ($log =~ m/Matching unique query sequences: (\d+) of (\d+)/);
 	}
-	
-	#worker_pipeline
-	return "Unknown";
+	close $fh;
+	return ($hits, ($total > 0 ? $total : undef));
+}
+
+sub backmap_line {
+	my ($label, $hits, $total) = @_;
+	return "$label: " . _sdm_pretty_value($hits) . " mapped\n" unless (defined $total);
+	return "$label: " . _sdm_pretty_value($hits) . " of " . _sdm_pretty_value($total)
+		. sprintf(" mapped (%.1f%%)\n", 100 * $hits / $total);
+}
+
+#reads sdm recruited into the abundance matrix during seed extension
+sub seed_extension_report {
+	my $log = progout_since($_[0]);
+	my ($reads) = $log =~ m/^Recruited (\d+) reads in OTU matrix/m;
+	return "" unless (defined $reads);
+	my ($samples) = $log =~ m/^Writing OTU matrix with (\d+) samples/m;
+	return "Reads in ${OTU_prefix} matrix: " . _sdm_pretty_value($reads) . (defined $samples ? " ($samples samples)" : "") . "\n";
 }
 
 sub convertFastqs2fna($ $){
@@ -8138,7 +8203,7 @@ sub buildOTUs($) {
 		if ( $noChimChk == 1 || $noChimChk == 2 ) {  #deactivate chimera de novo
 			$xtraOptions .= " -uparse_break -999 ";
 		}
-		$entrMessage = "UPARSE ${OTU_prefix} clustering\nCluster at ". 100 * $id_OTU ;
+		$entrMessage = "UPARSE ${OTU_prefix} clustering\nCluster at ". 100 * $id_OTU . "%";
 		#"\n =========================================================================\n UPARSE core routine\n Cluster at ". 100 * $id_OTU. "%\n=========================================================================\n",0);
 		
 
@@ -8186,12 +8251,12 @@ sub buildOTUs($) {
 		if (defined $vsearch_iddef) {
 			$iddef_flag = "--iddef $vsearch_iddef";
 		}
-		$entrMessage = "VSEARCH ${OTU_prefix} clustering\n Cluster at ". 100 * $id_OTU ;
+		$entrMessage = "VSEARCH ${OTU_prefix} clustering\nCluster at ". 100 * $id_OTU . "%";
 		$cmd = "$VSBinOri --cluster_size $derepl --id $id_OTU $iddef_flag --sizein --strand both --consout $OTUfastaTmp --sizeout --uc $finalClustMap;";
 		$citations .= "VSEARCH v$vsearchVer OTU clustering: Rognes T, Flouri T, Nichols B, Quince C, Mahé F. 2016. VSEARCH: A versatile open source tool for metagenomics. PeerJ 2016:1–22.\n";
 	} elsif ( $ClusterPipe == 3 ) {
 		if ( !-e $cdhitBin ) {printL "No valid CD-Hit binary found at $cdhitBin\n", 88;}
-		$entrMessage = "CD-HIT ${OTU_prefix} clustering\n Cluster at ". 100 * $id_OTU ;
+		$entrMessage = "CD-HIT ${OTU_prefix} clustering\nCluster at ". 100 * $id_OTU . "%";
 		my $cdhitSpd = "-g 0"; #g 1 is usually too slow
 		#printL("\n =========================================================================\n CD-HIT ${OTU_prefix} clustering\n Cluster at ". 100 * $id_OTU . "%\n=========================================================================\n", 0 );
 		$cmd = "$cdhitBin -T $uthreads -o $OTUfastaTmp -c $id_OTU -G 0 $cdhitSpd -M 0 -i $derepl -n 9 -d 0 -r 1 -aL 0.0 -aS 0.9 -p 1 -mask NX;";
@@ -8250,6 +8315,7 @@ sub buildOTUs($) {
             numberOTUs($savontRaw, $OTUfastaTmp, $OTU_prefix);
             $exitMsg = "Found $nASV ASVs (savont)";
         }
+		$exitMsg = "Found " . cntFastaEntrs($OTUfastaTmp) . " ${OTU_prefix}'s" if ($exitMsg eq "Finished" && -s $OTUfastaTmp);
 		printL(frame($exitMsg,1,3),0);
 		#die "$progOutPut\n$d2rep\n";
     }
@@ -8302,9 +8368,9 @@ sub buildOTUs($) {
 	
 	$entrMessage = "Starting backmapping of ";
 	$entrMessage .= "\n  - $mapping_label" if ($backMapDerep);
-	$entrMessage .= "\n  - low-abundant dereplicated Reads" if ($backmapRest);
 	$entrMessage .= "\n  - mid-quality reads" if ($backmapMids);
-	$entrMessage .= "\nto ${OTU_prefix}'s using $internalMapper at >= $backMapID identity.";
+	$entrMessage .= "\n  - low-abundance dereplicated reads" if ($backmapRest);
+	$entrMessage .= "\nto ${OTU_prefix}'s using $internalMapper at >= " . 100 * $backMapID . "% identity.";
 	printL(frame($entrMessage,1,2),0) if ($backMapDerep || $backmapRest || $backmapMids);
 
 	$cmd = "";
@@ -8336,10 +8402,12 @@ sub buildOTUs($) {
 			}
 			
 				   #die $cmd."\n";
+			my $logOffset = -s $progOutPut || 0;
 			if ( systemL($cmd) != 0 ) {
 				printL( "$internalMapper backmapping command aborted:\n$cmd\n", 1 );
 			}
-			$backMapRep .= "Backmapping $mapping_label via $internalMapper: ".parseLastVUsearch($progOutPut)."\n";
+			my ($hits, $total) = backmap_counts($finalClustMap, $logOffset);
+			$backMapRep .= backmap_line(ucfirst($mapping_label), $hits, $total);
 			
         }
 	} else {         #map all qual filtered files to OTUs
@@ -8381,6 +8449,7 @@ sub buildOTUs($) {
 	$cmd="";
 	#----------------------------------------------------
     #backmap derep & mid qual reads
+	my ($midRan, $midHits, $midTotal) = (0, 0, 0); #one report for all mid qual files
     foreach my $subF (@lotsFiles) {
 		#print "$subF\n";
 		$cmd="";
@@ -8400,13 +8469,17 @@ sub buildOTUs($) {
 		}
 		#die "$cmd\n";
 		if ( -s $OTUfastaTmp ) {
+			my $logOffset = -s $progOutPut || 0;
 			if ( systemL($cmd) != 0 ) { printL( "Failed: $cmd\n", 1 ); }
-			$backMapRep .= "Backmapping  mid qual reads: ".parseLastVUsearch($progOutPut)."\n"; #after the mapping ran
+			my ($hits, $total) = backmap_counts($tmpUC, $logOffset);
+			$midHits += $hits; $midRan = 1;
+			$midTotal = defined($total) && defined($midTotal) ? $midTotal + $total : undef;
 		} else { systemL("touch $tmpUC"); }
 		systemL( "cat $tmpUC >>  $finalAddMap;"); #and save in more persistent object..
 		unlink $tmpUC;
 
     }
+	$backMapRep .= backmap_line("Mid-quality reads", $midHits, $midTotal) if ($midRan);
 	$cmd="";
 	#die;
     #add in unique low-abundant reads
@@ -8423,8 +8496,10 @@ sub buildOTUs($) {
 			$cmd .= "$mini2Bin $mini2RdPreset -t $uthreads -o $restUC $OTUfastaTmp $derepl.rest ;";
 		}
         if ( -s $OTUfastaTmp ) {
+			my $logOffset = -s $progOutPut || 0;
 			if ( systemL($cmd) != 0 ) { printL( "Failed: $cmd\n", 1 );  }
-			#printL(frame("Finished backmapping",1,3),0);
+			my ($hits, $total) = backmap_counts($restUC, $logOffset);
+			$backMapRep .= backmap_line("Low-abundance dereplicated reads", $hits, $total);
         }
         else { systemL("touch $restUC;"); }
         systemL( "cat $restUC >> " . $finalRestMap );

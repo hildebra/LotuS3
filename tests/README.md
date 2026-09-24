@@ -17,7 +17,7 @@ From the repository root:
 prove tests/
 ```
 
-A passing run reports `Files=6, Tests=152` and `Result: PASS`.
+A passing run reports `Files=6, Tests=154` and `Result: PASS`.
 
 To run one file with per-case output:
 
@@ -52,8 +52,8 @@ cd ~/lotus3-tests && chmod +x bin/sdm bin/LCA && prove tests/
 
 | File | Cases | Coverage |
 | --- | ---: | --- |
-| `ont_integration.t` | 54 | ONT preprocessing with SDM, Savont and Barbell wiring, barcode matching, ASV-to-abundance pairing, backmapping identity, option validation, and the `bin/savont2uc.pl` converter |
-| `perl_audit.t` | 30 | Output locking and cleanup guards, input validation, version checks, contamination filters, taxonomy parsing, USEARCH version/chimera handling, and complete pipeline runs |
+| `ont_integration.t` | 55 | ONT preprocessing with SDM, Savont and Barbell wiring, barcode matching, ASV-to-abundance pairing, backmapping identity and mapped-read report, option validation, and the `bin/savont2uc.pl` converter |
+| `perl_audit.t` | 31 | Output locking and cleanup guards, input validation, version checks, contamination filters, backmapping read counts, taxonomy parsing, USEARCH version/chimera handling, and complete pipeline runs |
 | `sintax_taxonomy.t` | 5 | SINTAX taxonomy (`-taxAligner sintax`, `-refDB SINTAX`): OTU-first `hiera_BLAST.txt`, higher-level tables, BIOM and phyloseq input, taxonomy-only and ITS runs, early failures |
 | `coarse_derep.t` | 27 | Coarse dereplication storage parity, retained-variant seeds, and the dereplication count auditor |
 | `installer_ont.t` | 25 | ONT tool installation and registration, and Bioconda package extraction |

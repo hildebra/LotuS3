@@ -285,6 +285,21 @@ case test_savont_zero_hit_sample_is_preserved => sub {
     $t->check_counts({ s1 => 4, s2 => 0 });
 };
 
+case test_backmapping_reports_mapped_reads => sub {
+    my $t = shift;
+    $t->{env}{ONT_TEST_SKIP_PREFIX} = 's2___';
+    for my $mapper (['minimap2', []], ['vsearch', ['-useMini4map', '0']]) {
+        subtest "mapper=$mapper->[0]" => sub {
+            $t->{out} = "$t->{root}/output_$mapper->[0]";
+            my $output = $t->run_lotus(extra => $mapper->[1])->{output};
+            $t->check_counts({ s1 => 4, s2 => 0 });
+            is(count_of($output, 'Quality-filtered reads: 4 of 7 mapped (57.1%)'), 1, 'one mapped-read line');
+            contains($output, 'Reads in ASV matrix: 4 (2 samples)');
+            unlike($output, qr/^(-{20,})\n\1\n/m, 'adjacent frames share one rule');
+        };
+    }
+};
+
 case test_savont_combine_samples => sub {
     my $t = shift;
     my @rows = text_lines(read_text($t->{map}));

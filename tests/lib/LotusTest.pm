@@ -79,9 +79,11 @@ PERL
     }
     my @targets = fasta(slurp($db));
     open my $fh, '>', $out or die "$out: $!\n";
+    my $hits = 0;
     for my $e (@entries) {
         my ($id, $seq) = @$e; my $n = length $seq;
         next if $ENV{ONT_TEST_SKIP_PREFIX} && index($id, $ENV{ONT_TEST_SKIP_PREFIX}) == 0;
+        $hits++;
         # closest target: mismatches over the shared prefix plus the length difference
         my ($target, $best);
         for my $t (@targets) {
@@ -93,6 +95,11 @@ PERL
             : "H\t0\t$n\t99.9\t+\t0\t0\t${n}M\t$id\t$target\n";
     }
     close $fh or die "$out: $!\n";
+    # The run summaries the real tools print to stderr.
+    my $queries = @entries;
+    print STDERR $name eq 'minimap2'
+        ? "[M::worker_pipeline::0.001*1.00] mapped $queries sequences\n"
+        : sprintf("Matching unique query sequences: %d of %d (%.2f%%)\n", $hits, $queries, $queries ? 100 * $hits / $queries : 0);
 }
 else {
     print STDERR "Unexpected tool call: $name\n"; exit 1;

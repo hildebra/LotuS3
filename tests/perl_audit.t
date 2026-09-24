@@ -141,7 +141,12 @@ elsif ($name eq 'vsearch' && has('-userout')) {
 }
 PERL
     write_text("$t->{tools}/vsearch", $vsearch);
-    $t->run_lotus(extra => $barbell ? ['-ontMinReads', '2'] : [], barbell => $barbell);
+    my $output = $t->run_lotus(extra => $barbell ? ['-ontMinReads', '2'] : [], barbell => $barbell)->{output};
+    contains($output, 'Quality-filtered reads: 7 of 7 mapped (100.0%)');
+    contains($output, 'Reads in ASV matrix: 7 (2 samples)');
+    contains($output, "After filtering 1 ASV's (7 reads, 100.0%) remaining in matrix.");
+    contains($output, 'Reads per sample: min 3, median 4, max 4 (2 samples)');
+    unlike($output, qr/^(-{20,})\n\1\n/m, 'adjacent frames share one rule');
     my $citations = read_text("$t->{out}/LotuSLogS/citations.txt");
     is(count_of($citations, '10.64898/2026.05.26.727271'), 1, 'Savont cited once');
     is(count_of($citations, '10.1093/bioinformatics/btag349'), $barbell, 'Barbell citation');
@@ -402,6 +407,32 @@ case test_all_zero_otu_matrix_rejected => sub {
     my $t = shift;
     my ($body) = $t->clean_table("zero\t0\n");
     contains($t->probe($body, ok => 0)->{output}, 'Empty OTU matrix');
+};
+
+case test_backmap_counts_apply_sdm_cutoffs => sub {
+    my $t = shift;
+    my $paf = join '', map { my ($rid, $target, $span, $matches) = @$_;
+        "$rid\t100\t0\t$span\t+\t$target\t100\t0\t$span\t$matches\t$span\t60\n" }
+        ['r1', 'OTU1', 100, 98], ['r1', 'OTU2', 100, 98],    # one read, two alignments
+        ['r2', 'OTU1', 100, 96],                            # below 97% identity
+        ['r3', 'OTU1', 70, 70],                             # 70% query coverage
+        ['r4', 'OTU1', 100, 97];                            # exactly at the cutoff
+    my $uc = "H\t0\t100\t99.0\t+\t0\t0\t100M\tr1\tOTU1\nN\t*\t*\t*\t*\t*\t*\t*\tr2\t*\nH\t0\t100\t98.0\t+\t0\t0\t100M\tr3\tOTU1\n";
+    my $batches = "[M::worker_pipeline::0.1*1.00] mapped 3 sequences\n[M::worker_pipeline::0.2*1.00] mapped 2 sequences\n";
+    # The log offset excludes an earlier mapper run.
+    my $earlier = "[M::worker_pipeline::0.1*1.00] mapped 99 sequences\nMatching unique query sequences: 1 of 99 (1.01%)\n";
+    for my $c (['paf', $paf, 'ONT', $batches, [2, 5]], ['paf', $paf, 'pacbio', $batches, [3, 5]],
+               ['paf', $paf, 'ONT', '', [2, undef]], ['uc', $uc, 'miSeq', '', [2, 3]],
+               ['uc', $uc, 'miSeq', "Matching unique query sequences: 5 of 9 (55.56%)\n", [5, 9]]) {
+        my ($ext, $hits, $platform, $log, $want) = @$c;
+        subtest "$ext platform=$platform log=" . ($log ne '' ? 'yes' : 'no') => sub {
+            @{ $t->{env} }{qw(AUDIT_MAP AUDIT_LOG AUDIT_PLATFORM AUDIT_OFFSET)} = (write_text("$t->{root}/hits.$ext", $hits),
+                write_text("$t->{root}/prog.log", $earlier . $log), $platform, length $earlier);
+            my $result = $t->probe('$progOutPut = $ENV{AUDIT_LOG}; $backMapID = 0.97; $platform = $ENV{AUDIT_PLATFORM};'
+                . ' print "RESULT:", JSON::PP->new->encode([backmap_counts($ENV{AUDIT_MAP}, $ENV{AUDIT_OFFSET})]);');
+            is_deeply(result($result), $want, 'mapped and searched reads');
+        };
+    }
 };
 
 case test_lambda_index_failure_preserves_input_name_and_content => sub {
