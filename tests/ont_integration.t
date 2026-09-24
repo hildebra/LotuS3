@@ -12,6 +12,7 @@ use File::Basename qw(basename);
 use File::Spec;
 use File::Temp qw(tempdir);
 use IO::Compress::Gzip qw(gzip $GzipError);
+use IO::Uncompress::Gunzip qw(gunzip $GunzipError);
 use JSON::PP ();
 use Test::More;
 use LotusTest qw($ROOT $SDM case contains lacks read_text write_text append_text text_lines
@@ -20,6 +21,7 @@ use LotusTest qw($ROOT $SDM case contains lacks read_text write_text append_text
 sub canon { return File::Spec->canonpath($_[0]) }
 sub entries { my ($dir) = @_; opendir my $dh, $dir or die "$dir: $!\n"; return [sort grep { !/^\.\.?$/ } readdir $dh] }
 sub savont_opts { return read_text("$ROOT/configs/sdm_ONT_SAVONT_opt.txt") }
+sub gunzip_text { my ($file) = @_; gunzip($file => \my $text) or die "gunzip $file: $GunzipError\n"; return $text }
 
 sub append_read {
     my ($t, $name, %o) = @_;
@@ -175,7 +177,10 @@ case test_savont_percentage_and_length_boundaries => sub {
         if ($accepted) { is($actual{$name}, $passing{$name}, "$name kept intact") }
         else { ok(!exists $actual{$name}, "$name rejected") }
     }
-    my $saved = join '', map { read_text($_) } glob("$t->{out}/demultiplexed/*.fq");
+    # Saved per-sample copies are filtered first, then compressed.
+    is_deeply([glob("$t->{out}/demultiplexed/*.fq")], [], 'no uncompressed per-sample FASTQ');
+    my $saved = join '', map { gunzip_text($_) } glob("$t->{out}/demultiplexed/*.fq.gz");
+    contains($saved, 'short_boundary');
     lacks($saved, 'short_over');
     lacks($saved, 'long_over');
     contains(read_text("$t->{out}/LotuSLogS/savont_ambiguity_filter.log"), 'kept 10; rejected 2');
@@ -453,8 +458,9 @@ case test_ont_barcode_budget_and_alphabet_rejected_early => sub {
     }
 };
 
-case test_multiple_savont_consensuses_keep_correct_counts => sub {
-    my $t = shift;
+# Reads for two Savont ASVs with distinct counts; returns the counts keyed by ASV sequence.
+sub two_asv_reads {
+    my ($t) = @_;
     (my $second = $t->{seq}) =~ tr/ACGT/TGCA/;
     my $consensus2 = (substr($second, 0, 1) ne 'T' ? 'T' : 'A') . substr($second, 1);
     $t->{env}{ONT_TEST_CONSENSUSES} = json_encode([$t->{consensus}, $consensus2]);
@@ -467,7 +473,12 @@ case test_multiple_savont_consensuses_keep_correct_counts => sub {
         }
         write_text("$t->{reads}/$sample.fq", $fq);
     }
-    $t->run_lotus;
+    return { $t->{consensus} => { s1 => 4, s2 => 3 }, $consensus2 => { s1 => 2, s2 => 5 } };
+}
+
+sub check_counts_by_sequence {
+    my ($t, $expected) = @_;
+    local $Test::Builder::Level = $Test::Builder::Level + 1;
     my $state = json_decode(read_text("$t->{out}/ont_test_state.json"));
     my %seeds;
     for my $entry (split />/, read_text($state->{seed})) {
@@ -476,13 +487,82 @@ case test_multiple_savont_consensuses_keep_correct_counts => sub {
         $seeds{ $lines[0] } = join '', @lines[1 .. $#lines];
     }
     my @table = text_lines(read_text("$t->{out}/OTU.txt"));
-    my %expected = ($t->{consensus} => { s1 => 4, s2 => 3 }, $consensus2 => { s1 => 2, s2 => 5 });
-    is_deeply([sort values %seeds], [sort keys %expected], 'both consensuses kept as seeds');
+    is_deeply([sort values %seeds], [sort keys %$expected], 'both consensuses kept as seeds');
     my @head = split /\t/, $table[0];
     for my $row (@table[1 .. $#table]) {
         my ($key, @counts) = split /\t/, $row;
         my %got; @got{ @head[1 .. $#head] } = map { 0 + $_ } @counts;
-        is_deeply(\%got, $expected{ $seeds{$key} // '' }, "counts for $key");
+        is_deeply(\%got, $expected->{ $seeds{$key} // '' }, "counts for $key");
+    }
+}
+
+# Real SDM, then edit the seed FASTA written by the Savont counting call (-otu_matrix).
+my $SEED_EDIT_SDM = <<'PERL';
+#!/usr/bin/env perl
+use strict; use warnings;
+system($ENV{ONT_TEST_REAL_SDM}, @ARGV);
+my $status = $? == -1 ? 127 : $? >> 8;
+if ($status == 0 && grep { $_ eq '-otu_matrix' } @ARGV) {
+    my ($i) = grep { $ARGV[$_] eq '-o_fna' } 0 .. $#ARGV;
+    my $file = $ARGV[$i + 1];
+    open my $in, '<', $file or die "$file: $!\n";
+    my @records = grep { length } split />/, do { local $/; <$in> };
+    close $in;
+    if ($ENV{ONT_TEST_SEED_EDIT} eq 'reverse') { @records = reverse @records }
+    else { $records[0] =~ s/\n(.)/"\n" . ($1 eq 'A' ? 'C' : 'A')/e }  # the first seed no longer equals any ASV
+    open my $out, '>', $file or die "$file: $!\n";
+    print {$out} map { ">$_" } @records;
+    close $out;
+}
+exit $status;
+PERL
+
+sub seed_editing_sdm {
+    my ($t, $mode) = @_;
+    my $wrapper = write_text("$t->{tools}/sdm", $SEED_EDIT_SDM);
+    chmod 0755, $wrapper or die "chmod $wrapper: $!\n";
+    @{ $t->{env} }{qw(ONT_TEST_REAL_SDM ONT_TEST_SEED_EDIT)} = ($SDM, $mode);
+    write_text($t->{cfg}, replace_all(read_text($t->{cfg}), "sdm $SDM\n", "sdm $wrapper\n"));
+}
+
+{ no strict 'refs'; *{"LotusTest::$_"} = \&{"main::$_"} for qw(two_asv_reads check_counts_by_sequence seed_editing_sdm); }
+
+case test_multiple_savont_consensuses_keep_correct_counts => sub {
+    my $t = shift;
+    my $expected = $t->two_asv_reads;
+    $t->run_lotus;
+    $t->check_counts_by_sequence($expected);
+};
+
+case test_savont_pairing_does_not_depend_on_sdm_seed_order => sub {
+    my $t = shift;
+    my $expected = $t->two_asv_reads;
+    $t->seed_editing_sdm('reverse');
+    $t->run_lotus;
+    $t->check_counts_by_sequence($expected);
+};
+
+case test_savont_seed_that_is_not_an_asv_stops_the_run => sub {
+    my $t = shift;
+    $t->two_asv_reads;
+    $t->seed_editing_sdm('mutate');
+    contains($t->run_lotus(ok => 0)->{output}, 'is not one of the Savont ASV sequences');
+    ok(!-e "$t->{out}/ont_test_state.json", 'stopped before the checkpoint');
+};
+
+case test_ont_backmapping_identity => sub {
+    my $t = shift;
+    my $lssu = ['-CL', 'vsearch', '-derepMin', '0', '-s', "$ROOT/configs/sdm_ONT_LSSU.txt"];
+    my $n = 0;
+    for my $c ([[], '95', 0], [$lssu, '95', 0], [['-backmap_id', '0.97'], '97', 0], [['-backmap_id', '0.9'], '90', 1]) {
+        my ($extra, $identity, $warned) = @$c;
+        subtest "extra=@$extra" => sub {
+            $t->{out} = "$t->{root}/output_" . $n++;
+            my $result = $t->run_lotus(extra => $extra);
+            $t->check_counts;
+            contains($t->sdm_commands->[1], " -id $identity -minQueryCov 0.8 ");
+            is(index($result->{output}, 'lower than OTU clustering threshhold') >= 0 ? 1 : 0, $warned, 'backmap-below-id warning');
+        };
     }
 };
 
@@ -495,7 +575,8 @@ case test_savont_explicit_options_and_vsearch_mapping => sub {
     is(after($args, $_->[0]), $_->[1], $_->[0])
         for ['--quality-value-cutoff', '95.5'], ['--minimum-base-quality', '20'], ['--chimera-allowable-errors', '2'];
     ok(has_arg($args, '--single-strand'), 'single-strand mode');
-    ok(scalar(() = glob("$t->{out}/demultiplexed/*.fq")), 'demultiplexed FASTQ saved');
+    ok(scalar(() = glob("$t->{out}/demultiplexed/*.fq.gz")), 'demultiplexed FASTQ saved compressed');
+    is_deeply([glob("$t->{out}/demultiplexed/*.fq")], [], 'no uncompressed copies');
     my $mapper = $t->tool_calls('vsearch')->[0];
     my $mapping_reads = after($mapper, '--usearch_global');
     is(canon($mapping_reads), canon("$t->{out}/tmpFiles/savont_mapping.fna"), 'VSEARCH maps converted reads');

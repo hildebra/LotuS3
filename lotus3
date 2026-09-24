@@ -1283,7 +1283,8 @@ sub sdmStep1{
 		#for valid paired output, need to keep them together..
 		$sdmOptStr .= "-pairedDemulti 1 " if ($paired > 1);
 
-		# Retain existing uncompressed per-sample output for DADA2 and Savont; Savont itself uses primary FASTQ.
+		# DADA2 and Savont get uncompressed per-sample output: DADA2 reads it; for Savont the
+		# ambiguity pass rewrites it first, then it is compressed (Savont uses the primary FASTQ).
 		$sdmOptStr .= "-o_demultiplex_gz 1 " if (($ClusterPipe != 7 && $ClusterPipe != 9) || $saveDemulti == 1);
 		if ($ClusterPipe == 7){ #dada2.. no rd pair info in head!
 			$sdmOptStr .= "-pairedRD_HD_out 0 -derep_format fq -derepPerSR 1 -DemultiBPperSR 1e8 ";
@@ -1446,6 +1447,9 @@ sub sdmStep1{
                 filter_fastq_ambiguity_percent($_, $savontMaxAmbiguousPercent) for glob("$sdmDemultiDir/*.fq");
             }
         }
+        # Savont reads the primary FASTQ, so the saved per-sample copies are final once filtered.
+        my @savedDemultiFq = ($ClusterPipe == 9 && $saveDemulti == 2) ? glob("$sdmDemultiDir/*.fq") : ();
+        systemL("$gzipC $sdmDemultiDir/*.fq;", "Compressing demultiplexed FASTQ") if @savedDemultiFq;
 
 		#postprocessing of demulti output files
 		
@@ -3541,9 +3545,12 @@ sub setClusterAlgo{
 		printL( "\"-id\" set to value <0 or >1: $id_OTU\nHas to be between 0 and 1\n", 2 );
 	}
 
+	my $ontBackMapDefault = 0;
 	if ($backMapID == -1.){
 		$backMapID = $id_OTU;
 		$backMapID = 0.99 if ($ClusterPipe ==6 || $ClusterPipe ==7);
+		#ONT reads (mostly indel errors) often fall just below 97% identity to their ASV/OTU
+		if ($platform eq "ont") { $backMapID = 0.95; $ontBackMapDefault = 1; }
 	}
 	$swarmClus_d = int($swarmClus_d);
 	if ( $swarmClus_d < 1 ) {
@@ -3552,8 +3559,8 @@ sub setClusterAlgo{
 
 
 
-	if ($TaxOnly eq "0" && $backMapID < $id_OTU){
-		finalWarnings("Backmapping %id cutoff ($backMapID) lower than OTU clustering threshhold ($id_OTU)!");
+	if ($TaxOnly eq "0" && $backMapID < $id_OTU && !$ontBackMapDefault){
+		finWarn("Backmapping %id cutoff ($backMapID) lower than OTU clustering threshhold ($id_OTU)!");
 	}
 }
 
@@ -4031,7 +4038,7 @@ my $workflow_heading = "Workflow options";
 my @workflow_options = (
   ['-forwardPrimer <string>', 'Forward primer sequence used to amplify the target region.'],
   ['-reversePrimer <string>', 'Reverse primer sequence used to amplify the target region.'],
-  ['-backmap_id <0-1>', 'Identity cutoff for backmapping reads onto OTUs/zOTUs/ASVs. Default: 0.97 (including ONT/savont), or 0.99 for DADA2/UNOISE.'],
+  ['-backmap_id <0-1>', 'Identity cutoff for backmapping reads onto OTUs/zOTUs/ASVs. Default: the -id value (0.97); 0.99 for DADA2/UNOISE; 0.95 for -p ONT (all clusterers).'],
   ['-saveDemultiplex <0|1|2|3>', '(1) save all unfiltered demultiplexed reads; (2) save quality-filtered demultiplexed reads and continue the run; (3) save demultiplexed, filtered reads into one FASTQ/FASTA with sample IDs in headers; (0) do not save demultiplexed reads. Default: 0.'],
   ['-taxOnly <file>', 'Skip most of the pipeline and only run taxonomic classification on a FASTA file. Example: lotus3 -taxOnly reads.fna -refDB SLV.'],
   ['-redoTaxOnly <0|1>', '(1) redo only taxonomic assignments for an existing LotuS run, useful for replacing a database. (0) normal LotuS run. Default: 0.'],
@@ -4561,10 +4568,11 @@ sub buildTree($ $) {
 	return $outTree;
 }
 
-# SDM 3.51 emits single-end seeds in OTU_fallback input order (setupDefSeeds /
-# writeNewSeeds), but assigns matrix IDs in hash order. Retain those IDs and
-# restore Savont's inferred sequences; ordinary OTU seed polishing must not
-# replace an ASV with an original, possibly erroneous read.
+# SDM renames the ASVs (matrix IDs in hash order) and keeps no link to the
+# Savont IDs. Its seeds are the -OTU_fallback ASVs themselves, since they are
+# also its only input sequences, so pair seeds with ASVs by exact sequence (a
+# hash lookup), not by file order. A seed matching no ASV means SDM replaced an
+# ASV with a read (or reordered bases): stop rather than report that sequence.
 sub preserve_savont_consensus {
     my ($consensus_file, $seed_file, $matrix_file, $sample_map) = @_;
     my (@consensus_ids, @seed_ids);
@@ -4577,11 +4585,14 @@ sub preserve_savont_consensus {
         die "SDM matrix ID '$id' is missing from its seeds; cannot preserve Savont consensus.\n"
             unless exists $seeds->{$id};
     }
-    my $text = '';
-    for my $i (0 .. $#seed_ids) {
-        $text .= ">$seed_ids[$i]\n$consensus->{$consensus_ids[$i]}\n";
+    my %unpaired; # sequence -> number of ASVs with it (identical ASVs are interchangeable)
+    $unpaired{ uc $consensus->{$_} }++ for @consensus_ids;
+    for my $id (@seed_ids) {
+        my $sequence = uc $seeds->{$id};
+        die "SDM seed '$id' is not one of the Savont ASV sequences; cannot pair abundance rows with ASVs.\n"
+            unless ( $unpaired{$sequence} // 0 ) > 0;
+        $unpaired{$sequence}--;
     }
-    atomic_write_text($seed_file, $text);
     if ($sample_map) {
         my @headers = @{$sample_map->{'#SampleID'}};
         my ($group_col) = grep { $headers[$_] eq 'CombineSamples' } 0 .. $#headers;
@@ -4603,7 +4614,7 @@ sub preserve_savont_consensus {
             atomic_write_text($matrix_file, $matrix_text);
         }
     }
-    printL "Preserved Savont consensus sequences with SDM abundance-matrix identifiers.\n", 0;
+    printL "Paired all " . scalar(@seed_ids) . " Savont ASVs with SDM abundance-matrix identifiers by sequence.\n", 0;
 }
 
 sub numberOTUs($ $ $) {    #rewrites OTUs with new header (numbered header)
