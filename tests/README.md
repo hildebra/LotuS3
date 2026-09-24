@@ -17,7 +17,7 @@ From the repository root:
 prove tests/
 ```
 
-A passing run reports `Files=5, Tests=144` and `Result: PASS`.
+A passing run reports `Files=6, Tests=149` and `Result: PASS`.
 
 To run one file with per-case output:
 
@@ -54,6 +54,7 @@ cd ~/lotus3-tests && chmod +x bin/sdm bin/LCA && prove tests/
 | --- | ---: | --- |
 | `ont_integration.t` | 51 | ONT preprocessing with SDM, Savont and Barbell wiring, barcode matching, option validation, and the `bin/savont2uc.pl` converter |
 | `perl_audit.t` | 30 | Output locking and cleanup guards, input validation, version checks, contamination filters, taxonomy parsing, USEARCH version/chimera handling, and complete pipeline runs |
+| `sintax_taxonomy.t` | 5 | SINTAX taxonomy (`-taxAligner sintax`, `-refDB SINTAX`): OTU-first `hiera_BLAST.txt`, higher-level tables, BIOM and phyloseq input, taxonomy-only and ITS runs, early failures |
 | `coarse_derep.t` | 27 | Coarse dereplication storage parity, retained-variant seeds, and the dereplication count auditor |
 | `installer_ont.t` | 25 | ONT tool installation and registration, and Bioconda package extraction |
 | `installer_options.t` | 11 | Interactive installer prompts and install modes |
@@ -64,7 +65,7 @@ Shared code lives in `lib/`:
 - `InstallerTest.pm`: the installer fixture.
 - `DerepAudit.pm`: the dereplication count audit.
 
-Each case builds a fresh temporary installation. Pipeline cases run the real bundled SDM (and LCA where needed) on small synthetic reads. Savont, Barbell, minimap2, VSEARCH, USEARCH, Lambda, MAFFT, FastTree and the installer's download/build tools are replaced by small Perl stand-ins that record how they were called. Most pipeline cases use a copy of `lotus3` that stops once SDM has written the abundance matrix. Nothing is written into the checkout.
+Each case builds a fresh temporary installation. Pipeline cases run the real bundled SDM (and LCA where needed) on small synthetic reads. Savont, Barbell, minimap2, VSEARCH, USEARCH, Lambda, MAFFT, FastTree, Rscript (phyloseq helper) and the installer's download/build tools are replaced by small Perl stand-ins that record how they were called. Most pipeline cases use a copy of `lotus3` that stops once SDM has written the abundance matrix. Nothing is written into the checkout.
 
 The stand-ins check how LotuS3 calls and connects these tools. They do not establish biological accuracy, which needs real data and the real programs.
 

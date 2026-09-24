@@ -2821,10 +2821,7 @@ sub readPaths_aligners($) {
 		}
 	}
 
-    #check that usearch is execuatble
-    if ( $doBlasting == 3 && !-f $usBin ) {
-        printL "UTAX tax classification requested, but no usearch binary found at $usBin\nAborting..\n", 93;
-    }
+    #check that usearch is execuatble (SINTAX needs usearch: checked in readPaths, once $doBlasting is known)
     if ( -f $usBin && !-X $usBin ) {
         printL "It seems like your usearch binary is not executable, attempting to change this (needs sufficient user rights)\n",0;
         printL "Failed \"chmod +x $usBin\"\n", 33 if ( systemL("chmod +x " . shell_quote($usBin) . ";", "chmod usearch", 0) );
@@ -3033,6 +3030,12 @@ sub readPaths {    #read tax databases and setup correct usage
     if ( $doBlasting > 0 ) {
         #set up default paths
         if ( $doBlasting == 3 ) {
+            #check here, before clustering: with only vsearch configured, checkProgVersions reports $usearchVer 11
+            if ( !-f $usBin ) {
+                printL "SINTAX tax classification requested, but no usearch binary found at $usBin\nAborting..\n", 93;
+            }
+            printL "-taxAligner sintax uses the SINTAX database from $inF (TAX_REFDB_SSU_UTAX / TAX_REFDB_ITS_UTAX); ignoring -refDB $refDBwanted\n", "w"
+              unless $defDBset || $refDBwanted =~ m/^(?:UTAX|SINTAX)$/i;
             $refDBwanted = "UTAX";
             if ( !usearch_version_at_least("8.1") ) {
                 printL "Your usearch version ($usearchVer) is not compatible with sintax, please upgrade: http://www.drive5.com/usearch/\n",63;
@@ -3073,6 +3076,10 @@ sub readPaths {    #read tax databases and setup correct usage
                 else {
                     push( @TAX_REFDB, $TAX_UTAX_16S );
                 }
+                if ( !-d $TAX_REFDB[-1] ) {
+                    printL "Could not find SINTAX/UTAX database directory at \n$TAX_REFDB[-1]\nPlease set TAX_REFDB_SSU_UTAX / TAX_REFDB_ITS_UTAX in $inF.\n",55;
+                }
+                next; #utaxTaxAssign only searches this DB; the ITS/UNITE block below must not add its FASTA
             }
             if ( $subrdbw =~ m/^UNITE$/ || substr( $ampliconType, 0, 3 ) eq "ITS" ){#overrides everything else
                 #printL "Using UNITE ITS ref seq database.\n", 0;
@@ -3756,7 +3763,7 @@ sub prepLtsOptions{
 		#print $refW."\n";
 		if ( -f $refW ) {
 			#die "$refDBwanted\n";
-		}elsif ( $refW =~ m/^(?:GG|GG2|KSGP|KSPG|SLV|UNITE|HITDB|PR2|BEETAX)$/i ) {
+		}elsif ( $refW =~ m/^(?:GG|GG2|KSGP|KSPG|SLV|UNITE|HITDB|PR2|BEETAX|UTAX|SINTAX)$/i ) {
 			#$refDBwanted = uc($refDBwanted);
 		}elsif ( $refW ne "" ) {
 			print "$refDBwanted not recognized. Aborting..\n";
@@ -3842,6 +3849,14 @@ sub prepLtsOptions{
 	my $defaultTaxAlig = getDefAligner();
 
 	getSimBasedTax();
+	#-refDB UTAX/SINTAX names the SINTAX classifier DB (a directory), which only -taxAligner sintax can search
+	if ( grep { m/^(?:UTAX|SINTAX)$/i } split /,/, $refDBwanted ) {
+		if ( $doBlasting == -1 ) {
+			$doBlasting = 3;
+		} elsif ( $doBlasting != 3 ) {
+			printL "-refDB $refDBwanted requires -taxAligner sintax\n", 63;
+		}
+	}
 
 	if ( $TaxOnly eq "0" && !defined($input) && !defined($outdir) && !defined($mapFile) ) { 
 		defined($input) or usage("-i option (input dir/files) is required\n");
@@ -3908,8 +3923,9 @@ sub prepLtsOptions{
 			printL	"Setting \"-tax_group\" to \"eukarya\" as only eukarya and fungi are supported options for $ampliconType.\n","w";
 		}
 
+		#SINTAX searches a DB directory with usearch; readPaths already required both
 		if (   $doBlasting == 0
-			|| ( !-f $blastBin &&  !-f $lambda3Bin && !-f $VSBin )  || @TAX_REFDB == 0 || !-f $TAX_REFDB[0] )
+			|| ( $doBlasting != 3 && ( ( !-f $blastBin &&  !-f $lambda3Bin && !-f $VSBin )  || @TAX_REFDB == 0 || !-f $TAX_REFDB[0] ) ) )
 		{
 			my $failedBlastITS = "ITS region was chosen as target; this requires a similarity based taxonomic annotation and excludes RDP tax annotation.\n";
 			$failedBlastITS .= "Blast similarity based annotation is not possible due to: ";
@@ -4030,8 +4046,8 @@ my @workflow_options = (
 
 my $taxonomy_heading = "Taxonomy options";
 my @taxonomy_options = (
-  ['-taxAligner <0|blast|lambda|utax|sintax|vsearch|usearch>', '(0) deactivate similarity alignment and use RDP classifier where available; blast/lambda/vsearch/usearch use similarity searches against reference databases; utax/sintax use UTAX/SINTAX-style classifiers. Default: 0.'],
-  ['-refDB <KSGP|SLV|GG2|HITdb|PR2|UNITE|beetax|file>', 'Reference DB for similarity-based taxonomic annotation. Built-in choices include SLV, KSGP, GG2, HITdb, PR2, UNITE and beetax. Multiple DBs can be comma-separated, with earlier entries taking priority. A custom FASTA can be supplied with -tax4refDB. Avoid combining databases with incompatible taxonomic levels. Default: none.'],
+  ['-taxAligner <0|blast|lambda|utax|sintax|vsearch|usearch>', '(0) deactivate similarity alignment and use RDP classifier where available; blast/lambda/vsearch/usearch use similarity searches against reference databases; utax/sintax classify with USEARCH against the SINTAX database directory configured as TAX_REFDB_SSU_UTAX or TAX_REFDB_ITS_UTAX (-refDB is not used). Default: 0.'],
+  ['-refDB <KSGP|SLV|GG2|HITdb|PR2|UNITE|beetax|file>', 'Reference DB for similarity-based taxonomic annotation. Built-in choices include SLV, KSGP, GG2, HITdb, PR2, UNITE and beetax; SINTAX selects -taxAligner sintax. Multiple DBs can be comma-separated, with earlier entries taking priority. A custom FASTA can be supplied with -tax4refDB. Avoid combining databases with incompatible taxonomic levels. Default: none.'],
   ['-tax4refDB <file>', 'Taxonomy file for a custom FASTA reference database supplied via -refDB. The file should contain one taxonomy annotation per reference sequence, tab-separated from the sequence ID.'],
   ['-amplicon_type <SSU|LSU|ITS|ITS1|ITS2|custom>', 'Marker type: SSU (16S/18S), LSU (23S/28S), ITS/ITS1/ITS2, or custom. This changes default quality filtering and activates marker-specific post-filtering. Default: SSU.'],
   ['-tax_group <bacteria|fungi|eukarya>', 'Target taxonomic group for annotation. Default: bacteria.'],
@@ -4938,64 +4954,47 @@ sub writeUTAXhiera($ $ $) {
     my %fails  = %{$failsR};
     my @avOTUs = @{$avOTUsR};
 
-    #parse utax output
+    #parse sintax -tabbedout (utax -utaxout): label, d:Name(conf),p:Name(conf),..., strand[, cutoff taxonomy]
     my %utStr;
     open I, "<$utout" or die "Can;t open $utout\n";
     while (<I>) {
-        chomp;
+        s/[\r\n]+$//;
         next if /^\s*$/;
         my @spl   = split /\t/, $_, -1;
-        die "Malformed UTAX output line in $utout: $_\n"
-          unless @spl >= 2 && defined($spl[0]) && $spl[0] ne "" && defined($spl[1]) && $spl[1] ne "";
-        my $k     = $spl[0];
-        my @spl2  = split( /,/, $spl[1] );
-        my $nline = "";
+        my ($k)   = $spl[0] =~ m/^(\S+)/;
+        die "Malformed UTAX output line in $utout: $_\n" unless defined($k);
+        $k =~ s/;size=\d+;.*//;    #same ID as readFasta
+        my @ranks = ("?") x 7;
         my $cnt   = 0;
-        foreach my $sus (@spl2) {
+        foreach my $sus ( split( /,/, $spl[1] // "" ) ) {    #empty: no hit
+            last if ( $cnt >= 7 );    #hiera holds Domain..Species
             $sus =~ s/^\S://;
             $sus =~ s/\"//g;
             my ($sus2, $confidence) = $sus =~ m/(^.*)\(([0-9]*\.?[0-9]+)\)$/;
             die "Malformed UTAX taxonomy field '$sus' for '$k' in $utout\n"
               unless defined($sus2) && defined($confidence);
-            if ( $confidence < $utaxConf ) {
-                $sus2 = "?";
-                if ( $cnt == 0 ) { $fails{$k} = 1; last; }
-            }
-            $nline .= $sus2 . "\t";
-            $cnt++;
+            last if ( $confidence < $utaxConf );    #like -sintax_cutoff: ranks below stay "?"
+            $ranks[ $cnt++ ] = $sus2;
         }
-        while ( $cnt < 7 ) { $nline .= "?\t"; $cnt++; }
-
-        #die $nline."\n$_";
-        $utStr{$k} = $nline;
+        $fails{$k} = 1 if ( $cnt == 0 );
+        $utStr{$k} = join( "\t", @ranks );
     }
     close I;
 
+    #OTU-first layout, as written by LCA: read by calcHighTax, biomFmt and l2phyloseq.R
     open H, ">", $SIM_hierFile or die "Can't open $SIM_hierFile\n";
-    print H "Domain\tPhylum\tClass\tOrder\tFamily\tGenus\tSpecies\tOTU\n";
-
-    #print all failed OTUs
-    my @faKeys = keys(%fails);
-    foreach (@faKeys) {
-        if ( exists( $utStr{$_} ) ) {
-            delete $fails{$_};
+    print H "${OTU_prefix}\tDomain\tPhylum\tClass\tOrder\tFamily\tGenus\tSpecies\n";
+    my $missing = 0;
+    foreach (@avOTUs) {
+        if ( !exists( $utStr{$_} ) ) {
+            $utStr{$_} = join( "\t", ("?") x 7 );
+            $fails{$_} = 1;
+            $missing++;
         }
-        else {
-            print H "?\t?\t?\t?\t?\t?\t?\t" . $_ . "\n";
-        }
+        print H "$_\t$utStr{$_}\n";
     }
-
-    #print newly derrived tax
-    foreach (@avOTUs) {    #(sort(keys(%{$taxr}))){
-        my $failed1 = exists( $fails{$_} );
-        if ( !$failed1 ) {    #actually print OTU taxonomy
-            die "Can;t find $_ key in utax\n" unless ( exists( $utStr{$_} ) );
-            print H $utStr{$_} . "$_\n";
-        }
-    }
-
-    #die "UTAX: ".@faKeys." unassigned OTUs\n";
     close H;
+    printL "$missing ${OTU_prefix}'s had no entry in $utout; reported as unassigned\n", "w" if ($missing);
     return ( \%fails );
 }
 
@@ -5484,6 +5483,7 @@ sub readOTUmat($) {
 
 sub utaxTaxAssign($ $) {
     my ( $query, $taxblastf ) = @_;
+    $REFTAX = 1; #hiera_BLAST.txt feeds higher level tables, biom and phyloseq (as in doDBblasting)
     if ( !-f $usBin ) { printL "usearch binary not found: $usBin\n", 81; }
     my $dbfa = $TAX_REFDB[0];
     if ( !-d $dbfa ) { printL "wrong utax database dir: $dbfa\n", 82; }
@@ -5512,6 +5512,7 @@ sub utaxTaxAssign($ $) {
 		$taxnm = "UTAX";
 	} else {
 		$cmd .= "$usBin -sintax $query -db $utUdb -tabbedout $taxblastf -threads $BlastCores -strand both;";
+		$citations .= "SINTAX (USEARCH v$usearchVer) taxonomic classification: Edgar RC. 2016. SINTAX: a simple non-Bayesian taxonomy classifier for 16S and ITS sequences. bioRxiv 074161. doi: 10.1101/074161\n" unless ( $citations =~ m/SINTAX \(USEARCH/ );
 	}
 
     #die $utaCmd."\n";
@@ -5780,6 +5781,7 @@ sub assignTaxOnly($ $) {
         my $utaxRaw = "$lotus_tempDir/tax.blast";
         my $utout   = utaxTaxAssign( $taxf, $utaxRaw );
         $failsR = writeUTAXhiera( $utout, $tax_only_ids_ref, $failsR );
+		reworkSIMhiera($SIM_hierFile);#only for removing unwanted tax
     }
     elsif ( -f $LCABin && $blastFlag) {# && $maxHitOnly != 1 ) {
         my @blOuts = ();
@@ -5822,7 +5824,8 @@ sub makeAbundTable2($ $) {
         my $utaxRaw = "$lotus_tempDir/tax.blast";
         my $utout   = utaxTaxAssign( $OTUfa, $utaxRaw );
         $failsR = writeUTAXhiera( $utout, $avOTUsR, $failsR );
-    
+        %fails  = %{$failsR}; #returned below
+		reworkSIMhiera($SIM_hierFile);#only for removing unwanted tax
 	} elsif ( $blastFlag ) {#&& $maxHitOnly != 1 ) {
 		#TODO: maxHitOnly
         my @blOuts = ();
