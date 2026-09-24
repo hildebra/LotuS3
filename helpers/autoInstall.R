@@ -40,11 +40,15 @@ install_cran_pkg <- function(pkg) {
   }
 
   message("Installing CRAN package: ", pkg)
+  # withCallingHandlers logs warnings and lets the install continue; a tryCatch
+  # warning handler would abandon install.packages at its first warning.
   ok <- tryCatch({
-    install.packages(pkg, repos = cran_repo, dependencies = TRUE, quiet = FALSE)
-    pkg_available(pkg)
-  }, warning = function(w) {
-    message("WARNING while installing ", pkg, ": ", conditionMessage(w))
+    withCallingHandlers(
+      install.packages(pkg, repos = cran_repo, dependencies = TRUE, quiet = FALSE),
+      warning = function(w) {
+        message("WARNING while installing ", pkg, ": ", conditionMessage(w))
+        invokeRestart("muffleWarning")
+      })
     pkg_available(pkg)
   }, error = function(e) {
     message("ERROR while installing ", pkg, ": ", conditionMessage(e))
@@ -66,10 +70,12 @@ ensure_biocmanager <- function() {
 
   message("Installing CRAN package: BiocManager")
   ok <- tryCatch({
-    install.packages("BiocManager", repos = cran_repo, dependencies = TRUE, quiet = FALSE)
-    pkg_available("BiocManager")
-  }, warning = function(w) {
-    message("WARNING while installing BiocManager: ", conditionMessage(w))
+    withCallingHandlers(
+      install.packages("BiocManager", repos = cran_repo, dependencies = TRUE, quiet = FALSE),
+      warning = function(w) {
+        message("WARNING while installing BiocManager: ", conditionMessage(w))
+        invokeRestart("muffleWarning")
+      })
     pkg_available("BiocManager")
   }, error = function(e) {
     message("ERROR while installing BiocManager: ", conditionMessage(e))
@@ -92,14 +98,16 @@ install_bioc_pkg <- function(pkg) {
 
   message("Installing Bioconductor package: ", pkg)
   ok <- tryCatch({
-    if (!is.na(bioc_version) && nzchar(bioc_version)) {
-      BiocManager::install(pkg, version = bioc_version, ask = FALSE, update = FALSE)
-    } else {
-      BiocManager::install(pkg, ask = FALSE, update = FALSE)
-    }
-    pkg_available(pkg)
-  }, warning = function(w) {
-    message("WARNING while installing ", pkg, ": ", conditionMessage(w))
+    withCallingHandlers({
+      if (!is.na(bioc_version) && nzchar(bioc_version)) {
+        BiocManager::install(pkg, version = bioc_version, ask = FALSE, update = FALSE)
+      } else {
+        BiocManager::install(pkg, ask = FALSE, update = FALSE)
+      }
+    }, warning = function(w) {
+      message("WARNING while installing ", pkg, ": ", conditionMessage(w))
+      invokeRestart("muffleWarning")
+    })
     pkg_available(pkg)
   }, error = function(e) {
     message("ERROR while installing ", pkg, ": ", conditionMessage(e))
@@ -129,6 +137,7 @@ if (length(failed) > 0) {
     "could not be installed. Please install it manually in your R environment."
   )
   message(msg)
+  cat(msg, "\n", sep = "") # stdout too: autoInstall.pl only captures stdout for its final warning
   if (stop_on_fail) {
     quit(status = 1, save = "no")
   }

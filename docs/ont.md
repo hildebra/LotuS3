@@ -162,7 +162,7 @@ Add `--dry-run` to your intended command to validate configuration, input paths,
 Run the wiring regression suite with:
 
 ```bash
-PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests -p 'ont_integration.py' -v
+prove -v tests/ont_integration.t
 ```
 
 The suite runs real bundled SDM with small synthetic reads and controlled stand-ins for Savont, Barbell, and the mappers. A temporary copy of the pipeline stops after SDM writes the abundance matrix; taxonomy and other unrelated downstream stages are outside these tests. The tests check pooled gzip input with offset/substitution/insertion/deletion barcodes, reverse-complement reads and reversed qualities, search-window and two-end rules, initial-call-only ONT flags, SDM version gating, primer trimming, rejection of low-average-quality/low-window-quality/ambiguous/primer-missing reads, exclusion of secondary-quality reads, empty-input handling, retention of duplicate reads, shared read names across samples, zero-hit samples, grouped counts, VSEARCH FASTA conversion, dereplication for other clusterers, multiple-ASV consensus/count preservation, dropped barcodes, option validation, tool failures, and dry-run preservation. Real ONT data and installed external tools are still needed for biological validation.

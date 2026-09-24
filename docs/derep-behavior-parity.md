@@ -2,7 +2,7 @@
 
 Copied from the SDM workstream on 2026-09-15. Source/build/test paths in this
 report refer to the SDM repository; LotuS also includes the standalone count
-auditor at `tests/audit_derep_counts.py`.
+auditor as `tests/audit_derep_counts.pl` (a Perl port with the same arguments and output).
 
 Investigated on 2026-09-15. Default coarse output preserves exact dereplicates, but quality retention is not yet a behavior-preserving switch for an ordinary workflow using merged search. Two retention-specific admission bugs were corrected in this update. HQ seed exports now preserve full available mates and their observed qualities, including hidden tails. Native merged-search support and abundance-only handling of physically empty mates still require changes.
 

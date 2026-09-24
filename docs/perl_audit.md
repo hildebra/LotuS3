@@ -42,12 +42,14 @@ The pinned Barbell source uses `<barcode>.trimmed.fastq`, matching the port. Its
 Run the regression suites with:
 
 ```bash
-PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests -p '*.py' -v
+prove -v tests/
 ```
+
+The suites were ported from Python `unittest` to Perl `Test::More` on 2026-09-24, keeping every test case; LotuS3 no longer ships Python.
 
 The suites comprise 25 installer/extraction tests, 11 interactive installer tests, 51 ONT integration/converter tests, and 26 Perl-audit tests. All pass in this environment. Perl syntax checks also pass for `lotus3`, `helpers/autoInstall.pl`, `helpers/autoMap.pl`, and `bin/savont2uc.pl`; `git diff --check` passes.
 
-Bioconda extraction tests require `zstd` on `PATH` or an executable path supplied through `LOTUS_TEST_ZSTD`; unavailable extraction dependencies are reported as skipped tests. Python is used by the development test harness, not by the LotuS installer or pipeline.
+Bioconda extraction tests require `zstd` on `PATH` or an executable path supplied through `LOTUS_TEST_ZSTD`; unavailable extraction dependencies are reported as skipped tests. Neither the test harness nor the installer or pipeline uses Python.
 
 The interactive installer tests exercise the real prompts, prerequisite checks and ONT registration in temporary installations, then stop at the database-download boundary. They cover Enter/`1` defaults, detailed ONT acceptance/refusal, invalid answers, EOF, license refusal, and database-only/refresh modes. They do not download the full database set or build all secondary programs.
 

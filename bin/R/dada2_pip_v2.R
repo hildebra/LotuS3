@@ -352,7 +352,8 @@ map_path=args[5]
 bp4error = 5e7
 
 #read map to get file locations, sampleRuns etc
-mapping=as.matrix(read.delim(map_path,check.names = FALSE,as.is=TRUE,header=TRUE,sep="\t"))
+#character columns: numeric-looking SampleIDs/SequencingRuns (e.g. "01") must not be converted or padded
+mapping=as.matrix(read.delim(map_path,check.names = FALSE,as.is=TRUE,colClasses="character",header=TRUE,sep="\t"))
 #-------------- prep the input (demultiplexed) file paths --------------
 subset_map <- rep("A", nrow(mapping))
 if ("SequencingRun" %in% colnames(mapping)){ #explicitly defined groups of sequencing runs
@@ -465,7 +466,7 @@ for (i in sort(names(tSuSe))){
 	# Learn forward error rates
 	#forward read error rates
 	if (mergedData){
-		defMergeFile = listM[[i]][0]
+		defMergeFile = listM[[i]][1]
 		filtMs <- file.path(listM[[i]]);	names(filtMs) <- sampleNames;filtMs = filtMs[file.exists(filtMs)]
 		keepM = nonEmptyFastq(filtMs)
 		if (any(!keepM)) cat(paste0("  Skipping ",sum(!keepM)," empty/0-read sample(s) for error learning: ",paste(names(filtMs)[!keepM],collapse=", "),"\n"))
@@ -565,10 +566,10 @@ if (length(args)>5){
 			ldada[[i]]=dada(tDerep[[i]],err=locErr,multithread=ncores)
 		}
 		cnt = cnt+1
-		names(ldada)[length(ldada)] <- i
 	}
-	names(tDerep) <- sort(names(tSuSe))
-	names(ldada)  <- sort(names(tSuSe))
+	#runs with an empty derep file have no dada result; keep both lists aligned
+	ldada  <- ldada[intersect(sort(names(tSuSe)), names(ldada))]
+	tDerep <- tDerep[names(ldada)]
 	for (kk in names(ldada)) {
 		#remove chimeras in subsets
 		num_prev = length(ldada[[kk]]$denoised)
@@ -578,8 +579,8 @@ if (length(args)>5){
 		isBimera = isBimeraDenovo(ldada[[kk]],multithread=ncores,verbose=TRUE) 
 		#ldada[[kk]]$denoised = ldada[[kk]]$denoised 
 		
-		sum_aft = sum(ldada[[kk]]$clustering$abundance[unname(isBimera)])
-		num_aft = sum(isBimera)
+		sum_aft = sum(ldada[[kk]]$clustering$abundance[!unname(isBimera)])
+		num_aft = sum(!isBimera)
 		cat(paste0("Removed ",num_prev-num_aft," chimeric ASVs(",sum_prev-sum_aft," read counts)\n"))
 		
 		ldada[[kk]]$clustering = ldada[[kk]]$clustering[!isBimera,]
@@ -587,7 +588,8 @@ if (length(args)>5){
 		
 		
 		tmp =names(ldada[[kk]]$denoised)
-		ldada[[kk]]$denoised = seq(length(ldada[[kk]]$denoised))
+		#keep the original cluster indices: $map still refers to the pre-chimera-removal numbering
+		ldada[[kk]]$denoised = unname(which(!isBimera))
 		names(ldada[[kk]]$denoised) = tmp
 
 	}

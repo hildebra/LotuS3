@@ -1,5 +1,9 @@
 *.sh
-tests/__pycache__/*
+# LotuS3 ships Perl (and R) only: keep Python scripts and caches out of the repository
+*.py
+__pycache__/
+# Claude Code settings, worktrees and other local agent files
+.claude/
 runs
 runs/*
 sqLOGs

@@ -147,7 +147,8 @@ The README is intentionally short. Detailed documentation is split across the [`
 - [`docs/pacbio.md`](docs/pacbio.md) - PacBio CCS/HiFi amplicon processing;
 - [`docs/ont.md`](docs/ont.md) - ONT amplicons with Savont ASVs and optional Barbell demultiplexing;
 - [`docs/troubleshooting.md`](docs/troubleshooting.md) - installation, self-test and runtime troubleshooting;
-- [`docs/citations.md`](docs/citations.md) - LotuS3, third-party software and database citations.
+- [`docs/citations.md`](docs/citations.md) - LotuS3, third-party software and database citations;
+- [`tests/README.md`](tests/README.md) - running the developer regression tests (`prove tests/`).
 
 ## Updating LotuS3
 

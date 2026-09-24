@@ -67,7 +67,7 @@ if((file.exists(path_TREE))) {
 # Read the metadata:
 #sd=read.table(text = gsub(",", "\t", readLines(path_SD)))
 sdA=scan(file=path_SD,nlines =1,sep ="\t",what="character")
-sd=read.table(path_SD,sep="\t",row.names=1,header=FALSE,comment.char="#",as.is=TRUE)
+sd=read.table(path_SD,sep="\t",row.names=1,header=FALSE,comment.char="#",as.is=TRUE,colClasses=c(V1="character")) #keep IDs like "01" intact
 colnames(sd) = sdA[-1]
 
 # Read the taxonomy table:

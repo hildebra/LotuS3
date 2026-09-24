@@ -1359,7 +1359,7 @@ sub get_DBs{
 		
 		#index creation/download
 		#getS2("https://lotus2.earlham.ac.uk/lambdaDBs/v3.0/sh_refs_v9_25.07.2023.fasta.lba.gz","$UNITEdb.fasta.lba.gz") if ($downloadLmbdIdx);
-		getS2("https://lotus2.earlham.ac.uk/packs/DB/UNITE/Lambda3/sh_refs_v10_19.02.2025.fasta.lba.gz","$UNITEdb.fasta.lba.gz") if ($downloadLmbdIdx);
+		getS2("https://lotus2.earlham.ac.uk/lotus/packs/DB/UNITE/Lambda3/sh_refs_v10_19.02.2025.fasta.lba.gz","$UNITEdb.fasta.lba.gz") if ($downloadLmbdIdx);
 		buildIndex("$UNITEdb.fasta");
 		
 		@txt = addInfoLtS("TAX_REFDB_ITS_UNITE","$UNITEdb.fasta",\@txt,1);

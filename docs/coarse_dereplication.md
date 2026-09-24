@@ -86,8 +86,8 @@ to compare the corrected workflow. A normal full run regenerates these stages;
 ## Validation
 
 ```sh
-python3 -m unittest discover -s tests -p coarse_derep.py -v
-python3 tests/audit_derep_counts.py /scratch/run/derep.fas
+prove -v tests/coarse_derep.t
+perl tests/audit_derep_counts.pl /scratch/run/derep.fas
 ```
 
 The integration regression compares an ordinary run against coarse identities
