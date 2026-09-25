@@ -168,7 +168,7 @@ sub check_handoff {
     my ($t, $paired, $identity) = @_;
     $t->capture_wrapper;
     my $result = $t->run_lotus(extra => [@{ $t->inputs($paired) }, '-coarseDerep', $identity], ok => 0);
-    contains($result->{output}, 'SDM retained-variant seed extension failed');
+    contains($result->{output}, 'SDM seed extension failed');
     lacks($result->{output}, 'Fallback to');
     my $args = json_decode(read_text($t->{seed_call}));
     is(after($args, '-seedSubclusters'), '1', '-seedSubclusters 1');
@@ -382,6 +382,23 @@ handoff test_missing_reconstructed_mate_fails_before_seed_command => sub {
     contains($result->{output}, 'Missing or empty SDM seed FASTQ');
     ok(!-e $t->{seed_call}, 'no seed call');
     ok(!-e "$t->{out}/primary/sdm_dereplication.json", 'no dereplication metadata');
+};
+
+handoff test_failed_seed_extension_aborts_before_abundance_steps => sub {
+    my $t = shift;
+    $t->capture_wrapper;
+    # The whole pipeline: a fallback would reach read merging and the abundance table.
+    write_text($t->{script}, read_text("$ROOT/lotus3"));
+    for my $paired (0, 1) {
+        subtest "paired=$paired" => sub {
+            $t->{out} = "$t->{root}/failed_seed_$paired";
+            my $result = $t->run_lotus(extra => $t->inputs($paired, retain => 0), ok => 0);
+            is($result->{status} >> 8, 31, 'exit status 31');
+            contains($result->{output}, 'SDM seed extension failed, so no OTU abundance matrix was built');
+            lacks($result->{output}, $_) for 'Fallback to', 'fasta seed sequences', "Can't open expected OTU counts";
+            ok(-s "$t->{out}/tmpFiles/tmp_otu.fa", 'clustered OTUs not overwritten');
+        };
+    }
 };
 
 handoff test_default_hq_path_still_counts_without_coarse_flags => sub {
@@ -618,9 +635,6 @@ handoff test_storage_only_matches_ordinary_outputs_qualities_and_seed_command =>
     my $snapshot = "$t->{root}/preprocessing.json";
     my $seed_call = "$t->{root}/seed_call.json";
     @{ $t->{env} }{qw(COARSE_TEST_REAL_SDM COARSE_TEST_SNAPSHOT COARSE_TEST_SEED_CALL)} = ($SDM, $snapshot, $seed_call);
-    # The existing checkpoint precedes FASTA assembly for paired seeds.
-    my $checkpoint = 'atomic_write_text("$outdir/ont_test_state.json",';
-    write_text($t->{script}, replace_once(read_text($t->{script}), $checkpoint, "mergeRds() if \$numInput == 2;\n$checkpoint"));
     my $fragment = substr($t->{seq}, 0, 420);
     for my $mode ([0, 0], [1, 0], [1, 1]) {
         my ($paired, $merge) = @$mode;

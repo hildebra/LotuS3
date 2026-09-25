@@ -207,7 +207,7 @@ sub new {
     die "lotus3 checkpoint missing or ambiguous\n" if $at < 0 || index($src, $checkpoint, $at + 1) >= 0;
     substr($src, $at, 0) = <<'PERL';
 atomic_write_text("$outdir/ont_test_state.json", JSON::PP->new->encode({
-    seed => $OTUSEED, seed_extension => $seedExtDone, map => $mapHref, combined => $combHref,
+    seed => $OTUSEED, map => $mapHref, combined => $combHref,
     sdm_options => $sdmOpt, cluster => $ClusterPipe, preset => $mini2RdPreset, dereplication => $sdmDerepDo}));
 write_repro_manifest(); release_output_lock(); exit(0);
 PERL
@@ -315,7 +315,6 @@ sub check_counts {
     my %got; @got{ @head[1 .. $#head] } = map { 0 + $_ } @row[1 .. $#row];
     is_deeply(\%got, $expected // { s1 => 4, s2 => 3 }, 'sample counts');
     my $state = json_decode(read_text("$t->{out}/ont_test_state.json"));
-    is($state->{seed_extension}, 1, 'seed extension ran');
     return $state;
 }
 

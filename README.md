@@ -42,7 +42,7 @@ If you already have a suitable conda environment, you can also install LotuS3 di
 conda install -c conda-forge -c bioconda LotuS3
 ```
 
-LotuS3 requires Perl 5, a C++17-capable compiler, R and Java. These dependencies are normally handled by the conda installation or by the GitHub autoinstaller described below.
+LotuS3 requires Perl 5.14 or newer (standard modules only, no CPAN installs), a C++17-capable compiler, R and Java. These dependencies are normally handled by the conda installation or by the GitHub autoinstaller described below.
 
 For more details, see [`docs/installation.md`](docs/installation.md).
 
@@ -158,13 +158,13 @@ If LotuS3 was installed with `git clone`, update the code with:
 git pull
 ```
 
-LotuS3 also has a built-in update mechanism through the autoinstaller. If LotuS3 was first installed with:
+Then rerun the autoinstaller to refresh programs and databases:
 
 ```bash
 perl helpers/autoInstall.pl
 ```
 
-then running the autoinstaller again checks for updates. Previously downloaded proprietary programs and databases do not need to be downloaded again. If no updates are available, the autoinstaller exits without making changes, so it can be run periodically.
+The autoinstaller does not update LotuS3 itself; use `git pull` (or `conda update lotus3` for Bioconda). All installer downloads are verified against pinned SHA-256 checksums.
 
 More installation and update details are available in [`docs/installation.md`](docs/installation.md).
 

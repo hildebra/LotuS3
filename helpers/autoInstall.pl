@@ -31,9 +31,11 @@ use File::Spec;
 use File::Temp qw(tempdir);
 use POSIX qw(uname);
 use IO::Uncompress::Gunzip qw(gunzip $GunzipError);
+use IPC::Open3 qw(open3);
+use File::Glob qw(bsd_glob); #unlike glob(), does not split patterns at whitespace in install paths
 sub addInfoLtS;sub finishAI;
 #subroutines to download various DBs..
-sub getGG; sub getGG2; sub getSLV;sub getHITdb; sub getPR2db;sub getKSGP;sub getbeetax;
+sub getGG2; sub getSLV;sub getHITdb; sub getPR2db;sub getKSGP;sub getbeetax;
 sub buildIndex;
 sub get_DBs;
 sub getS2;
@@ -42,7 +44,6 @@ sub getInstallVer;
 sub compile_sdm;
 sub compile_LCA;
 sub install_bundled_rtk;
-sub checkLtsVer;
 sub version_is_newer;
 sub check_version;
 sub user_options;
@@ -56,16 +57,12 @@ sub copy_file_atomic;
 sub replace_tree_atomic;
 sub ensure_dir;
 sub verify_sha256;
-my $FILEfetch = eval{
-  require File::Fetch;
-  File::Fetch->import();
-  1;
-};
-my $LWPsimple = eval{
-  require LWP::Simple;
-  LWP::Simple->import();
-  1;
-};
+# Only core Perl modules are used. Downloads go through wget or curl, or HTTP::Tiny (core)
+# when the optional SSL modules it needs for https are installed.
+BEGIN { die "The LotuS3 installer needs Perl 5.14 or newer (found $]).\n" if $] < 5.014 }
+require HTTP::Tiny;
+#can_ssl only exists in newer HTTP::Tiny releases (Perl >= 5.22)
+sub http_tiny_https { return (HTTP::Tiny->can('can_ssl') && HTTP::Tiny->can_ssl) ? 1 : 0 }
 my $forceUpdate=0;
 my $condaDBinstall=0;
 my $downloadLmbdIdx = 0; #download lambda index from webpage
@@ -74,8 +71,67 @@ my $usearchInstall = "";
 my $noTelemetry = 0;
 my $ontOnly = 0;
 my $withBarbell = 0; #accepted for compatibility; Barbell is included with ONT tools
+my $showHelp = 0;
+my @pendingLambdaIndex; #databases waiting for lambda3, which a fresh install adds after the databases
+
+# SHA-256 of every file the installer downloads, recorded from the upstream files on 2026-09-25.
+# getS2 refuses any URL that is neither listed here nor given an explicit checksum by its caller,
+# so a changed or substituted file stops the installation instead of being installed.
+# To move to a new release: download it, check it, and replace URL and checksum together.
+my %PINNED_SHA256 = (
+	# programs
+	'https://lotus2.earlham.ac.uk/lotus/packs/ITSx_1.1.4.tar.gz' => '513a83a10f991f83571f466e9b81b7f4fcb5958396d0cdfe9977e24ebc330ac2',
+	'https://lotus2.earlham.ac.uk/lotus/packs/ncbi-blast-2.2.29+-x64-linux.tar.gz' => 'f53e97aaff424c2583cebff76a318f36610b5444657cee2b2072513ca907fedf',
+	'https://github.com/seqan/lambda/releases/download/lambda-v3.1.0/lambda3-3.1.0-Linux-x86_64.tar.xz' => '854e42d41521c483a0e6a92730fc1daf058ca8df9c0fe7af40b66f4e885d2d49',
+	'https://github.com/seqan/lambda/releases/download/lambda-v3.1.0/lambda3-3.1.0-Darwin-x86_64.zip' => '51f546f78300277962af810e66ee8019a232d99c6dd5b2e265d02c39c24241b0',
+	'https://lotus2.earlham.ac.uk/lotus/packs/swarm2.1.13.zip' => 'bbfb326adc68d1ac96603a8eb828dc591dac9f1410cbac144054f078d8a433d9',
+	'https://lotus2.earlham.ac.uk/lotus/packs/infernal/infernal-1.1.2-macosx-intel.tar.gz' => '87adbf63c61f66127f14823f1a17451fa960567d0dfdc1d72735a16d41a6a171',
+	'https://lotus2.earlham.ac.uk/lotus/packs/infernal/infernal-1.1.2-linux-intel-gcc.tar.gz' => 'ad062059dfff6450d4a9417846e2695087f5b7c13d64a6deef4a5bcb51b75f3e',
+	'https://lotus2.earlham.ac.uk/lotus/packs/VXtractor/vxtractor.pl' => '76f7d103470a89d4dfad19a4c444b7095feaba37b7de241bc2619fc849f1f739',
+	'https://lotus2.earlham.ac.uk/lotus/packs/VXtractor/HMMs.zip' => 'eb5e2dac2b0919251897510dd88405a0ac89cff4ee3457c9d581ccb08556bfe8',
+	'https://github.com/iqtree/iqtree2/releases/download/v2.1.1/iqtree-2.1.1-MacOSX.zip' => '300a696f2527cadc05f87c4cfea9b2a29964b6ae754bfc52e49375f9fa241787',
+	'https://github.com/iqtree/iqtree2/releases/download/v2.1.1/iqtree-2.1.1-Linux.tar.gz' => '594f23ee2ec04bfb7126c0d95f9c75efcda4718816d2a7f113689bf617fa7313',
+	'https://mafft.cbrc.jp/alignment/software/mafft-7.471-mac.zip' => 'c388f9bb85b8ccbdb7d425ac01b5865c84ce27f2051e86fad5f9eb118dd31b1a',
+	'https://mafft.cbrc.jp/alignment/software/mafft-7.471-linux.tgz' => 'f85019489117dc554da5cf43ec331ae61dc93be57d43ec35bbeaebc4f55b4380',
+	'https://lotus2.earlham.ac.uk/lotus/packs/FastTree.c' => 'da148297bb64711e43e38481186228496d418bb4ec0166e09df62a72248085a0',
+	'https://lotus2.earlham.ac.uk/lotus/packs/cd-hit_git.zip' => 'ef5ccb22b0d0faa816f744dbb83c5571db0ac089e49f0a6f57848ada37ac29b3',
+	'https://lotus2.earlham.ac.uk/lotus/packs/rdp_classifier_2.12.zip' => '977896248189a1ce2146dd3a61d203c3c6bc9aa3982c60332d463832922f7d0a',
+	'https://lotus2.earlham.ac.uk/lotus/packs/clustalo-1.2.0-Ubuntu-x86_64' => '2b04eef987d1c5ae73fafc1bd3998250607030eb7e936075d7e4edc9992e228c',
+	'https://github.com/rcedgar/usearch12/releases/download/v12.0-beta1/usearch_linux_x86_12.0-beta' => '4193abead8c7e1609dd28148bb36ad9667c67647c6f784f2bdd72af9de27f3dc',
+	'https://github.com/torognes/vsearch/releases/download/v2.32.0/vsearch-2.32.0-linux-x86_64.tar.gz' => 'c9d7ad4e10e942286ad84004a913e0f2f82957f6156c97a7d6d2389750dd6e41',
+	'https://github.com/torognes/vsearch/releases/download/v2.32.0/vsearch-2.32.0-linux-aarch64-static.tar.gz' => 'b651509e69b5c0667cebb8e9f555bf18443e48e9decf84a3467e41fb091d74cb',
+	'https://github.com/torognes/vsearch/releases/download/v2.32.0/vsearch-2.32.0-macos-universal.tar.gz' => 'a55e5c2a9a66e8dbc58543a2afe161631e0424b6a6c323eda2f87269c565aed3',
+	# reference and chimera databases
+	'https://lotus2.earlham.ac.uk/lotus/packs/DB/phiX.fasta' => '398563e14ebb13248eaaa3bdcb95a36a90172e016f7c1c0527382a590d2c811a',
+	'https://lotus2.earlham.ac.uk/lotus/packs/rdp_gold.fa.gz' => '1b64cfb56efa27fb28325522dd2d29f0a900888b8f1a64741c5e943b71debf69',
+	'https://lotus2.earlham.ac.uk/lotus/packs/SILVA_119_LSU_93.ref.fasta.gz' => '53f3d0728d8a7e4760b3170e84e790815d1f0f5874ff6e705b96a777f2e13de6',
+	'https://lotus2.earlham.ac.uk/lotus/packs/hitdb/HITdb_sequences.fna' => '4c4cc7c1316928308c5cca179faad02e3f97ac5c6e31393e27d721161cd1e7d5',
+	'https://lotus2.earlham.ac.uk/lotus/packs/hitdb/HITdb_taxonomy_qiime.txt' => 'dda14eb2315fbf58130cfc75d0f416cf9d362727bad40e6204c0b66992ce47ae',
+	'https://lotus2.earlham.ac.uk/lambdaDBs/v3.0/HITdb_sequences.fasta.lba.gz' => '5fc0b88214772d0e61890f5017deaab4396c0a23050722aa13136a6fd48130cb',
+	'https://lotus2.earlham.ac.uk/lotus/packs/DB/beeTax_Engel/beEngel.fna' => '00e6dde860b5a840b904e48f02165208782aaf20679895b4183b5cff5993e80a',
+	'https://lotus2.earlham.ac.uk/lotus/packs/DB/beeTax_Engel/beEngel.txt' => '01b0fa5c7a23450d1f3e8ed351d23b58541cfd0e64374d33fdd7964b1f2b1d49',
+	'https://lotus2.earlham.ac.uk/lambdaDBs/v3.0/beeTax.fasta.lba.gz' => '37e2a1db53559c97e7436f775953c322224a1c56849558c0e707357c6ec5fb4b',
+	'https://lotus2.earlham.ac.uk/lotus/packs/DB/PR2//pr2_version_5.0.0_SSU_UTAX.fasta.gz' => '4239d2d441f8ac8e2bb6c357a425d62a8b431df1c8f4e66105ee6d76e73f9c48',
+	'https://lotus2.earlham.ac.uk/lotus/packs/DB/UNITE/uchime/uchime_UNITE_16_10_22.zip' => 'd5f995e3e87074d78296538140ec2f9d6ece9bac3de26ca48b818f1215c506e3',
+	'https://drive5.com/utax/data/utax_rdp_16s_tainset15.tar.gz' => 'f6655af6f78e1c612d4c9c0cd750821a7ac0f590022cf7087ef1849e5df1a05f',
+	'https://drive5.com/utax/data/utax_unite_v7.tar.gz' => '6c4dca38eae84b0441a8512151b9047b4d3b355270b7e4cc2b7cd7a8d84ba8d4',
+	'https://lotus2.earlham.ac.uk/lotus/packs/DB/KSGPv4.0/KSGP_v4.0.fasta.gz' => '8dab2647fa53f83427b95e947b115442f4d9833484ebf4dd355c33f78ec1f62f',
+	'https://lotus2.earlham.ac.uk/lotus/packs/DB/KSGPv4.0/KSGP_plus2.tax.gz' => '6a064388f0beac30a115f9c81e9b4ad2c826d3a12e541562aca4376c24a2c8cd',
+	'https://lotus2.earlham.ac.uk/lotus/packs/DB/KSGPv4.0/KSGPv4.0.fasta.lba.gz' => '33e710dc9f0c72cc761eedb7fcad6e031d5e1b84fc18fe2fc85e8befb98ffa51',
+	'https://lotus2.earlham.ac.uk/lotus/packs/DB/UNITE/sh_general_release_dynamic_s_all_19.02.2025.fasta.gz' => 'a51cf593618534ee642ebcc320d8ea412c645983a2c026d887a82e27c96460db',
+	'https://lotus2.earlham.ac.uk/lotus/packs/DB/UNITE/Lambda3/sh_refs_v10_19.02.2025.fasta.lba.gz' => '9c279ab807e79d43dc7b788cd44736671eefc5f86a5e4fc84cd86e0c698b0403',
+	'https://ksgp.earlham.ac.uk/downloads/greengenes2/GG2.2022.10.fasta.gz' => '38c581c7d18360aadb7504aec10b012fcbd1fb3b28ddade02c925a3cf0f0d6bf',
+	'https://ksgp.earlham.ac.uk/downloads/greengenes2/GG2.2022.10.tax.gz' => '673122791d3f6fce079fae1c775f670775437bfa9658238278305c6399b6fc91',
+	'https://ftp.arb-silva.de/release_138.1/Exports/SILVA_138.1_SSURef_NR99_tax_silva.fasta.gz' => '7078a4e54ee962ca3108e776b8935795c744869e73e24c4718b8b5ff240410d0',
+	'https://ftp.arb-silva.de/release_138.1/Exports/taxonomy/tax_slv_ssu_138.1.txt.gz' => '887627935d83cc0ad88fb3cac93b154470304fec6e73cbb2a04ae625427a203d',
+	'https://ftp.arb-silva.de/release_138.1/Exports/SILVA_138.1_LSURef_tax_silva.fasta.gz' => '43e3b8183c11343df2b0fcb98cdae5aa9bdc98f1091974698698969e5bb6a748',
+	'https://ftp.arb-silva.de/release_138.1/Exports/taxonomy/tax_slv_lsu_138.1.txt.gz' => 'bfc32b01b1285857bdbc0d06bd0f62e4d8efc80c71adcad0a9c07aab0bc158e6',
+	'https://lotus2.earlham.ac.uk/lambdaDBs/v3.0/GG2.2022.10.fasta.lba.gz' => '764dfa7a04067ef6a30a92d7689dc1bec1a2256ff3b46f6dc9c72ec705f700f5',
+	'https://ksgp.earlham.ac.uk/lambdaDBs/v3.0/SLV_138.1_SSU.fasta.lba.gz' => 'c320cfd668a6da868f0f9283f1f051c1a90d8041fa77e4fd5c60fed0609b8fce',
+);
 
 GetOptions(
+	"h|help"          => \$showHelp,
 	"forceUpdate"     => \$forceUpdate,
 	"condaDBinstall"  => \$condaDBinstall,
 	"downloadLmbdIdx" => \$downloadLmbdIdx,
@@ -84,9 +140,38 @@ GetOptions(
 	"no-telemetry"    => \$noTelemetry,
 	"ont-only"        => \$ontOnly,
 	"with-barbell"    => \$withBarbell,
-) or die "Invalid command line options\n";
+) or die "Invalid command line options (see perl helpers/autoInstall.pl --help)\n";
 
-if ($ontOnly && ($forceUpdate || $condaDBinstall || $compile_lambda || $downloadLmbdIdx || $usearchInstall ne "")) {
+if ($showHelp) {
+	print <<'HELP';
+LotuS3 autoinstaller: installs programs and reference databases into this LotuS3 directory
+and registers them in lOTUs.cfg. Every download is checked against a pinned SHA-256 checksum.
+
+Usage: perl helpers/autoInstall.pl [options]
+
+  (no option)        interactive installation; a rerun offers to refresh databases/programs
+  --ont-only         install or register only the ONT tools (minimap2, Savont, Barbell)
+  -condaDBinstall    non-interactive download of the standard database set (Bioconda installs)
+  -downloadLmbdIdx   download prebuilt Lambda indices instead of building them
+  -lambdaIndex       build Lambda indices for the installed databases
+  -link_usearch PATH register an existing USEARCH binary and exit
+  --no-telemetry     do not send the anonymous installation ping (install ID and versions)
+  --with-barbell     accepted for compatibility; Barbell is part of the ONT tools
+  -h, --help         show this help
+
+Update LotuS3 itself with "git pull" (GitHub checkout) or "conda update lotus3" (Bioconda).
+HELP
+	exit(0);
+}
+
+if ($forceUpdate) {
+	#the old online updater fetched and unpacked an unverifiable archive over plain HTTP
+	die "-forceUpdate is no longer supported: the online updater could not verify what it downloaded.\n"
+		. "Update LotuS3 with \"git pull\" in a GitHub checkout or \"conda update lotus3\" for Bioconda,\n"
+		. "then rerun perl helpers/autoInstall.pl to refresh programs and databases.\n";
+}
+
+if ($ontOnly && ($condaDBinstall || $compile_lambda || $downloadLmbdIdx || $usearchInstall ne "")) {
 	die "--ont-only cannot be combined with database, update, or USEARCH-link modes.\n";
 }
 
@@ -99,6 +184,7 @@ if ($compile_lambda && $downloadLmbdIdx){
 }
 
 my $WGETpres = command_exists("wget") ? 1 : 0;
+my $CURLpres = command_exists("curl") ? 1 : 0;
 
 my $isMac = 0;
 if ($^O eq "darwin"){
@@ -145,8 +231,9 @@ while (my $line = <I>){	push(@txt,$line);}
 close I;
 my $exe = ""; my $callret;
 #print "$ldir/lOTUs.cfg";
-my $UID = getInfoLtS("UID",\@txt);
-my $uspath = getInfoLtS("usearch",\@txt);
+#hand-edited configurations may lack these entries (e.g. for --ont-only)
+my $UID = getInfoLtS("UID",\@txt,"??");
+my $uspath = getInfoLtS("usearch",\@txt,"");
 
 #usearch binary linking is handled by GetOptions above
 
@@ -170,12 +257,10 @@ if ($ontOnly) {
 ###### GET USER OPTIONS ###################
 
 my ($lver,$sver) = getInstallVer("");
-if ($forceUpdate==0 && $condaDBinstall == 0){
-	print "\n\t####################################\n\t LotuS $lver Auto Installer script.\n\t####################################\n\n";
-} elsif ($condaDBinstall){
+if ($condaDBinstall){
 	print "\n\nConda LotuS install: downloading the standard database set for LotuS3\n\n";
 } else {
-	print "\n\nRerunning updates due to updated autoupdate.pl script\n\n";
+	print "\n\t####################################\n\t LotuS $lver Auto Installer script.\n\t####################################\n\n";
 }
 user_options();
 
@@ -222,17 +307,21 @@ if (!$condaDBinstall && !$onlyDbinstall){
 
 
 check_ont_build_requirements() unless $condaDBinstall || $onlyDbinstall;
+#fail before gigabytes of databases are downloaded, not after
+check_full_install_requirements() unless $condaDBinstall || $onlyDbinstall;
 
 ###################   database downloads ... #########################
 get_DBs();
 
 if ($condaDBinstall){
+	build_pending_lambda_indexes(1);
 	finishAI("d");
 	print "Finished LotuS3 database install (Conda autoinstall)\nEnjoy LotuS3!\n";
 	exit(0);
 }
 
 if ($onlyDbinstall){
+	build_pending_lambda_indexes(1);
 	finishAI("d");
 	print "\n\nInstalled databases\nExiting autoinstaller..\n";
 	exit(0);
@@ -272,11 +361,18 @@ my $nsdmp = compile_sdm("$ldir/sdm_src");
 $nsdmp = compile_LCA("$ldir/LCA_src");
 @txt = addInfoLtS("LCA",$nsdmp,\@txt,1);
 
-$nsdmp = install_bundled_rtk("$ldir/bin/rtk");
-@txt = addInfoLtS("rtk",$nsdmp,\@txt,1);
+#rtk (rarefaction) is a standalone helper that lotus3 itself does not call: a failure only warns
+my $rtkPath = eval { install_bundled_rtk("$ldir/bin/rtk") };
+if (defined $rtkPath) {
+	@txt = addInfoLtS("rtk",$rtkPath,\@txt,1);
+} else {
+	my $msg = "rtk was not installed: $@";
+	print $msg; $finalWarning .= $msg;
+}
 
 #download and install the remaining programs exactly once
 get_programs();
+build_pending_lambda_indexes(1); #lambda3 is installed by now
 
 finishAI("");
 
@@ -291,8 +387,12 @@ sub finishAI($){
 	#write new cfg file
 	write_config_atomic("$ldir/lOTUs.cfg", \@txt);
 	return if ($vTag eq "none");
-	if ($LWPsimple && !$noTelemetry){
-		my $external_php = get("https://lotus2.earlham.ac.uk/lotus/in.php?ID=$UID&VERSION=$vTag$lver&SDMV=$sver") || print "";
+	if (!$noTelemetry){
+		#one short, best-effort request; its answer is ignored and a failure never stops the installer
+		my $ping = "https://lotus2.earlham.ac.uk/lotus/in.php?ID=$UID&VERSION=$vTag$lver&SDMV=$sver";
+		if ($WGETpres) { system("wget", "-q", "-T", "10", "-t", "1", "-O", File::Spec->devnull(), $ping); }
+		elsif ($CURLpres) { system("curl", "-s", "-m", "10", "-o", File::Spec->devnull(), $ping); }
+		elsif (http_tiny_https()) { HTTP::Tiny->new(timeout => 10)->get($ping); }
 	}
 	if ($finalWarning ne ""){
 		print "################################\nWarnings occured during LotuS installation:\n".$finalWarning."\n################################\n";
@@ -307,8 +407,14 @@ sub getInstallVer($){
 	close Q;
 	my $sver=1.5;
 	if ($sdmsrc ne ""){
+		#the installed sdm reports its own version ("sdm 3.53 beta"); the source tree is only a fallback
+		my $sdmBin = "$bdir/sdm";
+		if (-x $sdmBin){
+			my ($sdmV, $status) = capture_cmd($sdmBin, "-v");
+			$sver = $1 if ($status == 0 && $sdmV =~ m/sdm\s+(\d+(?:\.\d+)+)/);
+		}
 		my $sdmF = "$sdmsrc/IO.h";
-		if (-e $sdmF){
+		if ($sver == 1.5 && -e $sdmF){
 			open Q,"<",$sdmF or die("Can't open sdm file $sdmF\n");
 			#static const float sdm_version = 0.71f;
 			while(<Q>){if (m/static\s+const\s+float\s+sdm_version\s*=\s*(.*)f;/){$sver=$1;last;}}
@@ -401,9 +507,10 @@ sub parse_PR2($ $){
 	
 	my $taxTmp = "$tout.tmp.$$";
 	open T,">",$taxTmp or die "Can't open PR2 taxonomy output $taxTmp: $!\n";
-	open I,"<$DBin" or die "Can;t open PR2 fasta $DBin\n";
-	open F,">$DBin.tmp" or die "Can;t open PR2 fasta tmp $DBin.tmp\n";
+	open I,"<",$DBin or die "Can't open PR2 fasta $DBin: $!\n";
+	open F,">","$DBin.tmp" or die "Can't open PR2 fasta tmp $DBin.tmp: $!\n";
 	#>AB353770.1.1740_U;tax=k:Eukaryota,d:TSAR,p:Alveolata-Dinoflagellata,c:Dinophyceae,o:Peridiniales,f:Kryptoperidiniaceae,g:Unruhdinium,s:Unruhdinium_kevei
+	my $noTax = 0; my $firstNoTax = "";
 
 	while (my $l = <I>){
 		chomp $l;
@@ -411,7 +518,10 @@ sub parse_PR2($ $){
 			 my @spl = split /;tax=/,$l;
 			$spl[0] =~ s/^>//;
 			print F ">".$spl[0]."\n";
-			#my @spl2 = split(/;/,$spl[1]);
+			if (!defined($spl[1]) || $spl[1] eq ""){ #no ";tax=": all ranks unknown
+				$firstNoTax = $spl[0] if $noTax++ == 0;
+				$spl[1] = "";
+			}
 			my $taxS = $spl[1];my $taxO="";
 			foreach my $lvl ( ("k","p","c","o","f","g","s") ){
 				my $taxL = "?";
@@ -435,15 +545,16 @@ sub parse_PR2($ $){
 		}
 	}
 	close T or die "Cannot close $taxTmp: $!\n"; close I; close F or die "Cannot close $DBin.tmp: $!\n";
+	if ($noTax){
+		my $msg = "PR2: $noTax sequence headers have no ';tax=' annotation (first: $firstNoTax); their taxonomy is recorded as unknown.\n";
+		print $msg; $finalWarning .= $msg;
+	}
 	rename($taxTmp, $tout) or die "Cannot replace $tout with $taxTmp: $!\n";
 	unlink($DBin) if -e $DBin; move("$DBin.tmp", $DBin) or die "Cannot replace $DBin with $DBin.tmp: $!\n";
 }
 
 
-sub buildIndex($){
-	my ($DBfna) = @_;
-	return unless ($compile_lambda);
-	
+sub configured_lambda3 {
 	my $lambdaIdxBin = "";#find where lambda is installed in
 	foreach my $line (@txt){
 		if ($line =~ m/^lambda3\s+(\S+)/ ) {$lambdaIdxBin = $1;}
@@ -451,8 +562,37 @@ sub buildIndex($){
 	if ($lambdaIdxBin ne "" && !-x $lambdaIdxBin){
 		$lambdaIdxBin = command_exists($lambdaIdxBin) // "";
 	}
+	return ($lambdaIdxBin ne "" && -x $lambdaIdxBin) ? $lambdaIdxBin : "";
+}
+
+sub buildIndex($){
+	my ($DBfna) = @_;
+	return unless ($compile_lambda);
 	die "Cannot build Lambda index: database file $DBfna is missing or empty\n" unless (-s $DBfna);
-	die "Cannot build Lambda index: lambda3 is not configured or executable\n" unless ($lambdaIdxBin ne "" && -x $lambdaIdxBin);
+	if (configured_lambda3() eq "") {
+		print "lambda3 is not installed yet; the Lambda index for $DBfna is built once it is.\n";
+		push @pendingLambdaIndex, $DBfna;
+		return;
+	}
+	build_lambda_index($DBfna);
+}
+
+#build the deferred indices; $final: lambda3 will not be installed later in this run
+sub build_pending_lambda_indexes {
+	my ($final) = @_;
+	return unless @pendingLambdaIndex;
+	if (configured_lambda3() eq "") {
+		return unless $final;
+		die "Cannot build Lambda indices (-lambdaIndex): lambda3 is not configured or executable.\n"
+			. "Install Lambda 3 (or put lambda3 on PATH) and rerun with -lambdaIndex. Databases waiting: @pendingLambdaIndex\n";
+	}
+	build_lambda_index(shift @pendingLambdaIndex) while @pendingLambdaIndex;
+}
+
+sub build_lambda_index {
+	my ($DBfna) = @_;
+	my $lambdaIdxBin = configured_lambda3();
+	die "Cannot build Lambda index: lambda3 is not configured or executable\n" unless ($lambdaIdxBin ne "");
 	my $BlastCores = 8; #just pick reasonable number
 	print "###################################\nCompiling lambda database for $DBfna using $BlastCores cores\n";
 	run_cmd($lambdaIdxBin, "mkindexn", "-t", $BlastCores, "-d", $DBfna);
@@ -490,8 +630,8 @@ sub getbeetax($){
 	ensure_dir("$ddir/beeTax/");
 	my $DB = "$ddir/beeTax/beeTax.fasta"; my $DBtax = "$ddir/beeTax/beeTax.txt";
 	#getS2("http://5.196.17.195/pr2/download/representative_sequence_of_each_cluster/gb203_pr2_all_10_28_99p.fasta.tar.gz",$DB.".tar.gz");
-	getS2("http://lotus2.earlham.ac.uk/lotus/packs/DB/beeTax_Engel/beEngel.fna",$DB);
-	getS2("http://lotus2.earlham.ac.uk/lotus/packs/DB/beeTax_Engel/beEngel.txt",$DBtax);
+	getS2("https://lotus2.earlham.ac.uk/lotus/packs/DB/beeTax_Engel/beEngel.fna",$DB);
+	getS2("https://lotus2.earlham.ac.uk/lotus/packs/DB/beeTax_Engel/beEngel.txt",$DBtax);
 	getS2("https://lotus2.earlham.ac.uk/lambdaDBs/v3.0/beeTax.fasta.lba.gz","$DB.lba.gz") if ($downloadLmbdIdx);
 	#parse_PR2($DB,$DBtax); #unlink ($DBtax.".pre");
 	@txt = addInfoLtS("TAX_REFDB_BEE",$DB,\@txt,1);
@@ -508,18 +648,18 @@ sub getPR2db($){
 	#my $DB = "$ddir/PR2/PR2_pack"; 
 	my $DBtax = "$ddir/PR2_5.0_tax.txt";
 	#getS2("http://5.196.17.195/pr2/download/representative_sequence_of_each_cluster/gb203_pr2_all_10_28_99p.fasta.tar.gz",$DB.".tar.gz");
-	#getS2("http://lotus2.earlham.ac.uk/lotus/packs/DB/gb203PR2.tar.gz",$DB.".tar.gz");
+	#getS2("https://lotus2.earlham.ac.uk/lotus/packs/DB/gb203PR2.tar.gz",$DB.".tar.gz");
 #	system "tar -xzf $DB.tar.gz -C $ddir/PR2;rm $DB.tar.gz";
 	#getS2("https://lotus2.earlham.ac.uk/lambdaDBs/v3.0/gb203_pr2_all_10_28_99p.fasta.lba.gz","$ddir/PR2/gb203_pr2_all_10_28_99p.fasta.lba.gz") if ($downloadLmbdIdx);
 
 #https://github.com/pr2database/pr2database/releases/download/v5.0.0/pr2_version_5.0.0_SSU_mothur.tax.gz
 
-	#getS2("http://lotus2.earlham.ac.uk/lotus/packs/DB/PR2/pr2_version_5.0.0_SSU_mothur.tax.gz",$DBtax.".gz");
+	#getS2("https://lotus2.earlham.ac.uk/lotus/packs/DB/PR2/pr2_version_5.0.0_SSU_mothur.tax.gz",$DBtax.".gz");
 	
 	#my $DB = "$ddir/PR2_5.0_pre.fasta";
 	my $DB = "$ddir/PR2_5.0.fasta";
-	#getS2("http://lotus2.earlham.ac.uk/lotus/packs/DB/PR2//pr2_version_5.0.0_SSU_mothur.fasta.gz",$DB.".gz");
-	getS2("http://lotus2.earlham.ac.uk/lotus/packs/DB/PR2//pr2_version_5.0.0_SSU_UTAX.fasta.gz",$DB.".gz");
+	#getS2("https://lotus2.earlham.ac.uk/lotus/packs/DB/PR2//pr2_version_5.0.0_SSU_mothur.fasta.gz",$DB.".gz");
+	getS2("https://lotus2.earlham.ac.uk/lotus/packs/DB/PR2//pr2_version_5.0.0_SSU_UTAX.fasta.gz",$DB.".gz");
 	gunzip_file("$DB.gz", $DB);
 	parse_PR2($DB,$DBtax);
 	#die "$DB,$DBtax\n";
@@ -538,8 +678,8 @@ sub getHITdb($){
 	print "Downloading HITdb April 2015 release..\n";
 	ensure_dir("$ddir/HITdb/");
 	my $DB = "$ddir/HITdb/HITdb_sequences.fasta"; my $DBtax = "$ddir/HITdb/HITdb_taxonomy.txt";
-	getS2("http://lotus2.earlham.ac.uk/lotus/packs/hitdb/HITdb_sequences.fna",$DB);
-	getS2("http://lotus2.earlham.ac.uk/lotus/packs/hitdb/HITdb_taxonomy_qiime.txt",$DBtax.".pre");
+	getS2("https://lotus2.earlham.ac.uk/lotus/packs/hitdb/HITdb_sequences.fna",$DB);
+	getS2("https://lotus2.earlham.ac.uk/lotus/packs/hitdb/HITdb_taxonomy_qiime.txt",$DBtax.".pre");
 	getS2("https://lotus2.earlham.ac.uk/lambdaDBs/v3.0/HITdb_sequences.fasta.lba.gz","$DB.lba.gz") if ($downloadLmbdIdx);
 	parse_hitdb($DBtax.".pre",$DBtax); unlink ($DBtax.".pre");
 	@txt = addInfoLtS("TAX_REFDB_HITdb",$DB,\@txt,1);
@@ -574,30 +714,6 @@ sub getGG2($){
 }
 
 
-sub getGG($){
-	my ($aref) = @_;
-	die "getGG::Greengenes is no longer supported\n";
-	my @txt = @{$aref};
-	#greengenes ------------------------
-	my $gg1 = "http://lotus2.earlham.ac.uk/lotus/packs/gg_13_5.fasta.gz";
-	my $gg2 = "http://lotus2.earlham.ac.uk/lotus/packs/gg_13_5_taxonomy.gz";
-	my $DB = "$ddir/gg_13_5.fasta";
-	unlink glob("${DB}*");
-	#system("wget -O $DB.gz $gg1");
-	print "Downloading Greengenes may 2013 release..\n";
-	getS2($gg1,"$DB.gz");
-	sleep(10);
-	gunzip_file("$DB.gz", $DB);
-	@txt = addInfoLtS("TAX_REFDB_GG",$DB,\@txt,1);
-	buildIndex($DB);
-	$DB = "$ddir/gg_13_5_taxonomy";
-	#system("wget -O $DB.gz $gg2");
-	getS2($gg2,"$DB.gz");
-	sleep(3);
-	gunzip_file("$DB.gz", $DB);
-	@txt = addInfoLtS("TAX_RANK_GG",$DB,\@txt,1);
-	return @txt;
-}
 
 sub getKSGP($){
 	my ($aref) = @_;
@@ -607,40 +723,40 @@ sub getKSGP($){
 	my $DB = "$ddir/KSGPv4.0";
 	print "Downloading KSGP v4.0 Jul 2026 release..\n";
 	my $tarUTN = "$ddir/KSGPv4.0.gz";	my $tarUTNtax = "$ddir/KSGPv4.0.tax.gz";
-	getS2("http://lotus2.earlham.ac.uk/lotus/packs/DB/KSGPv4.0/KSGP_v4.0.fasta.gz",$tarUTN);
-	getS2("http://lotus2.earlham.ac.uk/lotus/packs/DB/KSGPv4.0/KSGP_plus2.tax.gz",$tarUTNtax);
+	getS2("https://lotus2.earlham.ac.uk/lotus/packs/DB/KSGPv4.0/KSGP_v4.0.fasta.gz",$tarUTN);
+	getS2("https://lotus2.earlham.ac.uk/lotus/packs/DB/KSGPv4.0/KSGP_plus2.tax.gz",$tarUTNtax);
 	gunzip_file($tarUTN, "$DB.fasta"); gunzip_file($tarUTNtax, "$DB.tax");
-	getS2("http://lotus2.earlham.ac.uk/lotus/packs/DB/KSGPv4.0/KSGPv4.0.fasta.lba.gz","$DB.fasta.lba.gz") if ($downloadLmbdIdx);
+	getS2("https://lotus2.earlham.ac.uk/lotus/packs/DB/KSGPv4.0/KSGPv4.0.fasta.lba.gz","$DB.fasta.lba.gz") if ($downloadLmbdIdx);
 
 
 
 #	my $DB = "$ddir/KSGP_v3.1";unlink glob("${DB}*");
 #	print "Downloading KSGP v3.1 2025 release..\n";
 #	my $tarUTN = "$ddir/KSGPv3.1.gz";	my $tarUTNtax = "$ddir/KSGPv3.1.tax.gz";
-#	getS2("http://lotus2.earlham.ac.uk/lotus/packs/DB/KSGPv3.1/KSGP.fasta.gz",$tarUTN);
-#	getS2("http://lotus2.earlham.ac.uk/lotus/packs/DB/KSGPv3.1/KSGP.tax.gz",$tarUTNtax);
+#	getS2("https://lotus2.earlham.ac.uk/lotus/packs/DB/KSGPv3.1/KSGP.fasta.gz",$tarUTN);
+#	getS2("https://lotus2.earlham.ac.uk/lotus/packs/DB/KSGPv3.1/KSGP.tax.gz",$tarUTNtax);
 #	system("gunzip -c $tarUTN > $DB.fasta");system("gunzip -c $tarUTNtax > $DB.tax");
 #	system("rm -f $tarUTN $tarUTNtax");
-#	getS2("http://lotus2.earlham.ac.uk/lotus/packs/DB/KSGPv3.1//KSGP_v3.1.fasta.lba.gz","$DB.fasta.lba.gz") if ($downloadLmbdIdx);
+#	getS2("https://lotus2.earlham.ac.uk/lotus/packs/DB/KSGPv3.1//KSGP_v3.1.fasta.lba.gz","$DB.fasta.lba.gz") if ($downloadLmbdIdx);
 
 #	my $DB = "$ddir/KSGP_v2.0";unlink glob("${DB}*"); print "Downloading KSGP v3 2025 release..\n";
 #	my $tarUTN = "$ddir/KSGPv3.gz";	my $tarUTNtax = "$ddir/KSGPv3.tax.gz";
-#	getS2("http://lotus2.earlham.ac.uk/lotus/packs/DB/KSGPv3/KSGP_v3.fasta.gz",$tarUTN);
-#	getS2("http://lotus2.earlham.ac.uk/lotus/packs/DB/KSGPv3/KSGP_v3.tax.gz",$tarUTNtax);
+#	getS2("https://lotus2.earlham.ac.uk/lotus/packs/DB/KSGPv3/KSGP_v3.fasta.gz",$tarUTN);
+#	getS2("https://lotus2.earlham.ac.uk/lotus/packs/DB/KSGPv3/KSGP_v3.tax.gz",$tarUTNtax);
 #	system("gunzip -c $tarUTN > $DB.fasta");system("gunzip -c $tarUTNtax > $DB.tax");
 #	system("rm -f $tarUTN $tarUTNtax");
 
 
 #	print "Downloading KSGP 2024 release..\n";
 #	my $DB = "$ddir/KSGP_v2.0";unlink glob("${DB}*"); my $tarUTN = "$ddir/KSGPv2.gz";	my $tarUTNtax = "$ddir/KSGPv2.tax.gz";
-#	getS2("http://lotus2.earlham.ac.uk/lotus/packs/DB/KSGPv2/KSGP_v2.fasta.gz",$tarUTN);
-#	getS2("http://lotus2.earlham.ac.uk/lotus/packs/DB/KSGPv2/KSGP_LCA_v2.tax.gz",$tarUTNtax);
+#	getS2("https://lotus2.earlham.ac.uk/lotus/packs/DB/KSGPv2/KSGP_v2.fasta.gz",$tarUTN);
+#	getS2("https://lotus2.earlham.ac.uk/lotus/packs/DB/KSGPv2/KSGP_LCA_v2.tax.gz",$tarUTNtax);
 #	system("gunzip -c $tarUTN > $DB.fasta");system("gunzip -c $tarUTNtax > $DB.tax");
 #	system("rm -f $tarUTN $tarUTNtax");
 	
 	
 	#getS2("https://ksgp.earlham.ac.uk/downloads/v1.0/KSGP_v1.0.tar.gz",$tarUTN);
-	#getS2("http://lotus2.earlham.ac.uk/lotus/packs/DB/KSGPv2//KSGP_v2.0.fasta.lba.gz","$DB.fasta.lba.gz") if ($downloadLmbdIdx);
+	#getS2("https://lotus2.earlham.ac.uk/lotus/packs/DB/KSGPv2//KSGP_v2.0.fasta.lba.gz","$DB.fasta.lba.gz") if ($downloadLmbdIdx);
 	#system "tar -xzf $tarUTN -C $ddir;rm -f $tarUTN";
 	@txt = addInfoLtS("TAX_RANK_KSGP","$DB.tax",\@txt,1);
 	@txt = addInfoLtS("TAX_REFDB_KSGP","$DB.fasta",\@txt,1);
@@ -670,11 +786,11 @@ sub getSLV($){
 	my $DB = "$ddir/$baseLN"."_SSU.fasta";
 	print "Downloading SILVA SSU release $SLVver..\n";
 	if ($locSLBdl){ #in case silva server doesn't work again..
-		$baseSP = "http://lotus2.earlham.ac.uk/lotus/packs/DB/SLV/";
-		#my $SlvAltFna = "http://lotus2.earlham.ac.uk/lotus/packs/DB/SLV/SLV_132_SSU.fasta.gz";
+		$baseSP = "https://lotus2.earlham.ac.uk/lotus/packs/DB/SLV/";
+		#my $SlvAltFna = "https://lotus2.earlham.ac.uk/lotus/packs/DB/SLV/SLV_132_SSU.fasta.gz";
 		#getS2($SlvAltFna,"$DB.gz");
 		#system("gunzip -c $DB.gz > $DB;rm -f $DB.gz"); 
-		#my $SlvAltTax = "http://lotus2.earlham.ac.uk/lotus/packs/DB/SLV/SLV_132_SSU.tax.gz";
+		#my $SlvAltTax = "https://lotus2.earlham.ac.uk/lotus/packs/DB/SLV/SLV_132_SSU.tax.gz";
 		#getS2($SlvAltTax,"$DB2.gz");
 		#system("gunzip -c $DB2.gz > $DB2;rm -f $DB2.gz"); 
 	} 
@@ -702,12 +818,12 @@ sub getSLV($){
 	print "Downloading SILVA LSU release $SLVver..\n";
 	$locSLBdl=0; $SLVver="138.1";#change this to local (132 release), since SIVLA doesn't have that yet..
 	if ($locSLBdl){ #in case silva server doesn't work again..
-		$baseSP = "http://lotus2.earlham.ac.uk/lotus/packs/DB/SLV/";
+		$baseSP = "https://lotus2.earlham.ac.uk/lotus/packs/DB/SLV/";
 	}
-	#	my $SlvAltFna = "http://lotus2.earlham.ac.uk/lotus/packs/DB/SLV/SLV_132_LSU.fasta.gz";
+	#	my $SlvAltFna = "https://lotus2.earlham.ac.uk/lotus/packs/DB/SLV/SLV_132_LSU.fasta.gz";
 	#	getS2($SlvAltFna,"$DB.gz");
 	#	system("gunzip -c $DB.gz > $DB;rm -f $DB.gz"); 
-	#	my $SlvAltTax = "http://lotus2.earlham.ac.uk/lotus/packs/DB/SLV/SLV_132_LSU.tax.gz";
+	#	my $SlvAltTax = "https://lotus2.earlham.ac.uk/lotus/packs/DB/SLV/SLV_132_LSU.tax.gz";
 	#	getS2($SlvAltTax,"$DB2.gz");
 	#	system("gunzip -c $DB2.gz > $DB2;rm -f $DB2.gz"); 
 	$SLV = $baseSP."/".$baseSN."_LSURef_tax_silva.fasta.gz";
@@ -924,30 +1040,50 @@ sub prepareSILVA($ $ $ $ $){
 }
 
 
-sub getS2($ $){
-	my ($in,$out) = @_;
+
+# Pinned checksum for a URL, or undef (the caller then has to skip the download).
+sub pinned_sha256 {
+	my ($url) = @_;
+	return $PINNED_SHA256{$url};
+}
+
+# Download $in to $out and verify its SHA-256 before $out is created. $expected overrides
+# the pinned table (the ONT tools carry their own checksums). A copy of the same file in
+# bin/installs/ with the right checksum is used instead of downloading it again.
+sub getS2($ $;$){
+	my ($in,$out,$expected) = @_;
 	print "getS2:$in\n$out\n";
-	die "Refusing non-http(s) download URL: $in\n" unless ($in =~ m{^https?://}i);
+	die "Refusing non-https download URL: $in\n" unless ($in =~ m{^https://}i);
+	$expected //= pinned_sha256($in);
+	die "No pinned SHA-256 checksum for $in; refusing to install an unverified download.\n"
+		unless (defined($expected) && $expected =~ /^[0-9a-f]{64}$/i);
 	ensure_dir(dirname($out));
 	my $tmp = "$out.tmp.$$";
 	unlink($tmp) if (-e $tmp);
-	if ($WGETpres){
+	(my $bundled = $in) =~ s{^.*/}{$bdir/installs/};
+	if (-s $bundled && eval { verify_sha256($bundled, $expected) }) {
+		print "Using bundled copy $bundled\n";
+		copy($bundled, $tmp) or die "Can't copy $bundled to $tmp: $!\n";
+	} elsif ($WGETpres){
 		print "wget -O $tmp $in\n";
 		run_cmd("wget", "-O", $tmp, $in);
-	} elsif (!$isMac && $LWPsimple){
-		print "LWP\n";
-		my $rc = getstore($in,$tmp);
-		die "Download failed for $in: HTTP/status $rc\n" unless (defined($rc) && $rc >= 200 && $rc < 300);
-	} elsif ($FILEfetch){
-		print "FETCH\n";
-		my $ff = File::Fetch->new( uri => $in);
-		my $file = $ff->fetch() or die "Can't download file $in with File::Fetch\n".$ff->error()."\n";
-		move($file, $tmp) or die "Can't move fetched file $file to $tmp: $!\n";
+	} elsif ($CURLpres){
+		#-f: an HTTP error is a failure, not an error page saved as the file
+		run_cmd("curl", "-fsSL", "--retry", "3", "-o", $tmp, $in);
+	} elsif (http_tiny_https()){
+		print "HTTP::Tiny $in\n";
+		my $res = HTTP::Tiny->new->mirror($in, $tmp);
+		die "Download failed for $in: HTTP $res->{status} $res->{reason}\n" unless ($res->{success});
 	} else {
-		die "no suitable library / program on you system. Please ensure that \"wget\" is installed\n";
+		die "Downloads need \"wget\" or \"curl\" (or the Perl modules IO::Socket::SSL and Net::SSLeay for HTTP::Tiny). Please install wget or curl.\n";
 	}
 	die "Download produced no file: $in -> $tmp\n" unless (-e $tmp);
 	die "Downloaded file is empty: $in -> $tmp\n" unless (-s $tmp);
+	eval { verify_sha256($tmp, $expected); 1 } or do {
+		my $err = $@;
+		unlink($tmp) if (-e $tmp);
+		die "Download of $in failed verification; nothing was installed.\n$err";
+	};
 	rename($tmp, $out) or do {
 		unlink($tmp) if (-e $tmp);
 		die "Can't replace $out with downloaded file $tmp: $!\n";
@@ -955,52 +1091,6 @@ sub getS2($ $){
 	return $out;
 }
 
-sub checkLtsVer($){
-	my ($lver) = @_;
-	die "LWP::Simple is required for the updater\n" if (!$LWPsimple);
-	my $updtmpf = get("http://lotus2.earlham.ac.uk/lotus/lotus/updates/Msg.txt");
-	die "Could not download update message list\n" unless defined($updtmpf);
-	my $msg = ""; my $hadMsg=0;
-	open( TF, '<', \$updtmpf ); while(<TF>){$msg .= $_;}  close(TF); 
-	foreach my $lin (split(/\n/,$msg)){
-		my @spl = split /\t/,$lin;
-		next if (@spl==0);
-		if (version_is_newer($spl[0],$lver)){print $spl[1]."\n\n"};
-		$hadMsg=1;
-	}
-	# compare to server version
-	$updtmpf = get("http://lotus2.earlham.ac.uk/lotus/lotus/updates/curVer.txt");
-	die "Could not download current LotuS version\n" unless defined($updtmpf);
-	open( TF, '<', \$updtmpf ); my $lsv = <TF>; close(TF); chomp $lsv;
-	die "Updater returned an invalid version '$lsv'\n" unless ($lsv =~ m/^\d+(?:\.\d+)+$/);
-	my $msgEnd = "";
-	$updtmpf = get("http://lotus2.earlham.ac.uk/lotus/lotus/updates/curVerMsg.txt");
-	die "Could not download current update message\n" unless defined($updtmpf);
-	open( TF, '<', \$updtmpf ); while(<TF>){$msgEnd .= $_;} close(TF); 
-	
-	$updtmpf = get("http://lotus2.earlham.ac.uk/lotus/lotus/updates/UpdateHist.txt");
-	die "Could not download update history\n" unless defined($updtmpf);
-	my $updates = "";
-	open( TF, '<', \$updtmpf );$msg = ""; while(<TF>){$msg .= $_;}  close(TF); 
-	foreach my $lin (split(/\n/,$msg)){
-		my @spl = split /\t/,$lin; chomp $lin;
-		next if (@spl < 2 || $spl[0] eq "");
-		if ($spl[1] =~ m/LotuS (\d+(?:\.\d+)+)/){
-			if (version_is_newer($1,$lver)){$updates.= $spl[0]."\t".$spl[1]."\n"};
-		}
-	}
-	if ($updates ne ""){
-		print "--------------------------------\nThe following updates are available:\n--------------------------------\n";
-		print $updates;
-		print "\n\nCurrent Lotus version is :$lver\nLatest version is: $lsv\n";
-	}
-	
-	if ($hadMsg || $updates ne ""){sleep(4);}
-
-	
-	#die;
-	return $lsv,$msgEnd;
-}
 
 sub version_is_newer {
 	my ($candidate,$current) = @_;
@@ -1027,7 +1117,7 @@ sub compile_LCA($){
 	}
 	if (-d $ldi2 && -f "$ldi2/Makefile" ){
 		print "Compiling LCA..\n";
-		unlink glob("$ldi2/*.o");
+		unlink bsd_glob("$ldi2/*.o");
 		my $stat = system("make", "-C", $ldi2);
 		if ($stat == 0){
 			unlink("$ldir/LCA") if -e "$ldir/LCA"; unlink("$bdir/LCA") if -e "$bdir/LCA"; move("$ldi2/LCA", "$bdir/LCA") or die "Cannot install LCA: $!\n"; run_cmd("chmod", "+x", "$bdir/LCA");
@@ -1070,7 +1160,7 @@ sub compile_sdm($){
 	}
 	if (-d $ldi2 && -f "$ldi2/Makefile" && -f "$ldi2/DNAconsts.cpp"){
 		print "Compiling sdm..\n";
-		unlink glob("$ldi2/*.o");
+		unlink bsd_glob("$ldi2/*.o");
 		my $stat = system("make", "-C", $ldi2);
 		if ($stat != 0){#repeat without gzip
 			print "\n\n\n\n=================\nProblem compiling sdm with gzip support\nFallback to sdm compilation without gzip support\n";
@@ -1078,7 +1168,7 @@ sub compile_sdm($){
 			my $backup = "$header.installer-backup.$$";
 			copy($header, $backup) or die "Cannot back up $header before fallback compilation: $!\n";
 			run_cmd($^X, "-pi", "-e", "s/#define _gzipread/#define _notgzip/g", $header);
-			unlink glob("$ldi2/*.o");
+			unlink bsd_glob("$ldi2/*.o");
 			$stat = system("make", "-C", $ldi2);
 			copy($backup, $header) or die "Cannot restore $header after fallback compilation: $!\n";
 			unlink($backup) or warn "Could not remove temporary backup $backup: $!\n";
@@ -1227,7 +1317,8 @@ sub check_version {
 	my ($cmd) = @_;
 	my $exe = (-x $cmd) ? $cmd : command_exists($cmd);
 	return 0 unless $exe;
-	my ($check,$status) = capture_cmd($exe, "--version");
+	#R before 4.2 prints "Rscript --version" to stderr
+	my ($check,$status) = capture_cmd_merged($exe, "--version");
 	return 0 if ($status != 0 && $check eq "");
 	if ($check =~ m/version\s+([0-9]+)(?:\.[0-9]+)*/){
 		return $1;
@@ -1316,10 +1407,10 @@ sub get_DBs{
 	if ($getUTAX){
 		print "Downloading UTAX ref databases..\n";
 		my $tarUTN = "$ddir/utax_16s.tar.gz";
-		getS2("http://drive5.com/utax/data/utax_rdp_16s_tainset15.tar.gz",$tarUTN);
+		getS2("https://drive5.com/utax/data/utax_rdp_16s_tainset15.tar.gz",$tarUTN);
 		run_cmd("tar", "-xzf", $tarUTN, "-C", $ddir); unlink($tarUTN) or warn "Could not remove $tarUTN: $!\n";
 		$tarUTN="$ddir/utax_ITS.tar.gz";
-		getS2("http://drive5.com/utax/data/utax_unite_v7.tar.gz",$tarUTN);
+		getS2("https://drive5.com/utax/data/utax_unite_v7.tar.gz",$tarUTN);
 		run_cmd("tar", "-xzf", $tarUTN, "-C", $ddir); unlink($tarUTN) or warn "Could not remove $tarUTN: $!\n";
 		@txt = addInfoLtS("TAX_REFDB_SSU_UTAX","$ddir/utaxref/rdp_16s_trainset15/",\@txt,2);
 		@txt = addInfoLtS("TAX_REFDB_ITS_UTAX","$ddir/utaxref/unite_v7/",\@txt,2);
@@ -1337,11 +1428,11 @@ sub get_DBs{
 		#ITS DB
 		#my $tarUN = "$ddir/qITSfa.zip";
 		#v9 2023 releast
-		#getS2("http://lotus2.earlham.ac.uk/lotus/packs/DB/UNITE/sh_refs_qiime_ver8_99_s_all_02.02.2019.fasta.zip",$tarUN);
+		#getS2("https://lotus2.earlham.ac.uk/lotus/packs/DB/UNITE/sh_refs_qiime_ver8_99_s_all_02.02.2019.fasta.zip",$tarUN);
 #		my $UNITEdb = "$ddir/UNITE/sh_refs_qiime_ver8_99_s_all_02.02.2019.fasta";
-		#getS2("http://lotus2.earlham.ac.uk/lotus/packs/DB/sh_qiime_release_02.03.2015.zip",$tarUN);
+		#getS2("https://lotus2.earlham.ac.uk/lotus/packs/DB/sh_qiime_release_02.03.2015.zip",$tarUN);
 		#system("rm -fr $ddir/UNITE;unzip -q -o $tarUN -d $ddir/UNITE/");
-		#getS2("http://lotus2.earlham.ac.uk/lotus/packs/DB/UNITE/sh_taxonomy_qiime_ver8_99_s_all_02.02.2019.txt.zip",$tarUN);
+		#getS2("https://lotus2.earlham.ac.uk/lotus/packs/DB/UNITE/sh_taxonomy_qiime_ver8_99_s_all_02.02.2019.txt.zip",$tarUN);
 		#system("unzip -q -o $tarUN -d $ddir/UNITE/;rm -rf $ddir/UNITE/__MACOSX/");
 		#@txt = addInfoLtS("TAX_RANK_ITS_UNITE","$ddir/UNITE/sh_taxonomy_qiime_ver8_99_s_all_02.02.2019.txt",\@txt,1);
 		my $tarUN = "$ddir/qITSfa.gz";
@@ -1369,8 +1460,8 @@ sub get_DBs{
 	}
 	
 	if ($ITSready){#ITS chimera check ref DB
-		#my $itsDB = "http://lotus2.earlham.ac.uk/lotus/packs/DB/uchime_reference_dataset_11.03.2015.zip";
-		my $itsDB = "http://lotus2.earlham.ac.uk/lotus/packs/DB/UNITE/uchime/uchime_UNITE_16_10_22.zip";
+		#my $itsDB = "https://lotus2.earlham.ac.uk/lotus/packs/DB/uchime_reference_dataset_11.03.2015.zip";
+		my $itsDB = "https://lotus2.earlham.ac.uk/lotus/packs/DB/UNITE/uchime/uchime_UNITE_16_10_22.zip";
 		getS2($itsDB,"$ddir/uchITS.zip");
 		my $uchimeD = "$ddir/ITS_chimera22/";
 		ensure_dir($uchimeD);
@@ -1389,12 +1480,12 @@ sub get_DBs{
 	
 	# phiX ref genome
 	my $phiXf = "$ddir/phiX.fasta";
-	getS2("http://lotus2.earlham.ac.uk/lotus/packs/DB/phiX.fasta",$phiXf);
+	getS2("https://lotus2.earlham.ac.uk/lotus/packs/DB/phiX.fasta",$phiXf);
 	@txt = addInfoLtS("REFDB_PHIX",$phiXf,\@txt,1);
 	
 	#db gold #exchanged for rdp_gold since 1.30
 	#my $goldDB = "http://drive5.com/uchime/gold.fa";
-	my $goldDB = "http://lotus2.earlham.ac.uk/lotus/packs/rdp_gold.fa.gz";
+	my $goldDB = "https://lotus2.earlham.ac.uk/lotus/packs/rdp_gold.fa.gz";
 	my $DB = "$ddir/rdp_gold.fa";
 	#system("wget -O $DB $goldDB");
 	getS2($goldDB,$DB.".gz");
@@ -1404,7 +1495,7 @@ sub get_DBs{
 
 
 	#db Silva 119 clustered to 93% for LSUs
-	my $LTUrefDB = "http://lotus2.earlham.ac.uk/lotus/packs/SILVA_119_LSU_93.ref.fasta.gz";
+	my $LTUrefDB = "https://lotus2.earlham.ac.uk/lotus/packs/SILVA_119_LSU_93.ref.fasta.gz";
 	$DB = "$ddir/SLV_119_LSU.fa";
 	getS2($LTUrefDB,$DB.".gz");
 	gunzip_file("$DB.gz", $DB);
@@ -1584,6 +1675,37 @@ sub check_ont_build_requirements {
     }
 }
 
+# Everything a full install needs besides the ONT tools, checked before the database downloads.
+sub check_full_install_requirements {
+    my @missing;
+    for my $tool (qw(tar gzip unzip make)) {
+        push @missing, $tool unless command_exists($tool);
+    }
+    push @missing, 'a C compiler (gcc or cc)' unless command_exists('gcc') || command_exists('cc');
+    push @missing, 'xz (unpacks the Lambda .tar.xz release)'
+        if !$isMac && ($installBlast == 2 || $installBlast == 3) && !command_exists('xz');
+    # sdm and LCA: the bundled Linux x86-64 executables, or their sources to compile
+    for my $req (['sdm', qr/sdm \d/, 'Makefile'], ['LCA', qr/0\.\d+/, 'Makefile']) {
+        my ($name, $versionRx, $makefile) = @$req;
+        my $exe = "$bdir/$name";
+        my $runs = 0;
+        if (-f $exe) {
+            chmod(0755, $exe);
+            my ($version, $status) = capture_cmd_merged($exe, '-v');
+            $runs = $status == 0 && $version =~ $versionRx;
+        }
+        push @missing, "a working $name: $exe does not run on this system and $ldir/${name}_src/$makefile is not present "
+            . "(the bundled $name is a Linux x86-64 build; on other systems compile it from its source and place it at $exe)"
+            unless $runs || -f "$ldir/${name}_src/$makefile";
+    }
+    die "The full installation needs:\n" . join("", map { " - $_\n" } @missing)
+        . "Install these and rerun perl helpers/autoInstall.pl. Nothing has been downloaded yet.\n" if @missing;
+    if (!command_exists('java')) {
+        my $msg = "Java was not found: RDP taxonomy classification (-taxAligner 0) needs it at run time.\n";
+        print $msg; $finalWarning .= $msg;
+    }
+}
+
 sub install_ont_program {
     my ($name) = @_;
     if (my $existing = find_ont_program($name)) { return $existing; }
@@ -1596,14 +1718,14 @@ sub install_ont_program {
         if ($bioconda) {
             my ($url, $digest) = savont_bioconda_binary();
             my $archive = "$stage/savont.conda";
-            getS2($url, $archive);
+            getS2($url, $archive, $digest);
             verify_sha256($archive, $digest);
             $exe = "$stage/savont";
             run_cmd($^X, "$ldir/helpers/extract_conda_executable.pl", $archive, 'bin/savont', $exe);
         } elsif (@release) {
             my ($url, $digest, $member) = @release;
             my $archive = "$stage/download";
-            getS2($url, $archive);
+            getS2($url, $archive, $digest);
             verify_sha256($archive, $digest);
             if ($member ne '') {
                 run_cmd('tar', '-xjf', $archive, '-C', $stage);
@@ -1611,7 +1733,7 @@ sub install_ont_program {
             } else { $exe = $archive; }
         } else {
             my $archive = "$stage/source.tar.gz";
-            getS2("https://codeload.github.com/$repo/tar.gz/refs/tags/v$version", $archive);
+            getS2("https://codeload.github.com/$repo/tar.gz/refs/tags/v$version", $archive, $sha);
             verify_sha256($archive, $sha);
             run_cmd('tar', '-xzf', $archive, '-C', $stage);
             my $source = "$stage/$name-$version";
@@ -1651,6 +1773,64 @@ sub install_ont_programs {
     }
 }
 
+
+# Run a command and return (stdout+stderr, exit status); some tools (vsearch, R < 4.2)
+# print their version to stderr only.
+sub capture_cmd_merged {
+	my (@cmd) = @_;
+	die "capture_cmd_merged called without command\n" unless @cmd;
+	print "+ @cmd\n";
+	my ($in, $out);
+	my $pid = eval { open3($in, $out, undef, @cmd) }; #undef error handle: stderr joins stdout
+	return ("", -1) unless $pid;
+	close($in);
+	my $output = do { local $/; <$out> } // "";
+	close($out);
+	waitpid($pid, 0);
+	my $raw_status = $?;
+	my $status = $raw_status == -1 ? -1 : ($raw_status & 127) ? 128 + ($raw_status & 127) : ($raw_status >> 8);
+	return ($output, $status);
+}
+
+sub vsearch_works {
+	my ($exe) = @_;
+	return 0 unless defined($exe) && -f $exe;
+	chmod(0755, $exe);
+	my ($version, $status) = capture_cmd_merged($exe, "--version");
+	return 0 unless $status == 0 && $version =~ m/vsearch v2\.(\d+)/;
+	return $1 >= 15;
+}
+
+sub install_vsearch {
+	my $bundled = "$bdir/vsearch";
+	if (vsearch_works($bundled)) {
+		print "Using the bundled vsearch at $bundled\n";
+		@txt = addInfoLtS("vsearch", abs_path($bundled) // $bundled, \@txt, 1);
+		return;
+	}
+	my $arch = ont_architecture();
+	my $name = $isMac ? "vsearch-2.32.0-macos-universal"
+		: $arch eq 'aarch64' ? "vsearch-2.32.0-linux-aarch64-static"
+		: $arch eq 'x86_64' ? "vsearch-2.32.0-linux-x86_64" : "";
+	if ($name eq "") {
+		my $msg = "vsearch was not installed: no pinned vsearch release for architecture $arch (fallback to usearch).\n";
+		print $msg; $finalWarning .= $msg;
+		return;
+	}
+	print "Downloading vsearch 2.32.0 ($name)..\n";
+	my $vtars = "$bdir/vsearch.tar.gz";
+	getS2("https://github.com/torognes/vsearch/releases/download/v2.32.0/$name.tar.gz", $vtars);
+	run_cmd("tar", "-xzf", $vtars, "-C", $bdir);
+	unlink($vtars) or warn "Could not remove $vtars: $!\n";
+	my $vexe = "$bdir/$name/bin/vsearch";
+	if (vsearch_works($vexe)) {
+		@txt = addInfoLtS("vsearch", $vexe, \@txt, 1);
+	} else {
+		my $msg = "vsearch at $vexe did not run on this system, so vsearch was not installed (fallback to usearch).\n";
+		print "\n\nWARNING::\n$msg\n"; $finalWarning .= $msg;
+	}
+}
+
 sub get_programs{
 	my ($dtar, $dexe);
 	#-----------  exit prog here, if set
@@ -1665,7 +1845,7 @@ sub get_programs{
 		#itsx
 		print "Downloading ITSX to detect valid ITS regions..\n";
 		my $tarUTN = "$bdir/ITSx_1.1.4.tar.gz";
-		getS2("http://lotus2.earlham.ac.uk/lotus/packs/ITSx_1.1.4.tar.gz",$tarUTN);
+		getS2("https://lotus2.earlham.ac.uk/lotus/packs/ITSx_1.1.4.tar.gz",$tarUTN);
 		run_cmd("tar", "-xzf", $tarUTN, "-C", $bdir); unlink($tarUTN) or warn "Could not remove $tarUTN: $!\n";
 		@txt = addInfoLtS("itsx","$bdir/ITSx_1.1.4/./ITSx",\@txt,1);
 		@txt = addInfoLtS("hmmsearch","$bdir/ITSx_1.1.4/bin/hmmsearch",\@txt,1);
@@ -1677,13 +1857,14 @@ sub get_programs{
 		#Blast
 		print "Downloading blast executables...\n";
 		my $blfil = "ncbi-blast-2.2.29+-x64-linux.tar.gz";
-		if ($isMac){
-			$blfil = "ncbi-blast-2.2.29+-universal-macosx.tar.gz";
-		}
-
 		$exe = "$bdir/blast.tar.gz";
-		getS2("http://lotus2.earlham.ac.uk/lotus/packs/".$blfil,$exe);
-			
+		if ($isMac){
+			#the former macOS archive is no longer available upstream (HTTP 404)
+			my $msg = "BLAST was not installed: no verified macOS BLAST+ package is available. Install blastn and makeblastdb (e.g. via conda or Homebrew) and set \"blastn\" and \"makeBlastDB\" in lOTUs.cfg, or use Lambda.\n";
+			print $msg; $finalWarning .= $msg;
+		} else {
+		getS2("https://lotus2.earlham.ac.uk/lotus/packs/".$blfil,$exe);
+
 		#my $path = "blast/executables/blast+/2.2.29/";
 		#my $host = "ftp.ncbi.nlm.nih.gov";my $ftp = Net::FTP->new($host, Debug => 0, Passive => 1) or die "Can't open $host\n";
 		#$ftp->login() or die "Cannot login ", $ftp->message;$ftp->cwd($path);$ftp->binary();$ftp->get($blfil,$exe) or die "Failed Blast download: ", $ftp->message;$ftp->quit;
@@ -1694,24 +1875,25 @@ sub get_programs{
 		@txt = addInfoLtS("blastn",$exe,\@txt,1);
 		$exe = "$bdir/ncbi-blast-2.2.29+/bin/makeblastdb";
 		@txt = addInfoLtS("makeBlastDB",$exe,\@txt,1);
+		}
 	}
 	if ($installBlast == 2 || $installBlast == 3){
 		print "Downloading lambda executables... \n";
-		#my $lmdD = "http://lotus2.earlham.ac.uk/lotus/packs/lambda/lambda-v0.9.1-linux_x86-64.tar.gz";
+		#my $lmdD = "https://lotus2.earlham.ac.uk/lotus/packs/lambda/lambda-v0.9.1-linux_x86-64.tar.gz";
 		#if ($isMac){
-		#	$lmdD = "http://lotus2.earlham.ac.uk/lotus/packs/lambda/lambda-v0.9.1-darwin_x86-64.tar.gz";
+		#	$lmdD = "https://lotus2.earlham.ac.uk/lotus/packs/lambda/lambda-v0.9.1-darwin_x86-64.tar.gz";
 		#}
 		if (!$isMac){
 			my $lmdD = "https://github.com/seqan/lambda/releases/download/lambda-v3.1.0/lambda3-3.1.0-Linux-x86_64.tar.xz";
 			$exe = "$bdir/lambda.tar.xz";
 			getS2($lmdD,$exe);
-			run_cmd("tar", "-xf", $exe, "-C", $bdir); move("$bdir/lambda3-3.1.0-Linux-x86_64/bin/lambda3", "$bdir/lambda3") or die "Cannot move lambda3: $!\n"; for my $old (glob("$bdir/lambda3-3*")){ remove_tree($old) if -d $old; unlink($old) if -f $old; }
+			run_cmd("tar", "-xf", $exe, "-C", $bdir); move("$bdir/lambda3-3.1.0-Linux-x86_64/bin/lambda3", "$bdir/lambda3") or die "Cannot move lambda3: $!\n"; for my $old (bsd_glob("$bdir/lambda3-3*")){ remove_tree($old) if -d $old; unlink($old) if -f $old; }
 
 		}else{
 			my $lmdD = "https://github.com/seqan/lambda/releases/download/lambda-v3.1.0/lambda3-3.1.0-Darwin-x86_64.zip";
 			$exe = "$bdir/lambda.zip";
 			getS2($lmdD,$exe);
-			run_cmd("unzip", "-q", "-o", "-d", $bdir, $exe); move("$bdir/lambda3-3.1.0-Darwin-x86_64/bin/lambda3", "$bdir/lambda3") or die "Cannot move lambda3: $!\n"; for my $old (glob("$bdir/lambda3-3*")){ remove_tree($old) if -d $old; unlink($old) if -f $old; }
+			run_cmd("unzip", "-q", "-o", "-d", $bdir, $exe); move("$bdir/lambda3-3.1.0-Darwin-x86_64/bin/lambda3", "$bdir/lambda3") or die "Cannot move lambda3: $!\n"; for my $old (bsd_glob("$bdir/lambda3-3*")){ remove_tree($old) if -d $old; unlink($old) if -f $old; }
 		}
 
 		unlink($exe);
@@ -1735,7 +1917,7 @@ sub get_programs{
 	my $sexe = "$swarmdir/bin/swarm";
 	my $tars = "$bdir/swarm.zip";
 	#
-	my $swarmtar = "http://lotus2.earlham.ac.uk/lotus/packs/swarm2.1.13.zip";#"https://github.com/torognes/swarm/archive/master.zip";#"http://lotus2.earlham.ac.uk/lotus/packs/swarm206d.tgz";
+	my $swarmtar = "https://lotus2.earlham.ac.uk/lotus/packs/swarm2.1.13.zip";#"https://github.com/torognes/swarm/archive/master.zip";#"https://lotus2.earlham.ac.uk/lotus/packs/swarm206d.tgz";
 	getS2($swarmtar,$tars);
 	run_cmd("unzip", "-q", "-o", "-d", $bdir, $tars);
 	unlink($tars);
@@ -1751,40 +1933,16 @@ sub get_programs{
 	} else {
 		print "Swarm exe did not exist at $sexe\n Therefore swarm was not installed.\n";
 	}
-	#vsearch
-	print "Downloading vsearch executables..\n";
-	my $vtars = "$bdir/vsearch.tar.gz";
-	if ($isMac){
-		#getS2("http://lotus2.earlham.ac.uk/lotus/packs/vsearch/vsearch-2.0.4-osx-x86_64/bin/vsearch",$vexe);
-		getS2("https://github.com/torognes/vsearch/releases/download/v2.15.0/vsearch-2.15.0-macos-x86_64.tar.gz",$vtars);
-	} else {
-		#getS2("http://lotus2.earlham.ac.uk/lotus/packs/vsearch/vsearch-2.0.4-linux-x86_64/bin/vsearch",$vexe);
-		getS2("https://github.com/torognes/vsearch/releases/download/v2.15.0/vsearch-2.15.0-linux-x86_64.tar.gz",$vtars);
-	}
-	run_cmd("tar", "-xzf", $vtars, "-C", $bdir);
-	unlink($vtars) or warn "Could not remove $vtars: $!\n";
-	my $vexe = $isMac ? "$bdir/vsearch-2.15.0-macos-x86_64/bin/vsearch" : "$bdir/vsearch-2.15.0-linux-x86_64/bin/vsearch";
-	my ($vsearchVer,$vsearchStatus) = ("",-1);
-	if (-s $vexe){
-		run_cmd("chmod", "+x", $vexe);
-		($vsearchVer,$vsearchStatus) = capture_cmd($vexe, "-v"); chomp $vsearchVer;
-	}
-	print "\n$vsearchVer\n";
-	if (-s $vexe && $vsearchStatus == 0){# && $vsearchVer =~ m/vsearch v2.*/){ #not essential
-		@txt = addInfoLtS("vsearch",$vexe,\@txt,1);
-	} else {
-		#system "rm $vexe";
-		print "\n\nWARNING::\nvsearch exe did not exist at $vexe\n Therefore vsearch was not installed (fallback to usearch).\n\n";
-		$finalWarning .= "vsearch exe did not exist at $vexe\n Therefore vsearch was not installed (fallback to usearch).\n";
-	}
+	#vsearch: the static Linux x86-64 build shipped as bin/vsearch, otherwise a pinned release
+	install_vsearch();
 
 	#infernal
 	print "Downloading infernal executables..\n";
 	my $iexe = "$bdir/inf112.tar.gz";
 	if ($isMac){
-		getS2("http://lotus2.earlham.ac.uk/lotus/packs/infernal/infernal-1.1.2-macosx-intel.tar.gz",$iexe);
+		getS2("https://lotus2.earlham.ac.uk/lotus/packs/infernal/infernal-1.1.2-macosx-intel.tar.gz",$iexe);
 	} else {
-		getS2("http://lotus2.earlham.ac.uk/lotus/packs/infernal/infernal-1.1.2-linux-intel-gcc.tar.gz",$iexe);
+		getS2("https://lotus2.earlham.ac.uk/lotus/packs/infernal/infernal-1.1.2-linux-intel-gcc.tar.gz",$iexe);
 	}
 		run_cmd("tar", "-xzf", $iexe, "-C", $bdir);
 		$iexe = $isMac ? "$bdir/infernal-1.1.2-macosx-intel/binaries/" : "$bdir/infernal-1.1.2-linux-intel-gcc/binaries/";
@@ -1803,10 +1961,10 @@ sub get_programs{
 	
 	my $vxexe = "$bdir/vxtr/vxtractor.pl";
 	ensure_dir("$bdir/vxtr/");
-	getS2("http://lotus2.earlham.ac.uk/lotus/packs/VXtractor/vxtractor.pl",$vxexe);
+	getS2("https://lotus2.earlham.ac.uk/lotus/packs/VXtractor/vxtractor.pl",$vxexe);
 	@txt = addInfoLtS("vxtractor",$vxexe,\@txt,1);
 	$vxexe = "$bdir/vxtr/HMM.zip";
-	getS2("http://lotus2.earlham.ac.uk/lotus/packs/VXtractor/HMMs.zip",$vxexe);
+	getS2("https://lotus2.earlham.ac.uk/lotus/packs/VXtractor/HMMs.zip",$vxexe);
 	print("unzip -o -q $vxexe -d $bdir/vxtr/;rm $vxexe;");
 	run_cmd("unzip", "-o", "-q", $vxexe, "-d", "$bdir/vxtr/"); unlink($vxexe) or warn "Could not remove $vxexe: $!\n";
 	@txt = addInfoLtS("vxtractorHMMs","$bdir/vxtr/HMMs/",\@txt,2);
@@ -1866,21 +2024,23 @@ sub get_programs{
 	#system("wget -O $exe $fastt");
 	#my $fastt = "http://www.microbesonline.org/fasttree/FastTreeMP";
 	#if ($isMac){}
-	my $fastt = "http://lotus2.earlham.ac.uk/lotus/packs/FastTree.c"; #http://www.microbesonline.org/fasttree/
+	my $fastt = "https://lotus2.earlham.ac.uk/lotus/packs/FastTree.c"; #http://www.microbesonline.org/fasttree/
 	getS2($fastt,$exe1);
-	$callret = system("gcc", "-DOPENMP", "-fopenmp", "-O3", "-finline-functions", "-funroll-loops", "-Wall", "-o", $exe, $exe1, "-lm");
+	my $cc = command_exists("gcc") // command_exists("cc") // "gcc";
+	$callret = system($cc, "-DOPENMP", "-fopenmp", "-O3", "-finline-functions", "-funroll-loops", "-Wall", "-o", $exe, $exe1, "-lm");
 	if ($callret != 0){
 		print "\n\n=================\nProblem while compiling fasttree, trying fasttree without multithread and SSE support (might be slower, but if it's working..)\n";
 		$finalWarning .= "fasttree compiled without multithreading support (you can not use the -thr LotuS option.\n";
 		$exe = "$bdir/FastTree";
-		$callret = system("gcc", "-DNO_SSE", "-O3", "-finline-functions", "-funroll-loops", "-Wall", "-o", $exe, $exe1, "-lm");}
+		$callret = system($cc, "-DNO_SSE", "-O3", "-finline-functions", "-funroll-loops", "-Wall", "-o", $exe, $exe1, "-lm");}
 	if ($callret != 0){
-		$finalWarning .= "fasttree compilation failed. This is most likely an issue with your gcc version or the openMP libraries. See info on:\nhttp://www.microbesonline.org/fasttree/#Install\n";
-		print "\n\n=================\nfasttree compilation failed. This is most likely an issue with your gcc version or the openMP libraries. See info on:\nhttp://www.microbesonline.org/fasttree/#Install\n"; exit(4);
+		#the remaining programs still install; only FastTree trees (-buildPhylo 1, the default) are unavailable
+		my $msg = "fasttree compilation failed, so FastTree was not installed. This is most likely an issue with your C compiler or the OpenMP libraries (see http://www.microbesonline.org/fasttree/#Install). Until it is installed, run LotuS3 with -buildPhylo 2 (IQ-TREE) or -buildPhylo 0.\n";
+		print "\n\n=================\n$msg"; $finalWarning .= $msg;
+	} else {
+		run_cmd("chmod", "+x", $exe);
+		@txt = addInfoLtS("fasttree",$exe,\@txt,1);
 	}
-
-	run_cmd("chmod", "+x", $exe);
-	@txt = addInfoLtS("fasttree",$exe,\@txt,1);
 
 
 	#flash
@@ -1888,7 +2048,7 @@ sub get_programs{
 		my $flashdir = $bdir."FLASH-1.2.10";
 		my $fexe = "$flashdir/flash";
 		my $tar = "$bdir/Flash.tar.gz";
-		my $flashTar = "http://lotus2.earlham.ac.uk/lotus/packs/FLASH-1.2.10.tar.gz";#"http://sourceforge.net/projects/flashpage/files/FLASH-1.2.10.tar.gz/download";
+		my $flashTar = "https://lotus2.earlham.ac.uk/lotus/packs/FLASH-1.2.10.tar.gz";#"http://sourceforge.net/projects/flashpage/files/FLASH-1.2.10.tar.gz/download";
 		getS2($flashTar,$tar);
 		run_cmd("tar", "-xzf", $tar, "-C", $bdir);
 		unlink($tar);
@@ -1908,7 +2068,7 @@ sub get_programs{
 	my $cexe = "$cdhitdir/cd-hit-est";
 	my $ctar = "$bdir/cdhit.zip";
 	#my $cdhitTar = "https://cdhit.googlecode.com/files/cd-hit-v4.6.1-2012-08-27.tgz";
-	my $cdhitTar = "http://lotus2.earlham.ac.uk/lotus/packs/cd-hit_git.zip";#"https://github.com/weizhongli/cdhit/archive/master.zip";
+	my $cdhitTar = "https://lotus2.earlham.ac.uk/lotus/packs/cd-hit_git.zip";#"https://github.com/weizhongli/cdhit/archive/master.zip";
 	getS2($cdhitTar,$ctar);
 	#system("tar -xzf $tar -C $bdir");
 	run_cmd("unzip", "-o", "-q", $ctar, "-d", $bdir);
@@ -1922,7 +2082,7 @@ sub get_programs{
 	}
 
 
-	my $rdpf = "http://lotus2.earlham.ac.uk/lotus/packs/rdp_classifier_2.12.zip"; #"http://downloads.sourceforge.net/project/rdp-classifier/rdp-classifier/rdp_classifier_2.6.zip?r=http%3A%2F%2Fsourceforge.net%2Fprojects%2Frdp-classifier%2F&ts=1391590725&use_mirror=netcologne";
+	my $rdpf = "https://lotus2.earlham.ac.uk/lotus/packs/rdp_classifier_2.12.zip"; #"http://downloads.sourceforge.net/project/rdp-classifier/rdp-classifier/rdp_classifier_2.6.zip?r=http%3A%2F%2Fsourceforge.net%2Fprojects%2Frdp-classifier%2F&ts=1391590725&use_mirror=netcologne";
 	#RDP classifier
 	$exe = "$bdir/rdp.zip";
 	#system("wget -O $exe $rdpf");
@@ -1936,12 +2096,13 @@ sub get_programs{
 
 
 	#clustalO
-	my $clo = "http://lotus2.earlham.ac.uk/lotus/packs/clustalo-1.2.0-Ubuntu-x86_64";#"http://www.clustal.org/omega/clustalo-1.2.0-Ubuntu-x86_64";
+	#optional: LotuS aligns with MAFFT. The former macOS binary is gone upstream (HTTP 403).
 	if ($isMac){
-		$clo = "http://www.clustal.org/omega/clustal-omega-1.2.0-macosx";
+		print "Clustal Omega was not installed on macOS (no verified binary available); it is optional, MAFFT is used for alignments.\n";
+		return;
 	}
-	$exe = $isMac ? "$bdir/clustal-omega-1.2.0-macosx" : "$bdir/clustalo-1.2.0-Ubuntu-x86_64";
-	#system("wget -O $exe $clo");
+	my $clo = "https://lotus2.earlham.ac.uk/lotus/packs/clustalo-1.2.0-Ubuntu-x86_64";
+	$exe = "$bdir/clustalo-1.2.0-Ubuntu-x86_64";
 	getS2($clo,$exe);
 	run_cmd("chmod", "+x", $exe);
 	@txt = addInfoLtS("clustalo",$exe,\@txt,1);
@@ -1952,10 +2113,10 @@ sub user_options(){
 	if ($condaDBinstall){#no user input at all wanted
 		return;
 	}
-	if ( $UID ne "??" || $forceUpdate || $usearchInstall ne ""){#a configured UID is sufficient to identify a previous installation
+	if ( $UID ne "??" || $usearchInstall ne ""){#a configured UID is sufficient to identify a previous installation
 		my $inp="";
 		
-		if (!$forceUpdate && $usearchInstall eq ""){
+		if ($usearchInstall eq ""){
 			while ($inp !~ m/^[123]$/){
 				print "Detected previous installation of LotuS, do you want to \n";
 				#print " (1) search & install updates\n";
@@ -1987,50 +2148,7 @@ sub user_options(){
 			finishAI("none");
 			exit(0);
 		}
-		if ((0 && $inp eq "1") || $forceUpdate){ #normal online updater remains disabled; -forceUpdate is explicit
-			my ($lsv,$msgEnd) = checkLtsVer($lver);
-			#higher version? reinstall lotus3, autoinstall.pl, sdm
-			if (version_is_newer($lsv,$lver) || $forceUpdate){
-				print "New LotuS version available: updating from $lver to $lsv\n";
-				my $updateArchive = "$ldir/files.tar.gz";
-				my $updateDir = "$ldir/updates";
-				my $installedHelper = "$ldir/helpers/autoInstall.pl";
-				getS2("http://lotus2.earlham.ac.uk/lotus/lotus/updates/$lsv/files.tar.gz",$updateArchive);
-				run_cmd("tar", "-xzf", $updateArchive, "-C", $ldir);
-				die "Update archive is missing updates/autoInstall.pl\n" unless (-s "$updateDir/autoInstall.pl");
-				die "Update archive is missing updates/lotus3\n" unless (-s "$updateDir/lotus3");
-				if (-s $installedHelper != -s "$updateDir/autoInstall.pl" && !$forceUpdate){#at this point call autoupdate again
-					print "Updated autoInstall.pl..\nAttempting to rerun autoInstall.pl\n";
-					copy_file_atomic("$updateDir/autoInstall.pl", $installedHelper);
-					exec($^X, $installedHelper, "-forceUpdate");
-					die "Failed to rerun updated autoInstall.pl: $!\n";
-				}
-				for my $sourceDir (qw(sdm_src LCA_src)){
-					die "Update archive is missing updates/$sourceDir\n" unless (-d "$updateDir/$sourceDir");
-				}
-				die "Update archive is missing the bundled updates/bin/rtk binary\n" unless (-s "$updateDir/bin/rtk");
-				# Compile the staged sources before replacing the installed source trees.
-				my $nsdmp = compile_sdm("$updateDir/sdm_src");
-				@txt = addInfoLtS("sdm",$nsdmp,\@txt,1);
-				$nsdmp = compile_LCA("$updateDir/LCA_src");
-				@txt = addInfoLtS("LCA",$nsdmp,\@txt,1);
-				$nsdmp = install_bundled_rtk("$updateDir/bin/rtk");
-				@txt = addInfoLtS("rtk",$nsdmp,\@txt,1);
-				copy_file_atomic("$updateDir/autoInstall.pl", $installedHelper);
-				copy_file_atomic("$updateDir/lotus3", "$ldir/lotus3");
-				for my $sourceDir (qw(sdm_src LCA_src)){
-					replace_tree_atomic("$updateDir/$sourceDir", "$ldir/$sourceDir");
-				}
-				($lver,$sver) = getInstallVer("$ldir/sdm_src");
-				remove_tree($updateDir) if -d $updateDir; unlink($updateArchive) if -e $updateArchive;
-				if (length($msgEnd) >4){print "Additional information for this update:\n$msgEnd\n";}
-				print "\nUpdated LotuS to version $lver\n\n";
-				finishAI("u");
-				exit(0);
-			} else {
-				print "You have the actual lotus version installed.\n"; exit(0);
-			}
-		} elsif($inp eq "2"){
+		if ($inp eq "2"){
 			$onlyDbinstall = 1;
 		}
 	}

@@ -101,10 +101,10 @@ The current parser applies the following checks:
 - empty sample IDs are skipped with a warning;
 - duplicate sample IDs abort the run;
 - the sample ID `OTU` is not allowed;
-- sample IDs with leading or trailing whitespace abort the run;
+- sample IDs containing whitespace (spaces or tabs, anywhere in the ID) abort the run;
 - sample IDs containing dashes (`-`) abort the run;
 - spaces anywhere in the mapping line trigger BIOM-compatibility warnings;
-- double quotes (`"`) are removed from mapping values;
+- double quotes (`"`) in mapping values trigger a warning; they are kept and JSON-escaped in BIOM output;
 - non-ASCII characters trigger BIOM-compatibility warnings.
 
 Recommended examples:
@@ -185,7 +185,7 @@ sampleC	run2/sampleC_R1.fastq.gz,run2/sampleC_R2.fastq.gz	run2
 
 Rules:
 
-- `SequencingRun` values must not be `NA`;
+- `SequencingRun` values must not be `NA`, empty, or padded with spaces; every sample needs a value;
 - if the column is present, LotuS3 reports the detected sequencing-run categories;
 - if the column is absent, LotuS3 attempts to infer sequencing runs from file or directory structure and writes an updated copy of the map;
 - inferred sequencing-run assignments should be checked before relying on them for large or multi-run datasets.
@@ -194,8 +194,9 @@ When `SequencingRun` is missing, LotuS3 may infer run groups from:
 
 - the `fastqFile` or `fnaFile` column;
 - directory structure in file paths;
-- `BarcodeSequence`, if present;
-- automatic splitting when no useful run information is available.
+- `BarcodeSequence`, if present.
+
+Samples whose files share one directory form a single inferred run; LotuS3 does not split them into batches automatically.
 
 ## `CombineSamples`
 
@@ -210,7 +211,7 @@ sampleA_lane2	sampleA_L002_R1.fastq.gz,sampleA_L002_R2.fastq.gz	sampleA
 sampleB_lane1	sampleB_L001_R1.fastq.gz,sampleB_L001_R2.fastq.gz	sampleB
 ```
 
-Rows with an empty `CombineSamples` value are treated as their own sample. Use this column only when the separate rows genuinely represent technical subdivisions of the same biological sample.
+Rows with an empty `CombineSamples` value are treated as their own sample. A `CombineSamples` value becomes the output sample name, so it follows the same rules as a `#SampleID`: no whitespace, no dashes, and not `OTU`. Use this column only when the separate rows genuinely represent technical subdivisions of the same biological sample.
 
 ## Metadata columns
 
@@ -222,7 +223,7 @@ sampleA	sampleA_R1.fastq.gz,sampleA_R2.fastq.gz	P01	T0	control
 sampleB	sampleB_R1.fastq.gz,sampleB_R2.fastq.gz	P01	T1	treated
 ```
 
-Metadata values are preserved as provided, except that double quotes are removed. For compatibility with BIOM and downstream tools, avoid spaces, quotes and non-ASCII characters where possible. If spaces are necessary in descriptive metadata, check the downstream output carefully.
+Metadata values are preserved as provided, including double quotes, which are JSON-escaped in BIOM output. For compatibility with BIOM and downstream tools, avoid spaces, quotes and non-ASCII characters where possible. If spaces are necessary in descriptive metadata, check the downstream output carefully.
 
 ## Common templates
 

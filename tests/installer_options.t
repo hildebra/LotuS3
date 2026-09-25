@@ -10,7 +10,7 @@ use FindBin;
 use JSON::PP qw(decode_json);
 use Test::More;
 use lib "$FindBin::Bin/lib";
-use InstallerTest qw(program read_file write_file replaced contains_ok lacks_ok);
+use InstallerTest qw(program perl_script read_file write_file write_executable replaced contains_ok lacks_ok);
 
 my $ROOT = abs_path("$FindBin::Bin/..");
 
@@ -52,6 +52,11 @@ sub prepare_programs {
     my ($t) = @_;
     $t->installed_tools;
     $t->tool(Rscript => qq{#!/bin/sh\necho "R scripting front-end version 4.4.0"\n});
+    # checked by the full-install preflight before any download
+    $t->tool($_ => "#!/bin/sh\nexit 0\n") for qw(unzip make cc xz);
+    -d "$t->{install}/bin" or mkdir "$t->{install}/bin" or die "$t->{install}/bin: $!\n";
+    write_executable("$t->{install}/bin/sdm", perl_script(qq{print "sdm 3.53 beta\\n";\n}));
+    write_executable("$t->{install}/bin/LCA", perl_script(qq{print "LCA 0.29\\n";\n}));
 }
 
 sub assert_all {
@@ -172,6 +177,29 @@ subtest 'test_database_only_refresh_has_no_program_questions' => sub {
     lacks_ok($output, '-- ONT --');
     ok(!exists $t->config->{barbell}, 'no barbell entry');
     ok(!-e "$t->{install}/bin/barbell", 'no barbell installed');
+};
+
+subtest 'test_rscript_version_on_stderr_is_recognised' => sub {
+    my $t = fixture();
+    prepare_programs($t);
+    # R before 4.2 prints "Rscript --version" to stderr only
+    $t->tool(Rscript => qq{#!/bin/sh\necho "R scripting front-end version 4.1.2 (2021-11-01)" >&2\n});
+    my ($output, $state) = run_choices($t, "\ny\n");
+    lacks_ok($output, 'older than 4');
+    is($state->{r_packages}, 1, 'R packages still installed');
+};
+
+subtest 'test_missing_build_tools_stop_before_downloads' => sub {
+    my $t = fixture();
+    prepare_programs($t);
+    unlink "$t->{tools}/unzip" or die "Cannot remove unzip: $!\n";
+    write_executable("$t->{install}/bin/sdm", perl_script("kill 'TERM', \$\$;\n"));
+    my ($output, $state) = run_choices($t, "\ny\n", ok => 0);
+    is($state, undef, 'stopped before the database downloads');
+    contains_ok($output, 'The full installation needs:');
+    contains_ok($output, ' - unzip');
+    contains_ok($output, 'a working sdm');
+    contains_ok($output, 'Nothing has been downloaded yet.');
 };
 
 subtest 'test_conda_database_mode_stays_noninteractive' => sub {

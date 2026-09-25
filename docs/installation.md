@@ -36,7 +36,7 @@ Install LotuS3 with all possible dependencies (all databases, ITS, ONT related w
 Simply enter or "1" for yes, "0" for detailed configuration via question.
 ```
 
-Press **Enter** or enter **1** to select all dependencies supported by the installer: KSGP, SILVA, GreenGenes2, HITdb, PR2 and beeTax reference databases; ITS/UNITE and ITS chimera resources; UTAX databases; both BLAST and Lambda; Savont and Barbell; and the standard programs and R packages. This skips the individual package-selection questions. The existing SILVA license acceptance and any incompatible-R-version question still apply. System prerequisites such as Rscript and compilers must already be available.
+Press **Enter** or enter **1** to select all dependencies supported by the installer: KSGP, SILVA, GreenGenes2, HITdb, PR2 and beeTax reference databases; ITS/UNITE and ITS chimera resources; UTAX databases; both BLAST and Lambda; Savont and Barbell; and the standard programs and R packages. This skips the individual package-selection questions. The existing SILVA license acceptance and any incompatible-R-version question still apply. System prerequisites such as Rscript and compilers must already be available; the installer checks them before any download (see [requirements](#requirements)).
 
 Enter **0** for detailed configuration. It asks about similarity-search programs, reference databases, ITS, UTAX, and then:
 
@@ -83,13 +83,46 @@ Barbell is needed at runtime only for `-ontDemux barbell`. See [ONT processing](
 
 LotuS3 requires:
 
-- Perl 5;
+- Perl 5.14 or newer. Only modules that ship with Perl are used, so no CPAN modules need to be installed. Some distributions split the standard modules off the interpreter: on Fedora, RHEL and derivatives install the `perl` package (not only `perl-interpreter`); on Debian and Ubuntu the standard `perl` package is enough;
 - a C++ compiler supporting C++17;
 - R and RScript;
 - Java or OpenJDK for tools such as the RDP classifier;
 - selected third-party tools and databases, depending on the chosen workflow.
 
-Conda normally handles its package dependencies. The source autoinstaller expects system build tools to be installed already; see the ONT build requirements above.
+Conda normally handles its package dependencies. The source autoinstaller expects system build tools to be installed already. Before it downloads any database, a full installation checks for:
+
+- `tar`, `gzip`, `unzip`, `make` and a C compiler (`gcc` or `cc`);
+- `xz`, when Lambda is selected on Linux;
+- a working `sdm` and `LCA`. The bundled `bin/sdm` and `bin/LCA` are Linux x86-64 builds; on other systems, place builds from [sdm](https://github.com/hildebra/sdm) and [LCA](https://github.com/hildebra/LCA) at those paths first (see [manual sdm compilation](#manual-sdm-compilation)).
+
+A missing item stops the installer with a list of what to install, before anything is downloaded. Java is only reported, since it is needed at run time for RDP classification. Downloads need `wget` or `curl`.
+
+## Download verification
+
+Every file the autoinstaller downloads is checked against a SHA-256 checksum pinned in `helpers/autoInstall.pl`, and all downloads use HTTPS. A file whose checksum differs is deleted and the installation stops, so a changed or substituted upstream file is never installed. To move a tool or database to a new release, download it, check it, and update its URL and checksum together in the `%PINNED_SHA256` table.
+
+Archives already present in `bin/installs/` (IQ-TREE and MAFFT for Linux) are used instead of downloading them again when their checksum matches. The macOS BLAST+ and Clustal Omega files that the installer used to fetch are no longer available upstream; on macOS the installer skips them with a warning. Install `blastn`/`makeblastdb` separately if you need BLAST; alignments use MAFFT.
+
+`bin/vsearch` is a statically linked Linux x86-64 build of VSEARCH 2.32.0 and is registered directly when it runs. It was compiled from the upstream release source (`vsearch-2.32.0.tar.gz`, SHA-256 `99578a8b960a0fb87c1f19dc65aedecddc01cfa91851b697dac8294dd08a6ceb`) with `./configure LDFLAGS=-static`, `make` and `strip`. The resulting executable has SHA-256 `8472f7852e4f320f1cc67e5dc09507e2e31034cd962bd1b8979bec894711c5a3`. On other platforms the installer downloads the pinned VSEARCH 2.32.0 release for Linux ARM64 (static) or macOS.
+
+## Installer options
+
+```text
+perl helpers/autoInstall.pl [options]
+  (no option)        interactive installation; a rerun offers to refresh databases/programs
+  --ont-only         install or register only the ONT tools (minimap2, Savont, Barbell)
+  -condaDBinstall    non-interactive download of the standard database set (Bioconda installs)
+  -downloadLmbdIdx   download prebuilt Lambda indices instead of building them
+  -lambdaIndex       build Lambda indices for the installed databases
+  -link_usearch PATH register an existing USEARCH binary and exit
+  --no-telemetry     do not send the installation ping (see below)
+  --with-barbell     accepted for compatibility; Barbell is part of the ONT tools
+  -h, --help         show this help
+```
+
+With `-lambdaIndex` on a fresh installation, Lambda indices are built once Lambda itself has been installed, later in the same run.
+
+After a full or database installation, the installer sends one request to the LotuS server with a random installation ID (the `UID` entry in `lOTUs.cfg`) and the LotuS and sdm versions. No file names, paths or data are sent. Use `--no-telemetry` to skip it.
 
 ## Installing dependencies manually
 
@@ -107,15 +140,15 @@ mamba install -c conda-forge -c bioconda bioconductor-dada2
 
 ## Manual `sdm` compilation
 
-LotuS3 includes a statically compiled Linux x86-64 **SDM 3.51 beta** binary at `bin/sdm`. ONT preprocessing requires SDM >=3.51 or a build whose `-version` output contains `ONT amplicon end matching: enabled`; LotuS checks the configured executable before processing. When using an older installation, update the executable selected by the `sdm` entry in `lOTUs.cfg`, even if ONT tools are already installed. The bundled binary should work on most Linux x86-64 systems. On macOS, or if the bundled binary does not work on your system, compile `sdm` manually:
+LotuS3 includes a statically compiled Linux x86-64 **SDM 3.53 beta** binary at `bin/sdm`. ONT preprocessing requires SDM >=3.51 or a build whose `-version` output contains `ONT amplicon end matching: enabled`; coarse dereplication requires SDM >=3.52. LotuS checks the configured executable before processing. When using an older installation, update the executable selected by the `sdm` entry in `lOTUs.cfg`, even if ONT tools are already installed. The bundled binary should work on most Linux x86-64 systems. On macOS, or if the bundled binary does not work on your system, compile `sdm` from its source repository and place it at `bin/sdm`:
 
 ```bash
-cd sdm_src
-make
-cp sdm ../sdm
+git clone https://github.com/hildebra/sdm.git sdm_src
+make -C sdm_src
+cp sdm_src/sdm bin/sdm
 ```
 
-The autoinstaller can also compile `sdm` when required.
+`LCA` is built the same way from https://github.com/hildebra/LCA into `bin/LCA`. With the sources checked out as `sdm_src/` and `LCA_src/` in the LotuS3 directory, the autoinstaller compiles them itself when the bundled binaries do not run.
 
 ## Updating a GitHub installation
 
@@ -125,13 +158,13 @@ If LotuS3 was installed with `git clone`, update the code with:
 git pull
 ```
 
-LotuS3 also has a built-in update mechanism through the autoinstaller. If LotuS3 was first installed with:
+Then rerun the autoinstaller:
 
 ```bash
 perl helpers/autoInstall.pl
 ```
 
-then running the autoinstaller again checks for updates. Previously downloaded proprietary programs and databases do not need to be downloaded again. If no updates are available, the autoinstaller exits without making changes.
+On an existing installation it offers to (1) refresh databases and reinstall the secondary programs, (2) refresh only the databases, or (3) set the USEARCH path. It does not update LotuS3 itself: the former online updater (`-forceUpdate`) was removed, because it installed an archive it could not verify. sdm, LCA, rtk and the ONT tools are reused when the existing executables still pass their checks; the refresh options download the selected databases and other programs again.
 
 ## Checking the installation
 

@@ -5,7 +5,7 @@ This directory holds the developer regression suite. It is separate from `lotus3
 ## Requirements
 
 - **Linux x86-64.** The tests run the bundled `bin/sdm` and `bin/LCA`, which are Linux builds. On Windows, run the suite inside WSL (see below).
-- **Perl 5 with core modules only** (`Test::More`, `JSON::PP`, `Archive::Tar`, `IO::Compress`, `Digest::SHA`). `prove` is part of Perl.
+- **Perl 5.14 or newer with its standard modules only** (`Test::More`, `JSON::PP`, `Archive::Tar`, `IO::Compress`, `Digest::SHA`, `Module::CoreList`). `prove` is part of Perl. `perl_dependencies.t` fails if any LotuS3 or test file loads a module that is not part of Perl.
 - No Python, R, network access or reference databases are needed.
 - **Optional: `zstd`.** Twenty Bioconda `.conda` extraction cases are skipped without it. Put `zstd` on `PATH`, or set `LOTUS_TEST_ZSTD=/path/to/zstd`.
 
@@ -17,7 +17,7 @@ From the repository root:
 prove tests/
 ```
 
-A passing run reports `Files=6, Tests=154` and `Result: PASS`.
+A complete run reports `Files=9, Tests=174`. With the bundled SDM 3.53 beta, one case fails: `test_storage_only_preserves_main_fastq_quality_averaging` in `coarse_derep.t`. It runs SDM directly and shows a quality-averaging difference inside SDM, not a LotuS3 defect.
 
 To run one file with per-case output:
 
@@ -54,10 +54,13 @@ cd ~/lotus3-tests && chmod +x bin/sdm bin/LCA && prove tests/
 | --- | ---: | --- |
 | `ont_integration.t` | 55 | ONT preprocessing with SDM, Savont and Barbell wiring, barcode matching, ASV-to-abundance pairing, backmapping identity and mapped-read report, option validation, and the `bin/savont2uc.pl` converter |
 | `perl_audit.t` | 31 | Output locking and cleanup guards, input validation, version checks, contamination filters, backmapping read counts, taxonomy parsing, USEARCH version/chimera handling, and complete pipeline runs |
+| `audit_fixes.t` | 11 | Command splitting and failure reporting, failing IQ-TREE runs, empty `SequencingRun` values and the copied map header, whitespace and dashes in sample names, SINTAX rank letters, FASTA/taxonomy ID agreement, `-xtalk`, option validation, path-depth guards and `-create_map` pairing |
 | `sintax_taxonomy.t` | 5 | SINTAX taxonomy (`-taxAligner sintax`, `-refDB SINTAX`): OTU-first `hiera_BLAST.txt`, higher-level tables, BIOM and phyloseq input, taxonomy-only and ITS runs, early failures |
-| `coarse_derep.t` | 27 | Coarse dereplication storage parity, retained-variant seeds, and the dereplication count auditor |
+| `coarse_derep.t` | 28 | Coarse dereplication storage parity, retained-variant seeds, the seed-extension failure abort, and the dereplication count auditor |
 | `installer_ont.t` | 25 | ONT tool installation and registration, and Bioconda package extraction |
-| `installer_options.t` | 11 | Interactive installer prompts and install modes |
+| `installer_options.t` | 13 | Interactive installer prompts and install modes, the stderr-only Rscript version and the preflight before any download |
+| `installer_downloads.t` | 5 | Pinned SHA-256 checksums for every download URL, refusal of unpinned and mismatching downloads, reuse of bundled archives, `--help` and the retired `-forceUpdate` |
+| `perl_dependencies.t` | 1 | Every module loaded by `lotus3`, the helpers, `bin/` scripts and the tests is core Perl 5.14 |
 
 Shared code lives in `lib/`:
 

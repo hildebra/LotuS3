@@ -36,7 +36,7 @@ use Digest::SHA ();
 
 
 #use threads;
-use 5.012;
+use 5.014; #JSON::PP, part of core Perl since 5.14; every module used here is core Perl
 use FindBin qw($RealBin);
 
 
@@ -74,7 +74,8 @@ sub checkOS;
 #3.11: 16.6.26: sdm v 3.37 (faster, less mem, more controlled outputs). KSGP v4.0 added to installer.
 #3.12: major refactor LotuS3 via AI: stability, reporting
 #3.13: 21.7.26: safer installer and non-destructive dry-run; targeted, lightweight validation and expanded self-tests; improved taxonomy-only handling and cleanup; removed reference-based OTU clustering; added SDM 3.41 summary parsing.
-my $selfID = "LotuS 3.13";
+#3.14: 25.9.26: audit fixes (checked multi-step commands, map/SINTAX/-create_map fixes), SHA-256-pinned HTTPS installer downloads, static vsearch 2.32.0, core-Perl-only (5.14+).
+my $selfID = "LotuS 3.14";
 my $LotuS_output_schema_version = "1.0";
 
 
@@ -247,7 +248,6 @@ my $minEval     = 1e-14;    #blast filtering; should be optimized to different p
 my @idThr = ( 97, 93, 93, 91, 88, 78, 0 );
 my $idThreshs = "-1"; #override @idThr from cmd line
 my $lengthTolerance =  0.85;     #length of hits to still consider valid, compared to longest match
-my $linesPerFile = -1; #4000000 .. -1 to deactivate
 my $doBlasting = -1;       #$doBlasting 2:lambda, 1:blast, 0:RDP, -1: ini value, 3:utax 4: vsearch 5: usearch
 my $doRDPing          = -1;    #0: not, 1:do RDP
 my $doBlasting_pre    = "-1";
@@ -610,7 +610,6 @@ my $OTUSEED    = "$lotus_tempDir/otu_seeds.fna";
 my $OTUmFile = "$outdir/OTU.txt";
 my $OTUmRefFile =   "$outdir/OTU_psRef.txt";    #diff to OTU.txt: collapse entries with same taxonomic reference
 $OTUmRefFile = "" unless ($pseudoRefOTU);
-my $seedExtDone = 1;
 my $seedExtRep = ""; #SDM seed extension summary, closes the seed extension block
 my $didMerge = 0; #were reads already merged before this step? -> so far always no
 
@@ -681,22 +680,14 @@ if ( $exec == 0 && $onlyTaxRedo == 0 && $TaxOnly eq "0" ) {
 	my $mrgSentence = ""; $mrgSentence = "and merging pairs of " if ($numInput == 2);
     printL (frame($ClusterPipe == 9 ? "Counting filtered reads per Savont ASV" : "Extending ${mrgSentence}${OTU_prefix} Seeds",1,2), 0);
 	my $seedLogOffset = -s $progOutPut || 0;
-    $status = systemL($sdmcmd, "Seed extension", 0); #actual sdm derep step; recoverable fallback on failure
-	if ($status) {
-        die "SDM retained-variant seed extension failed; see $logDir/SeedExtensionStats.log and $progOutPut.\n"
-            if $sdmRetainQuals;
-		printL "SDM failed to build the Savont abundance matrix; see SeedExtensionStats.log and LotuS_progout.log.\n", 31 if $ClusterPipe == 9;
-		printL "Failed $sdmcmd\n",                    0;
-		printL "Fallback to ${OTU_prefix} median sequences.\n", 0;
-		$seedExtDone = 0;
-		$OTUSEED = $tmpOTU;
-		#exit(11);
-	} else {
-		$seedExtDone = 1;
-		preserve_savont_consensus($tmpOTU, $OTUSEED, $OTUmFile, $mapHref) if $ClusterPipe == 9;
-		$seedExtRep = seed_extension_report($seedLogOffset);
-		printL(frame($seedExtRep,1,3),0) if ($numInput != 2); #paired: closed after read merging
-	}
+    $status = systemL($sdmcmd, "Seed extension", 0); #actual sdm derep step
+	#sdm writes the only abundance matrix (-otu_matrix), so no later step can run without it
+	printL "SDM seed extension failed, so no ${OTU_prefix} abundance matrix was built; see $logDir/SeedExtensionStats.log and $progOutPut.\n", 31 if ($status);
+	preserve_savont_consensus($tmpOTU, $OTUSEED, $OTUmFile, $mapHref) if $ClusterPipe == 9;
+	$seedExtRep = seed_extension_report($seedLogOffset);
+	printL(frame($seedExtRep,1,3),0) if ($numInput != 2); #paired: closed after read merging
+	#/////////////////////////////////////////  paired read merging /////////////////////
+	mergeRds();
 } elsif ($onlyTaxRedo) { 
 	printL "Skipping Seed extension step\n", 0; 
 }
@@ -708,9 +699,6 @@ undef $tmpOTU;
 
 
 
-#/////////////////////////////////////////  paired read merging /////////////////////
-mergeRds();
-#die "$OTUSEED\n";
 if ($TaxOnly ne "0" && -f $TaxOnly){
 	$OTUfa = $TaxOnly;
 	if ($TaxOnly =~ m/\.gz$/i){
@@ -723,11 +711,6 @@ if ($TaxOnly ne "0" && -f $TaxOnly){
 	}
 }
 #die "$OTUSEED\n";
-#
-#merge not combined reads & check for reverse adaptors/primers
-#do this also in case no pairs were found at all.. Singletons need to be fq->fna translated into $OTUSEED
-
-#at this point $tmpOTU (== $OTUSEED) contains the OTU ref seqs
 
 #add additional sequences to unfinal file
 #my $lnkHref = numberOTUs($tmpOTU,$OTUfa,${OTU_prefix});
@@ -780,7 +763,7 @@ if ( $exec == 0 && $onlyTaxRedo == 0 && $TaxOnly eq "0" ) {
 
 	
 	#integrate all these filters now
-    clean_otu_mat($OTUfa, $OTUmFile, $xtraConthref) if ($seedExtDone);
+    clean_otu_mat($OTUfa, $OTUmFile, $xtraConthref);
 		
 	
 		
@@ -1196,7 +1179,7 @@ sub ontBarbellDemux {
                 push @missing, "$barcode->$sample ($count<$ontMinReads reads)"; next;
             }
         }
-        copy($src, "$bbDmx/$sample.fq") or die "Cannot copy $src: $!\n";
+        move($src, "$bbDmx/$sample.fq") or die "Cannot move $src: $!\n"; #avoid a second on-disk copy of the reads
         $kept{$sample} = "$sample.fq";
     }
     printL "barbell: kept " . scalar(keys %kept) . ' of ' . scalar(keys %$barcodes) . " declared barcodes; excluded undeclared barcodes.\n",0;
@@ -1323,11 +1306,7 @@ sub sdmStep1{
             $derepCmd .= " -derepIdentity $sdmDerepSettings{derepIdentity} -derepStoreQuals $sdmRetainQuals"
                 . " -derepStoreDiffs 0 -derepSubclusterFasta 0 -derepReassign 0 -derepCoarseClusters 0";
         }
-		if ( $saveDemulti == 3 ) {   #temp deactivated, since I have  $sdmDemultiDir
-			$derepCmd .= " -suppressOutput 0";
-		} else {
-			$derepCmd .= " -suppressOutput 1";
-		}
+		$derepCmd .= " -suppressOutput 1";
 	}#	elsif ( $paired != 2 ) { $paired_sdm .= " -onlyPair 1"; }
 	
 	my $demultiSaveCmd = "";
@@ -1337,7 +1316,6 @@ sub sdmStep1{
 	}
 	my $dmgCmd = "";
 	if ($damagedFQ) { $dmgCmd = " -ignore_IO_errors 1"; }
-	if ($linesPerFile > 0) { $dmgCmd = " -maxReadsPerOutput $linesPerFile"; }
 	my $mainSDMlog = "$logDir/demulti.log";
 	my $mainSDMdereplog = "$logDir/demulti.dereplication.log";
 	if ($TaxOnly ne "0"){
@@ -1468,33 +1446,6 @@ sub sdmStep1{
 			close LOG;
 			close cmdLOG;
 			exit(0);
-		}
-		if ( $saveDemulti == 3 && $exec == 0 )
-		{    #&& $onlyTaxRedo==0){#gzip demultiplexed fastas
-			systemL "mkdir -p $outdir/demultiplexed; "; 
-			my @allOuts;
-			@allOuts = split /,/, $filterOutAdd;
-			foreach my $demulti_file (@allOuts) {
-				my @singleton_files = glob("$demulti_file.singl*");
-				my $demulti_name = basename($demulti_file);
-				systemL "$gzipC -c $demulti_file.singl* > $outdir/demultiplexed/$demulti_name.gz; rm -f $demulti_file.singl*;" if @singleton_files;
-				systemL "$gzipC -c $demulti_file* > $outdir/demultiplexed/$demulti_name.gz; rm -f $demulti_file*;" if -e $demulti_file;
-			}
-			@allOuts = split /,/, $filterOut;
-			foreach my $demulti_file (@allOuts) {
-				my @singleton_files = glob("$demulti_file.singl*");
-				my $fn = basename($demulti_file);
-				#my $fdir = $1;
-				#my $fns = $fn;
-				#$fns =~ s/\.(f[^\.]+)$/\.singl\.$1/; 
-#					systemL "gzip -c $fdir/$fns > $outdir/demultiplexed/$fn.singl.gz; rm -f $fdir/$fns;" if (-e "$fdir/$fns");
-	#			systemL "gzip -c $_*.singl > $outdir/demultiplexed/$fn.singl.gz; rm -f $_*.singl";
-	#			systemL "gzip -c $_* > $outdir/demultiplexed/$fn.gz; rm -f $_*";
-				#die "DEBUG new singl filenames\n";
-				#print "$fn\n$fdir\n$fns\n";
-				systemL "$gzipC -c $demulti_file.singl* > $outdir/demultiplexed/$fn.singl.gz; rm -f $demulti_file.singl*;" if @singleton_files;
-				systemL "$gzipC -c $demulti_file* > $outdir/demultiplexed/$fn.gz; rm -f $demulti_file*;" if -e $demulti_file;
-			}
 		}
 		if ($ClusterPipe == 7){#derep by single file, combine map at end
 			#$cmd = "cat $lotus_tempDir/derep.*.map > $lotus_tempDir/derep.map;";
@@ -1687,11 +1638,10 @@ sub runPhyloObj{
 		systemL $cmd,"vsearch for ASVcl",1;
 		
 		#matchlist, otutable and hiera_blast
-		$cmd = "$Rscript $ASVclscript $OTUmFile $taxHiear $matchFile ;";
-		#print "\n\n\n $cmd \n\n\n";
-		if ((systemL $cmd)){
-			printL "Could not create phyloseq object\n","w";
-			return 0;
+		$cmd = "$Rscript $defRscriptOpt $ASVclscript $OTUmFile $taxHiear $matchFile ;";
+		#the phyloseq object already exists: a failed post-clustering must not hide it
+		if (systemL($cmd, "ASV post-clustering", 0)){
+			printL "ASV post-clustering (-asvPostClust) failed; the phyloseq object from before post-clustering is kept\n","w";
 		}
 	}
 	
@@ -1729,19 +1679,23 @@ sub vfxtractor{
 	}
 	my $outBFile = $otusFA . ".vxtr";
 	my $outCFile = $otusFA . ".vxtr.csv";
-	my $defReg = ".V1-V9.";
-	my $region = $defReg;
-	$region = $doVXTR unless ($doVXTR eq "1");
+	my $region = ".V1-V9."; #-VXtr is an on/off switch (0/1): the full V1-V9 extraction
 
-	my $cmd = "$vxtrBin -o $outBFile -r $region -c $outCFile -hmmdir $hmmsVX/".substr( $ampliconType, 0, 3 )."/bacteria/ -nc $uthreads  -hmmsc $hmmsrchBin $otusFA;"; #-nc $uthreads
-	$cmd .= "cp $outCFile $logDir/VXtractor.summary.txt\n";
-	if ( systemL($cmd) != 0 ) { printL( "Failed command:\n$cmd\n", 1 ); }
+	#HMM set follows -tax_group (V-Xtractor ships one directory per organism group)
+	my $hmmGroup = lc($organism);
+	my $hmmDir = "$hmmsVX/".substr( $ampliconType, 0, 3 )."/$hmmGroup/";
+	if (!-d $hmmDir) {
+		printL "No V-Xtractor HMMs for -tax_group $organism at $hmmDir; using the bacterial HMMs instead\n","w";
+		$hmmDir = "$hmmsVX/".substr( $ampliconType, 0, 3 )."/bacteria/";
+	}
+	my $cmd = "$vxtrBin -o $outBFile -r $region -c $outCFile -hmmdir $hmmDir -nc $uthreads  -hmmsc $hmmsrchBin $otusFA;";
+	$cmd .= "cp $outCFile $logDir/VXtractor.summary.txt;";
+	systemL($cmd, "V-Xtractor");
 
-#die "VXdie ".$cmd;
-#if (-z "$outBFile.full.fasta"){printL "Could not find any valid ITS OTU's. Aborting run.\n Remaining OTUs can be found in $outBFile*\n",923;}
 	my $hr;
 	my %ITSo;
-	
+
+	printL "V-Xtractor wrote no output ($outBFile); check $progOutPut and the HMMs at $hmmDir\n", 123 unless -e $outBFile;
 	$hr   = readFasta("$outBFile");
 	%ITSo = %{$hr};
 
@@ -1750,7 +1704,7 @@ sub vfxtractor{
 	$hr = readFasta($otusFA); my %FNA = %{$hr};
 	
 	if ( scalar( keys(%ITSo) ) == 0 ) {
-		printL "Could not find any valid ${OTU_prefix}'s within variable regions $region (via V-Xtractor). Aborting run.\n Remaining OTUs can be found in $outBFile*\n", 923;
+		printL "Could not find any valid ${OTU_prefix}'s within variable regions $region (via V-Xtractor). Aborting run.\n Remaining OTUs can be found in $outBFile*\n", 123;
 	}
 	
 	#check which OTUs existed before, but are not longer listed in ITSx output
@@ -1771,7 +1725,7 @@ sub vfxtractor{
 	}
 	
 
-	printL frame( "V region extraction: Kept " . scalar( keys(%ITSo) ) . ", deleted $delOTUs ${OTU_prefix}'s identified as regions $doVXTR (of "  . scalar( keys(%FNA) ) . " ${OTU_prefix}'s).\n"),0;
+	printL frame( "V region extraction: Kept " . scalar( keys(%ITSo) ) . ", deleted $delOTUs ${OTU_prefix}'s identified as regions $region (of "  . scalar( keys(%FNA) ) . " ${OTU_prefix}'s).\n"),0;
 	systemL "rm -f $outBFile*;";
 	$citations .= "V extraction of ribosomal regions: V-Xtractor: an open-source, high-throughput software tool to identify and extract hypervariable regions of small subunit (16S/18S) ribosomal RNA gene sequences. Martin Hartmann 1, Charles G Howes, Kessy Abarenkov, William W Mohn, R Henrik Nilsson\n";
 	return \%ret;
@@ -1825,11 +1779,9 @@ sub ITSxOTUs {
 	}
 	
 	my $cmd = "perl $itsxBin -i $otusFA -o $outBFile --cpu $uthreads --multi_thread T --heuristics T -t $itsxOrg --silent T --fasta T --nhmmer F --save_regions $ITSxReg --partial $ITSpartial --hmmBin $hmmsrchBin --preserve T;";
-	$cmd .= "cp $outBFile.summary.txt $logDir/ITSx.summary.txt\n";
-	if ( systemL($cmd) != 0 ) { printL( "Failed command:\n$cmd\n", 1 ); }
+	$cmd .= "cp $outBFile.summary.txt $logDir/ITSx.summary.txt;";
+	systemL($cmd, "ITSx");
 
-#die "ITSxdie ".$cmd;
-#if (-z "$outBFile.full.fasta"){printL "Could not find any valid ITS OTU's. Aborting run.\n Remaining OTUs can be found in $outBFile*\n",923;}
 	my $hr;
 	my %ITSo;
 	
@@ -1840,14 +1792,9 @@ sub ITSxOTUs {
 			%ITSo = ( %ITSo, %{ readFasta($itsxFa) } ) if -e $itsxFa;
 		}
 	} else{
-		if ( $ampliconType eq "ITS1" || $ampliconType eq "ITS" ) {
-			$hr   = readFasta("$outBFile.ITS1.fasta");
-			%ITSo = %{$hr};
-		} 
-		if ( $ampliconType eq "ITS2" || $ampliconType eq "ITS" ) {
-			$hr   = readFasta("$outBFile.ITS2.fasta");
-			%ITSo = ( %ITSo, %{$hr} );
-		}
+		#a missing region file means ITSx found nothing: report that below instead of failing in readFasta
+		my $regFa = "$outBFile.$ampliconType.fasta";
+		%ITSo = %{ readFasta($regFa) } if -e $regFa;
 	}
 
 	#my $ITSfa = `grep -c '^>' $outBFile.full.fasta`;
@@ -1855,7 +1802,7 @@ sub ITSxOTUs {
 	$hr = readFasta($otusFA); my %FNA = %{$hr};
 	
 	if ( scalar( keys(%ITSo) ) == 0 ) {
-		printL "Could not find any valid ITS ${OTU_prefix}'s. Aborting run.\n Note: this is sometimes caused by the wrong hmmsearch version installed on the cluster. We're currently working on automatically resolving this, but you can  check this in $progOutPut file. Remaining OTUs can be found in $outBFile*\n", 923;
+		printL "Could not find any valid ITS ${OTU_prefix}'s. Aborting run.\n Note: this is sometimes caused by the wrong hmmsearch version installed on the cluster. We're currently working on automatically resolving this, but you can  check this in $progOutPut file. Remaining OTUs can be found in $outBFile*\n", 123;
 	}
 	
 	#check which OTUs existed before, but are not longer listed in ITSx output
@@ -1864,12 +1811,9 @@ sub ITSxOTUs {
 	foreach my $k ( keys %ITSo ) {
 		my $hdde = $k;# substr($k,1);#"${OTU_prefix}x_1";
 		
-		#known format, but remove the ItSx info
-		if ($k =~ m/^(ASV|[z]?OTU_\d+)\|/){
-			$hdde = $1;
-		}
-		#same again, different known format, but remove the ItSx info
-		if ($k =~ m/^(ASV|[z]?OTU_\d+);size=\d+\|/){
+		#ITSx may append "|region" details (and ";size=N") to the ID: keep only the original ID,
+		#whatever the prefix (OTU_, ASV_, Zotu_ or a custom one)
+		if ($k =~ m/^([^|;]+?)(?:;size=\d+;?)?\|/){
 			$hdde = $1;
 		}
 		#print $hdde;
@@ -1908,7 +1852,6 @@ sub ITSxOTUs {
 sub contamination_rem($ $ $ $) {
     my ( $otusFA, $refDB1, $nameRDB1 , $inTarget) = @_;
 	my @refDBs = split /,/,$refDB1;
-	my $contRemStr=0;
 	my %totHits;
 	my %ret;
 	my $minHitID = 0.9;
@@ -1927,10 +1870,8 @@ sub contamination_rem($ $ $ $) {
 		my $nameRDB = "$nameRDB1.$i";
 		
 		
-		my $outContaminated = "$logDir/out.$processShrt.$nameRDB.fna";
 		my $required        = 1;
 		if ( $refDB eq "" ) { $required = 0; }
-		systemL "rm -f $outContaminated;" if ( -e $outContaminated );
 		my $contRem = 0;
 		my $matchAlgo="";
 		#printL frame "Searching for contaminant OTUs with $nameRDB ref DB";
@@ -1986,7 +1927,6 @@ sub contamination_rem($ $ $ $) {
 			}
 			my @hitA = keys %hits;
 			$contRem = scalar @hitA;
-			my $storeContamIDsF = "$logDir/$nameRDB1.$nameRDB.otus";
 			my $Xtxt ="";
 			#$Xtxt .= "\nIDs stored in $storeContamIDsF" if ($contRem);
 			$anycontRem += $contRem; #before the last-DB check, so single-DB runs report too
@@ -2029,7 +1969,6 @@ sub contamination_rem($ $ $ $) {
 			#$outfile = "$lotus_tempDir/uparse.fa";
 		}
 		#print "CR $contRem\n";
-		$contRemStr += $contRem;
 	}
 	#nothing found? don't bother writing file again..
 	if ($Lreport ne ""){
@@ -2043,26 +1982,7 @@ sub contamination_rem($ $ $ $) {
 			$citations .= "minimap2 v$miniVer used in offtarget aligments: Li H. 2018. Minimap2: pairwise alignment for nucleotide sequences. Bioinformatics 34:3094–3100.\n" if $useMini4map;
 		}
 	}
-	my @kh = keys %totHits;
-	#print @kh. "   @kh\n";
-	return \%totHits; #if ($contRemStr == 0);
-	
-	die; #should no longer go here..
-	my $hr = readFasta($otusFA);
-	my %OTUs = %{$hr};
-	$contRemStr = scalar(keys(%totHits));
-	#print "\n\n\"". scalar(keys %totHits) ."\n";
-	#print remaining OTUs
-	open Oa, ">$otusFA" or printL "Can't open ${OTU_prefix} file $otusFA\n", 39;
-	my $cnt=0;
-	foreach my $hi ( keys %OTUs ) {
-		next if (exists($totHits{$hi}));
-		print Oa ">" . $hi . "\n" . $OTUs{$hi} . "\n";
-		$cnt++;
-	}
-	close Oa;
-	printL "Writing $cnt/" . scalar(keys(%OTUs)) ." ${OTU_prefix} seeds after $nameRDB1 removal\n";
-    return $contRemStr;
+	return \%totHits;
 }
 sub getOTUsize($){
 	my ($otuM) = @_;
@@ -2251,8 +2171,8 @@ sub checkXtalk($ $) {
 		printL "Cross talk check only avaialable with usearch installed\n";
 		return \%ret;
 	}
-	if ($doXtalk && ( $usearchVer < 11 || $usearchVer > 11) ) {
-        printL "cannot check for cross-talk in your usearch version ($usearchVer), as only implemented in usearch version 11\n",83;
+	if ($doXtalk && ( !-f $usBin || $usearchVer != 11 ) ) { #the vsearch stand-in version 11 does not count
+        printL "-xtalk needs USEARCH 11 (configured usearch: \"$usBin\", version $usearchVer); UNCROSS2 is only implemented in usearch version 11\n",83;
     }
 	
     my $otuM1 = $otuM . ".noXref";
@@ -2508,10 +2428,8 @@ sub forceMerge_fq2fna($ $ $) {
     if ( $remFromEnd ne "" ) {
         $check4endStr = 1;
         my @spl = split( /,/, $remFromEnd );
-        $endRmvs .= $spl[0] . '.*$';
-        for ( my $i = 1 ; $i < @spl ; $i++ ) {
-            $endRmvs .= "|" . $spl[$i] . '.*$';
-        }
+        #literal sequences (validated as IUPAC), removed together with everything after them
+        $endRmvs = join( "|", map { quotemeta($_) . '.*$' } @spl );
 
         #print $remFromEnd."  C ".$endRmvs."\n";
         #$rawFileSrchStr1 = '.*1\.f[^\.]*q\.gz$';
@@ -2523,7 +2441,7 @@ sub forceMerge_fq2fna($ $ $) {
 			chomp $line;
 			if ( $line =~ m/^@/ && $lnCnt == 0 ) {
 				$line =~ s/^@/>/;
-				$line =~ s/\.\d$// if ($line =~ m/[OTUASV]+_\d+\.\d+/);
+				$line =~ s/\.\d$// if ($line =~ m/(?:ASV|Z?OTU)_\d+\.\d+/i); #mate suffix, for OTU_, ASV_ and Zotu_ IDs
 				print O $line . "\n"; $seedCnt++; $cntMerged++;
 				#print $line . "\n";
 			}
@@ -2537,8 +2455,7 @@ sub forceMerge_fq2fna($ $ $) {
 		close I;
 	}
     if ( -f $sdms ) {
-	#print "sdms $sdms\n";
-		open I, "<", $sdms;
+		open I, "<", $sdms or die "Couldn't open SDM singles file $sdms: $!\n";
 		$lnCnt = 0;
 		while ( my $line = <I> ) {
 			chomp $line;
@@ -2760,7 +2677,7 @@ sub readPaths_aligners($) {
       unless ( -f $inF );
 	  #die "$inF\n";
 	$Rscript = truePath("Rscript");
-    open I, "<", $inF;
+    open I, "<", $inF or die "Cannot read LotuS configuration $inF: $!\n";
     while ( my $line = <I> ) {
 		chomp $line;
 		next if ( $line =~ m/^#/ );
@@ -2838,7 +2755,7 @@ sub readPaths_aligners($) {
 		#}elsif ( $line =~ m/^lambda_index\s+(.+?)\s*$/ ) {
 		#	$lambdaIdxBin = truePath($1);
 		} elsif ( $line =~ m/^vxtractor\s+(.+?)\s*$/ ) {$vxtrBin = truePath($1);
-		} elsif ( $line =~ m/^vxtractorHMMs\s+(.+?)\s*$/ ) {$hmmsVX = $1;
+		} elsif ( $line =~ m/^vxtractorHMMs\s+(.+?)\s*$/ ) {$hmmsVX = configDataPath($1); #a directory, resolved like other config data paths
 		} elsif ( $line =~ m/^itsx\s+(.+?)\s*$/ ) {$itsxBin = truePath($1);
 		} elsif ( $line =~ m/^hmmsearch\s+(.+?)\s*$/ ) { $hmmsrchBin = truePath($1);
 		} elsif ( $line =~ m/^CheckForUpdates\s+(.+?)\s*$/ ) {$checkForUpdates = $1;
@@ -2864,7 +2781,7 @@ sub readPaths {    #read tax databases and setup correct usage
     my ($inF,$defDBset) = @_;
     die("$inF does not point to a valid lotus configuration\n")
       unless ( -f $inF );
-    open I, "<", $inF;
+    open I, "<", $inF or die "Cannot read LotuS configuration $inF: $!\n";
     my $TAX_REFDB_GG        = "";
     my $GGinfile            = "";
     my $TAX_REFDB_SLV       = "";
@@ -2995,7 +2912,7 @@ sub readPaths {    #read tax databases and setup correct usage
                 for ( my $i = 0 ; $i < @spl ; $i++ ) {
                     printL "Error reading IdentityThresholds from configuration: '$spl[$i]' is not an integer.\n", 22 unless $spl[$i] =~ /^\d+$/;
                     if ( $spl[$i] > 100 || $spl[$i] < 0 ) {
-                        printL "Error reading \"IdentityThresholds\" from configuration file: every entry has to be <100 and >0. Found " . $spl[$i] . ".\n", 22;
+                        printL "Error reading \"IdentityThresholds\" from configuration file: every entry has to be between 0 and 100. Found " . $spl[$i] . ".\n", 22;
                     }
                     $idThr[$i] = $spl[$i];
                 }
@@ -3044,9 +2961,17 @@ sub readPaths {    #read tax databases and setup correct usage
         printL "Requested DB for uchime ref at\n$UCHIME_REFDB\ndoes not exist; LotuS will run without reference based ${OTU_prefix} chimera checking.\n","w";
     }
 
-	if (   ( $refDBwanted !~ m/SLV/ && $refDBwanted !~ m/PR2/ ) && $ampliconType eq "LSU" && !-f $refDBwanted ) {
-		printL "-refDB \"GG\" does not contain taxonomic infomation for amplicon type $ampliconType \n switchung to \"SLV\".\n",0;
-		$refDBwanted = "SLV";
+	#LSU: only SILVA and PR2 carry LSU taxonomy. Judge each -refDB entry, so custom FASTA files are kept.
+	if ( $ampliconType eq "LSU" ) {
+		my @lsuDBs = split /,/, $refDBwanted;
+		my @kept = grep { -f $_ || m/^(?:SLV|PR2|UTAX|SINTAX)$/i } @lsuDBs;
+		my @dropped = grep { !( -f $_ || m/^(?:SLV|PR2|UTAX|SINTAX)$/i ) } @lsuDBs;
+		if (@dropped) {
+			push @kept, "SLV" unless grep { m/^SLV$/i } @kept;
+			my $who = $defDBset ? "The default reference database" : "-refDB";
+			printL "$who \"" . join(",", @dropped) . "\" has no taxonomy for amplicon type $ampliconType; using \"" . join(",", @kept) . "\" instead.\n", 0;
+			$refDBwanted = join(",", @kept);
+		}
 	}
 
     #die $refDBwanted."$doBlasting\n";
@@ -3081,7 +3006,7 @@ sub readPaths {    #read tax databases and setup correct usage
             if ( -f $subrdbw ) {    #custom DB
                 push @refDBname, "custom";
                 push( @TAX_REFDB, $subrdbw );
-                if ( $refDBwantedTaxoA[$indexCustomDB] eq "" ) {
+                if ( ( $refDBwantedTaxoA[$indexCustomDB] // "" ) eq "" ) {
                     printL "Please provide a taxonomy file for custom ref DB @TAX_REFDB\n",45;
                 }
                 elsif ( !-f $refDBwantedTaxoA[$indexCustomDB] ) {
@@ -3105,6 +3030,8 @@ sub readPaths {    #read tax databases and setup correct usage
                 }
                 next; #utaxTaxAssign only searches this DB; the ITS/UNITE block below must not add its FASTA
             }
+            #ITS turns every named DB into UNITE; add it once, not once per -refDB entry
+            if ( ( $subrdbw =~ m/^UNITE$/ || substr( $ampliconType, 0, 3 ) eq "ITS" ) && grep { $_ eq "UNITE" } @refDBname ) { next; }
             if ( $subrdbw =~ m/^UNITE$/ || substr( $ampliconType, 0, 3 ) eq "ITS" ){#overrides everything else
                 #printL "Using UNITE ITS ref seq database.\n", 0;
                 $ampliconType = "ITS";    #unless (substr($ampliconType,0,3) eq "ITS");
@@ -3300,7 +3227,7 @@ sub announce_options{
 		printL("PCTID_ERR               $id_OTU_noise\n",0);
 	} elsif ($ClusterPipe == 6 || $ClusterPipe == 7 ) {
 		my $d2xtra = "";
-		$d2xtra = " (-dada2seed $dada2Seed)";
+		$d2xtra = " (-dada2seed $dada2Seed)" if ($ClusterPipe == 7);
 		printL "${OTU_prefix} clustering based on sequence error profiles$d2xtra\n", 0;
 	} elsif ($ClusterPipe == 3 ) {
 		printL "${OTU_prefix} nt id      $id_OTU\n", 0;
@@ -3443,14 +3370,14 @@ sub checkProgVersions{
 	my $LCAout = checked_program_output($LCABin, "-v");
 	my ($LCAver) = $LCAout =~ /(\d+(?:\.\d+)+)/;
 	if (!defined($LCAver) || !version_at_least($LCAver, "0.25")){
-		printL "Could not verify LCA >= 0.25 (output: $LCAout) at $LCABin\n",823;
+		printL "Could not verify LCA >= 0.25 (output: $LCAout) at $LCABin\n", 124;
 	}
 #minimap2 version check
 	if (defined($mini2Bin) && -f $mini2Bin){
 		my $usvstr = checked_program_output($mini2Bin, "--version");
 		my ($miniVer) = $usvstr =~ /(\d+(?:\.\d+)+)/;
 		if (!defined $miniVer) {
-			printL "Could not parse minimap2 version from $mini2Bin: $usvstr\n", 823;
+			printL "Could not parse minimap2 version from $mini2Bin: $usvstr\n", 124;
 		} elsif (!version_at_least($miniVer, "2.17")) {
 			die "minimap2 version (found $miniVer at $mini2Bin) too low, expected at least 2.17\n";
 		}
@@ -3467,8 +3394,8 @@ sub checkProgVersions{
 	}elsif ( $usearchVer < 8&& $usearchVer > 0) {
 		printL "Usearch ver 7 is outdated, it is recommended to install ver 9.\nDownload from http://drive5.com/ and execute \n\"helpers/autoInstall.pl -link_usearch [path to usearch9]\"\n",0;
 	}
-	#safety for vsearch
-	if ($usearchVer == 0 && $VSused ){
+	#safety for vsearch: readPaths has not set $VSused yet, so test the configured binary itself
+	if ($usearchVer == 0 && $useVsearch != 0 && $VSBin ne "" && -f $VSBin ){
 		$usearchVer = 11;
 	}
 	#vsearchversion:
@@ -3487,7 +3414,7 @@ sub checkProgVersions{
 	}
 	if ($TaxOnly eq "0" && ($Rscript eq "" || !-e $Rscript)){
 		my $warnLvl = "w";
-		$warnLvl=291 if ($TaxOnly eq "0" && ($doLULU || $ClusterPipe == 7));
+		$warnLvl=91 if ($TaxOnly eq "0" && ($doLULU || $ClusterPipe == 7));
         printL "Rscript can't be found, but is required for dada2, LULU and phyloseq\n",$warnLvl;
 	}
 
@@ -3500,7 +3427,7 @@ sub checkProgVersions{
 	
 	#"LotuS 1.281"
 	my ($lotusVersion) = $selfID =~ m/LotuS (\d+(?:\.\d+)+)/;
-	printL "Could not parse the LotuS version from '$selfID'\n", 823 unless defined $lotusVersion;
+	printL "Could not parse the LotuS version from '$selfID'\n", 124 unless defined $lotusVersion;
 	my $sdmVer = checkLtsVer($lotusVersion);
 	if ( !version_at_least($sdmVer, $curSdmV) ) {
 		printL "Installed sdm version ($sdmVer < $curSdmV) seems to be outdated, please check on \n    lotus2.earlham.ac.uk\nfor the most recent version. Make sure the sdm path in '$lotusCfg' points to the correct sdm binary\n","w";
@@ -3634,14 +3561,15 @@ sub checkMapperAvailable() {
 }
 
 
-sub getDefAligner(){
+sub getDefAligner($){
+	my ($dbDefaulted) = @_; #1: -refDB was not given, the default DB was filled in
 	my $defaultTaxAlig = 2; #LAMBDA: No 1 default
 	if ( !-f $lambda3Bin ) {
 		#if ( -f $lambdaBin ) { $defaultTaxAlig = 2; print "Found older lambda version, using $lambdaBin\n"; }  #lambda.. old version
 		if ( -f $VSBin ) { $defaultTaxAlig = 4; } #VSEARCH
 		elsif ( -f $usBin ) { $defaultTaxAlig = 5; } #USEARCH 
 		elsif ( -f $blastBin ) { $defaultTaxAlig = 1; } #BLAST
-		elsif ( !-f $blastBin && $refDBwanted ne "" ) {
+		elsif ( !-f $blastBin && $refDBwanted ne "" && !$dbDefaulted ) { #a defaulted DB falls back to RDP later
 			printL ("Requested similarity search ($refDBwanted), but no suitable aligner (blast, vsearch, usearch, lambda) binaries found!\n",50);
 		}
 	}
@@ -3790,7 +3718,7 @@ sub prepLtsOptions{
 		#print $refW."\n";
 		if ( -f $refW ) {
 			#die "$refDBwanted\n";
-		}elsif ( $refW =~ m/^(?:GG|GG2|KSGP|KSPG|SLV|UNITE|HITDB|PR2|BEETAX|UTAX|SINTAX)$/i ) {
+		}elsif ( $refW =~ m/^(?:GG|GG2|KSGP|SLV|UNITE|HITDB|PR2|BEETAX|UTAX|SINTAX)$/i ) {
 			#$refDBwanted = uc($refDBwanted);
 		}elsif ( $refW ne "" ) {
 			print "$refDBwanted not recognized. Aborting..\n";
@@ -3799,7 +3727,6 @@ sub prepLtsOptions{
 	}
 	#die;
 	if ( $platform eq "hiseq" ) {
-		#$linesPerFile = 8000000;
 		$sdmOpt = $sdmHiseqOpt if ($sdmOpt eq "" && ($ClusterPipe_pre eq "CD-HIT"|| $ClusterPipe_pre eq "CDHIT" || $ClusterPipe_pre eq "3"));
 	} elsif ( $platform eq "454" ) {
 		if ($sdmOpt eq ""){
@@ -3851,11 +3778,11 @@ sub prepLtsOptions{
 		#die ;
 		#printL "Using custom LCA %id thresholds: $idThreshs\n";
 		my @spl = split /,/,$idThreshs;
-		printL "-LCA_idthresh should be 6 comma separated integers, aborting\n",834 unless (@spl == 6 || @spl == 7);
+		printL "-LCA_idthresh should be 6 comma separated integers, aborting\n", 114 unless (@spl == 6 || @spl == 7);
 		for (my $i=0;$i<@spl;$i++){
 			printL "Error in arg -LCA_idthresh: '$spl[$i]' is not an integer.\n", 22 unless $spl[$i] =~ /^\d+$/;
 			if ( $spl[$i] > 100 || $spl[$i] < 0 ) {
-				printL "Error in arg -LCA_idthresh: every entry has to be <100 and >0. Found " . $spl[$i] . ".\n", 22;
+				printL "Error in arg -LCA_idthresh: every entry has to be between 0 and 100. Found " . $spl[$i] . ".\n", 22;
 			}
 			$idThr[$i] = int($spl[$i]);
 		}
@@ -3873,7 +3800,7 @@ sub prepLtsOptions{
 	#read primary paths to binaries
 	readPaths_aligners($lotusCfg);
 	validate_runtime_path_safety();
-	my $defaultTaxAlig = getDefAligner();
+	my $defaultTaxAlig = getDefAligner($defDBset);
 
 	getSimBasedTax();
 	#-refDB UTAX/SINTAX names the SINTAX classifier DB (a directory), which only -taxAligner sintax can search
@@ -3885,19 +3812,7 @@ sub prepLtsOptions{
 		}
 	}
 
-	if ( $TaxOnly eq "0" && !defined($input) && !defined($outdir) && !defined($mapFile) ) { 
-		defined($input) or usage("-i option (input dir/files) is required\n");
-		if ( $input =~ m/\*/ ) {
-			usage ("\"*\" not supported in input command. Please see documentation on how to set up the mapping file for several input files.");
-		}
-		defined($outdir) or usage("-o option (output dir) is required\n");
-		if ( !defined($mapFile) ) {
-			usage("-m missing option (mapping file)\n");
-		}
-	}
-	if ( !defined($sdmOpt) && $TaxOnly eq "0" ) {
-		printL("sdm options not set\n","w");
-	}
+	#required -i/-m/-o are checked in validate_option_combinations and at startup
 	#----- part 2 ----------
 	
     configure_sdm_dereplication();
@@ -3975,12 +3890,9 @@ sub prepLtsOptions{
 	if ( $noChimChk < 0 || $noChimChk > 3 ) {
 		printL "option \"-deactivateChimeraCheck\" has to be between 0 and 3\n", 45;
 	}
-	if ( $saveDemulti < 0 || $saveDemulti > 3 ) {
-		printL "option \"-saveDemultiplex\" has to be between 0 and 3\n", 46;
-	}
 	
-	if ($doXtalk && ( $usearchVer < 11 || $usearchVer > 11) ) {
-        printL "cannot check for cross-talk in your usearch version ($usearchVer), as only implemented in usearch version 11\n",83;
+	if ($doXtalk && ( !-f $usBin || $usearchVer != 11 ) ) { #the vsearch stand-in version 11 does not count
+        printL "-xtalk needs USEARCH 11 (configured usearch: \"$usBin\", version $usearchVer); UNCROSS2 is only implemented in usearch version 11\n",83;
     }
 
 	
@@ -4059,7 +3971,7 @@ my @workflow_options = (
   ['-forwardPrimer <string>', 'Forward primer sequence used to amplify the target region.'],
   ['-reversePrimer <string>', 'Reverse primer sequence used to amplify the target region.'],
   ['-backmap_id <0-1>', 'Identity cutoff for backmapping reads onto OTUs/zOTUs/ASVs. Default: the -id value (0.97); 0.99 for DADA2/UNOISE; 0.95 for -p ONT (all clusterers).'],
-  ['-saveDemultiplex <0|1|2|3>', '(1) save all unfiltered demultiplexed reads; (2) save quality-filtered demultiplexed reads and continue the run; (3) save demultiplexed, filtered reads into one FASTQ/FASTA with sample IDs in headers; (0) do not save demultiplexed reads. Default: 0.'],
+  ['-saveDemultiplex <0|1|2>', '(1) save all unfiltered demultiplexed reads and stop; (2) save quality-filtered demultiplexed reads and continue the run; (0) do not save demultiplexed reads. Default: 0.'],
   ['-taxOnly <file>', 'Skip most of the pipeline and only run taxonomic classification on a FASTA file. Example: lotus3 -taxOnly reads.fna -refDB SLV.'],
   ['-redoTaxOnly <0|1>', '(1) redo only taxonomic assignments for an existing LotuS run, useful for replacing a database. (0) normal LotuS run. Default: 0.'],
   ['-offtargetDB <file>', 'Remove likely contaminant OTUs/ASVs based on alignment to a provided FASTA database, for example host genome contamination in low-biomass samples.'],
@@ -4257,8 +4169,14 @@ sub frame {
 	my $dur = " ". parse_duration(time - $start) . "";
     my @txtarrT = split( /\n/, $txt );
 	my @txtarr; 
-	my $width = `tput cols`;
-	$width = 80 if (!defined $width || $width eq "" || $width > 80|| $width < 20);
+	#terminal width is looked up once; batch jobs without $TERM get 80 and no tput noise on stderr
+	state $termWidth;
+	if (!defined $termWidth) {
+		$termWidth = -t STDOUT ? `tput cols 2>/dev/null` : "";
+		chomp $termWidth;
+		$termWidth = 80 if ($termWidth !~ /^\d+$/ || $termWidth > 80 || $termWidth < 20);
+	}
+	my $width = $termWidth;
     my $numOfChar = 10;
 	my $txtSpac=  $width - $numOfChar;
 	foreach my $s (@txtarrT){
@@ -4291,62 +4209,7 @@ sub frame {
 	return $ret;
 }
 
-sub firstXseqs($ $ $) {
-    my ( $otus, $numS, $out ) = @_;
-    open I, "<", $otus;
-    open O, ">", $out;
-    my $cnt = 0;
-    while ( my $line = <I> ) {
-        $cnt++ if $line =~ m/^>/;
-        last   if $cnt == $numS;
-        print O $line;
-    }
-    close O;
-    close I;
-    return ($out);
-}
 
-sub get16Sstrand($ $) {    #
-    my ( $OTUfa, $refDB ) = @_;
-    my $ret      = "both";
-    my $OTUfa_sh = firstXseqs( $OTUfa, 6, "$lotus_tempDir/otus4blast.tmp" );
-    my $cmd = "$blastBin -query $OTUfa_sh -db $refDB -out $lotus_tempDir/blast4dire.blast -outfmt 6 -max_target_seqs 200 -perc_identity 75 -num_threads $BlastCores -strand both;"
-      ;                    #-strand plus both
-    if ( systemL($cmd) != 0 ) {
-        printL "FAILED pre-run blast command:\n$cmd\n", 5;
-    }
-
-    #die "$t\n$cmd\n";
-    my $plus  = 0;
-    my $minus = 0;
-    open I, "<", "$lotus_tempDir/blast4dire.blast";
-    while ( my $line = <I> ) {
-        my @spl = split( "\t", $line );
-        if ( $spl[6] < $spl[7] ) {
-            if ( $spl[8] > $spl[9] ) {
-                $minus++;
-            }
-            else { $plus++; }
-        }
-        else {
-            if ( $spl[8] > $spl[9] ) {
-                $plus++;
-            }
-            else { $minus++; }
-        }
-    }
-    close I;
-
-    #die("P= $plus M=$minus\n");
-    if ( $plus + $minus > 20 ) {
-        if ( $plus / ( $plus + $minus ) > 0.9 ) { $ret = "plus"; }
-        if ( $plus / ( $plus + $minus ) < 0.1 ) { $ret = "minus"; }
-    }
-
-    #die ($plus ." P $minus M \n");
-    #printL "Using $ret strand for blast searches.\n",0;
-    return ($ret);
-}
 
 sub calcHighTax($ $ $ $ $) {
     my ( $hr, $inT, $failsR, $LCAtax, $xtraOut ) = @_;
@@ -4387,7 +4250,7 @@ sub calcHighTax($ $ $ $ $) {
 				$matOTUsTT{$_} = 1;
 			}
             foreach my $sm (@avSmps) {
-                printL("Sample $sm does not exist\n"), 0 if ( !exists( $OTUmat{$sm} ) );
+                printL("Sample $sm does not exist\n", 0) if ( !exists( $OTUmat{$sm} ) );
                 my $smplTaxCnt = 0;
                 foreach (@OTUli) {
                     if ( !$keepUnclassified && exists( $fails{$_} ) ){
@@ -4445,7 +4308,7 @@ sub calcHighTax($ $ $ $ $) {
 
 			#die(join("-",@OTUli)." ".$ta."\n");
 			foreach my $sm (@avSmps) {
-				printL("Sample $sm does not exist\n"), 0  if ( !exists( $OTUmat{$sm} ) );
+				printL("Sample $sm does not exist\n", 0) if ( !exists( $OTUmat{$sm} ) );
 				my $smplTaxCnt = 0;
 				foreach (@OTUli) {
 					next if ( !$keepUnclassified && exists( $fails{$_} ) );
@@ -4520,10 +4383,13 @@ sub buildTree($ $) {
 	return "" if ($buildPhylo==0);
 	my $treePrg = "iqtree2";
 	$treePrg = "fasttree" if ($buildPhylo == 1);
-	if ( -f $mafftBin && (-f $fasttreeBin || -f $iqTreeBin) ) {
+	my $treeBin = $buildPhylo == 1 ? $fasttreeBin : $iqTreeBin;
+	if ( -f $mafftBin && $treeBin ne "" && -f $treeBin ) {
 		printL( frame("Building tree ($treePrg) and aligning (mafft) OTUs"),0 );
 	} else {
-		printL(frame("Skipping tree building and multiple alignment: \nafftBin or fasttreeBin/iqTreeBin are not defined"),0);
+		#only reachable with --no-strict; validate_option_combinations aborts otherwise
+		printL(frame("Skipping tree building and multiple alignment: \nmafft or $treePrg binaries are not configured (mafft: \"$mafftBin\", $treePrg: \"$treeBin\")"),0);
+		return "";
 	}
 	
 	if (substr( $ampliconType, 0, 3 ) eq "ITS" ){
@@ -4564,18 +4430,18 @@ sub buildTree($ $) {
 			if ($fasttreeBin eq "" || !-f $fasttreeBin){printL"Could not find fasttree binary\n",33;}
 			$cmd = $fasttreeBin . " -nt -gtr -no2nd -spr 4 -log $logDir/fasttree.log -quiet -out $outTree $multAli;";
 		} elsif ($buildPhylo==2){
+			#two separately checked commands: a failing iqtree must not be masked by the cp
 			$cmd = "$iqTreeBin -s $multAli -ntmax $tthreads -pre $treePrefix -seed 678 ";
-			$cmd .= "--quiet --fast -m GTR+R10 --alrt 1000\n";#GTR+F+I+G4
-			$cmd .= "cp ${treePrefix}.treefile $outTree\n";#cp final good tree over 
+			$cmd .= "--quiet --fast -m GTR+R10 --alrt 1000;";#GTR+F+I+G4
+			$cmd .= "cp ${treePrefix}.treefile $outTree;";#cp final good tree over
 		} else {
 			printL "Unknown tree option ($buildPhylo)\n",53;
 		}
         #die($cmd."\n");
         if ( $exec == 0 ) {
             #printL "Building tree..\n";
-            if ( systemL($cmd) != 0 ) {
-                printL "FAILED tree building command: " . $cmd . "\n", 5;
-            }
+            systemL($cmd, "Tree building");
+            printL "Tree building finished but wrote no tree to $outTree\n", 5 unless -s $outTree;
 			if ($buildPhylo == 1) {
 				$citations .="FastTree2 phylogenetic tree construction for OTUs: Price MN, Dehal PS, Arkin AP. 2010. FastTree 2--approximately maximum-likelihood trees for large alignments. ed. A.F.Y. Poon. PLoS One 5: e9490.\n";
 			} else {
@@ -4742,19 +4608,6 @@ sub reverse_complement_IUPAC {
     return $revcomp;
 }
 
-sub revComplFasta {
-    my ($inF) = @_;
-    open I, "<$inF";
-    open O, ">$inF.tmp";
-    while ( my $l = <I> ) {
-        chomp $l;
-        if ( $l !~ m/^>/ ) { $l = reverse_complement_IUPAC($l); }
-        print O $l . "\n";
-    }
-    close I;
-    close O;
-    systemL "rm -f $inF; mv $inF.tmp $inF;";
-}
 
 sub readFasta($;$) {
     my ($fil, $order) = @_;
@@ -4801,7 +4654,7 @@ sub writeFasta($ $) {
 sub swarm4us_size($) {
     my ($otuf) = @_;
     open I, "<$otuf"      or die "Can't open $otuf\n";
-    open O, ">$otuf.ttmp" or die "Can't open $otuf.tmp\n";
+    open O, ">$otuf.ttmp" or die "Can't open $otuf.ttmp: $!\n";
     while ( my $line = <I> ) {
         chomp $line;
         if ( $line =~ m/^>/ ) {
@@ -4815,56 +4668,7 @@ sub swarm4us_size($) {
     #	die $otuf."\n";
     systemL "rm -f $otuf;mv $otuf.ttmp $otuf;";
 }
-sub resortcdhit{
-	my ($inF) = @_;
-	#function that ensures that .clstr always starts with cluster (*) first
-	open ICLST,"<",$inF or printL("Can't open cdhit clstr file $inF\n",36);
-	open OCL,">","$inF.1" or printL("Can't open cdhit clstr out file $inF.1\n",36);
-	my $repr=""; my $hd=""; my $rest="";
-	while(my $line = <ICLST>){
-		#chomp $line;
-		if ($line =~ m/^>/){#rest & restart
-			print OCL "$hd$repr$rest" if ($hd ne "");
-			$hd=$line;$repr="";$rest="";
-			next;
-		}
-		if ($line =~ m/\*$/){
-			$repr = $line;
-		} else {
-			$rest .= $line;
-		}
-	}
-	close ICLST; close OCL;
-	systemL "rm $inF;mv $inF.1 $inF;";
-}
 
-sub onelinerSWM($) {
-    my ($ifil) = @_;
-    my $ofil = $ifil . ".tmp";
-    open O, ">", $ofil;
-    open( FAS, "<", "$ifil" ) || die("Couldn't open FASTA file.");
-    my $seq = "";
-    while ( my $line = <FAS> ) {
-        chomp($line);
-        if ( $line =~ m/^>/ ) {
-            $line =~ s/;size=(\d+);.*/_$1/;
-            if ( $seq ne "" ) {
-                print O $seq . "\n" . $line . "\n";
-                $seq = "";
-            }
-            else {
-                print O $line . "\n";
-            }
-        }
-        else {
-            $seq .= $line;
-        }
-    }
-    print O $seq;
-    close FAS;
-    close O;
-    rename( $ofil, $ifil ) or die "Unable to overwrite file $ifil\n";
-}
 
 sub validate_rdp_fixrank_fields {
     my ($fields) = @_;
@@ -4971,7 +4775,7 @@ sub readRDPtax($) {
 
 
 	#write hier
-	open H, ">", $RDP_hierFile;
+	open H, ">", $RDP_hierFile or die "Cannot write $RDP_hierFile: $!\n";
 	print H "$OTU_prefix\t" . join( "\t", @taxLvls ) . "\tspecies\n";
 	foreach (@Hiera) { print H $_ . "\n"; }
 	close H;
@@ -4997,15 +4801,22 @@ sub writeUTAXhiera($ $ $) {
         $k =~ s/;size=\d+;.*//;    #same ID as readFasta
         my @ranks = ("?") x 7;
         my $cnt   = 0;
+        #place each name by its rank letter, so a lineage without e.g. o: keeps the genus in the Genus column
+        my %rankCol = ( d => 0, k => 0, p => 1, c => 2, o => 3, f => 4, g => 5, s => 6 );
         foreach my $sus ( split( /,/, $spl[1] // "" ) ) {    #empty: no hit
-            last if ( $cnt >= 7 );    #hiera holds Domain..Species
+            my ($rankL) = $sus =~ m/^(\S):/;
+            die "Malformed UTAX taxonomy field '$sus' for '$k' in $utout (no rank letter)\n" unless defined $rankL;
+            my $col = $rankCol{ lc $rankL };
+            die "Unknown rank '$rankL' in UTAX taxonomy field '$sus' for '$k' in $utout\n" unless defined $col;
             $sus =~ s/^\S://;
             $sus =~ s/\"//g;
             my ($sus2, $confidence) = $sus =~ m/(^.*)\(([0-9]*\.?[0-9]+)\)$/;
             die "Malformed UTAX taxonomy field '$sus' for '$k' in $utout\n"
               unless defined($sus2) && defined($confidence);
             last if ( $confidence < $utaxConf );    #like -sintax_cutoff: ranks below stay "?"
-            $ranks[ $cnt++ ] = $sus2;
+            next if $ranks[$col] ne "?";    #k: and d: in one lineage: the first one is the Domain
+            $ranks[$col] = $sus2;
+            $cnt++;
         }
         $fails{$k} = 1 if ( $cnt == 0 );
         $utStr{$k} = join( "\t", @ranks );
@@ -5070,60 +4881,43 @@ sub checkLtsVer($) {
 
     # compare to server version
     unless ( $checkForUpdates == 1 ) { return $sdmVer; }
-    #die "LWP:simple package not installed, but required for automatic update checker!\n deactivate \"CheckForUpdates 0\" in $lotusCfg to circumvent the update checks.\n" if ( !$LWPsimple );
-    # head()/get() below come from LWP::Simple, which is otherwise never loaded.
-    unless ( eval { require LWP::Simple; LWP::Simple->import(qw(head get)); 1 } ) {
-        printL "CheckForUpdates is set in $lotusCfg, but LWP::Simple is not installed; skipping update check.\n", 0;
-        return $sdmVer;
-    }
-
     printL "Checking for updates..  ";
-    my $url = "http://psbweb05.psb.ugent.be/lotus/lotus/updates/Msg.txt";
-    if ( !head($url) ) {
+    # HTTP::Tiny ships with Perl; the notice files are plain http, so no SSL modules are needed.
+    # Never let the update check stall a run: short timeouts, and any failure is only reported.
+    require HTTP::Tiny;
+    my $http = HTTP::Tiny->new( timeout => 10, agent => "LotuS3/$lver " );
+    my $get = sub {
+        my $res = $http->get( $_[0] );
+        return $res->{success} ? $res->{content} : undef;
+    };
+    my $updBase = "http://psbweb05.psb.ugent.be/lotus/lotus/updates";
+    my $url = "$updBase/Msg.txt";
+    if ( !$http->head($url)->{success} ) {
         printL "LotuS server seems to be down!\n";
         return $sdmVer;
     }
-    my $updtmpf = get($url);
-
-    my $msg     = "";
-    my $hadMsg  = 0;
+    my $lotus_version_newer = sub {    #remote text is compared numerically per component, never evaluated
+        my ($remote) = @_;
+        return 0 unless defined $remote && $remote =~ /^\d+(?:\.\d+)*$/;
+        return version_at_least($remote, $lver) && !version_at_least($lver, $remote);
+    };
     my $msgCont = "";
-    open( TF, '<', \$updtmpf );
-    while (<TF>) { $msg .= $_; }
-    close(TF);
-    foreach my $lin ( split( /\n/, $msg ) ) {
+    my $hadMsg  = 0;
+    foreach my $lin ( split( /\n/, $get->($url) // "" ) ) {
         my @spl = split /\t/, $lin;
-        next if ( @spl == 0 );
-        if ( $lver < $spl[0] ) { $msgCont .= $spl[1] . "\n\n" }
-        $hadMsg = 1;
+        next if ( @spl < 2 );
+        if ( $lotus_version_newer->($spl[0]) ) { $msgCont .= $spl[1] . "\n\n"; $hadMsg = 1; }
     }
-    $updtmpf =
-      get("http://psbweb05.psb.ugent.be/lotus/lotus/updates/curVer.txt");
-    open( TF, '<', \$updtmpf );
-    my $lsv = <TF>;
-    close(TF);
-    chomp $lsv;
-    my $msgEnd = "";
-    $updtmpf =
-      get("http://psbweb05.psb.ugent.be/lotus/lotus/updates/curVerMsg.txt");
-    open( TF, '<', \$updtmpf );
-    while (<TF>) { $msgEnd .= $_; }
-    close(TF);
-
-    $updtmpf =
-      get("http://psbweb05.psb.ugent.be/lotus/lotus/updates/UpdateHist.txt");
+    my ($lsv) = split /\n/, ( $get->("$updBase/curVer.txt") // "" );
+    $lsv = "unknown" unless defined $lsv && $lsv =~ /\S/;
+    $lsv =~ s/\s+$//;
     my $updates = "";
-    open( TF, '<', \$updtmpf );
-    $msg = "";
-    while (<TF>) { $msg .= $_; }
-    close(TF);
-    foreach my $lin ( split( /\n/, $msg ) ) {
+    foreach my $lin ( split( /\n/, $get->("$updBase/UpdateHist.txt") // "" ) ) {
         my @spl = split /\t/, $lin;
-        chomp $lin;
         next if ( @spl < 2 || $spl[0] eq "" );
         my ($update_ver) = $spl[1] =~ m/LotuS (\d+(?:\.\d+)+)/;
         next unless defined $update_ver;
-        if ( $lver < $update_ver ) { $updates .= $spl[0] . "\t" . $spl[1] . "\n" }
+        if ( $lotus_version_newer->($update_ver) ) { $updates .= $spl[0] . "\t" . $spl[1] . "\n" }
     }
     if ( $updates ne "" || $msgCont ne "" ) {
         printL "\n";
@@ -5145,16 +4939,16 @@ sub checkLtsVer($) {
         return $sdmVer;
     }
 
-    if ( $hadMsg || $updates ne "" ) {
-        printL
-"New LotuS updates discovered (10s wait).\nIf you want to install updates\n  (1) Press \"Ctrl-c\"\n  (2) perl helpers/autoInstall.pl\n\n";
-        printL
-"To deactivate, open $lotusCfg and change \"CheckForUpdates\" to \"0\"\n";
+    printL
+"New LotuS updates discovered.\nTo update: \"git pull\" in a GitHub checkout, or \"conda update lotus3\" for a Bioconda installation.\n";
+    printL
+"To deactivate this check, open $lotusCfg and change \"CheckForUpdates\" to \"0\"\n";
+    if (-t STDIN) { #interactive: give time to abort; batch jobs continue at once
+        printL "(10s wait; press Ctrl-c to stop the run)\n";
         sleep(10);
     }
     printL "Continuing LotuS run..\n";
 
-    #die;
     return $sdmVer;
 }
 
@@ -5177,8 +4971,12 @@ sub addSeqRun($){
 				$retMap{"#SampleID"}{"#SampleID"} = $newMap{$k};
 				next;
 			} 
-			my $SRid = ${$newMap{$k}}[$SRcol];
+			my $SRid = ${$newMap{$k}}[$SRcol] // "";
 			if ($SRid eq "NA"){die "Error: NA not allowed in \"SequencingRun\" column\n";}
+			#an empty group sorts above "#SampleID" and would put this row above the header of the copied map
+			if ($SRid !~ /\S/ || $SRid =~ /^\s|\s$/){
+				printL "SampleID '$k' has an empty or whitespace-padded \"SequencingRun\" value ('$SRid'). Every sample needs a SequencingRun label; aborting.\n", 66;
+			}
 			$retMap{$SRid}{$k} = $newMap{$k};
 			$allSRs{$SRid} = 1;
 		}
@@ -5248,13 +5046,17 @@ sub addSeqRun($){
 sub writeMap($$){
 	my ($hrM,$outFile) = @_;
 	my %mapX = %{$hrM};
-	open O,">$outFile" or die "Can't open $outFile\n";
+	open O,">$outFile" or die "Can't open $outFile: $!\n";
+	#the header row always comes first, whatever the group names sort as
+	my ($hdrGrp) = grep { exists $mapX{$_}{"#SampleID"} } sort keys %mapX;
+	print O "#SampleID\t" . join("\t",@{$mapX{$hdrGrp}{"#SampleID"}}) . "\n" if defined $hdrGrp;
 	foreach my $k0 (sort keys %mapX){
 		foreach my $k (sort keys (%{$mapX{$k0}}) ){
+			next if $k eq "#SampleID";
 			print O $k . "\t" . join("\t",@{$mapX{$k0}{$k}}) . "\n";
 		}
 	}
-	close O;
+	close O or die "Can't write $outFile: $!\n";
 }
 
 sub readMap {
@@ -5287,6 +5089,7 @@ sub readMap {
 	my $hasCombiSmpl = 0;
 	my $colCnt       = -1;
 	my $biomWarns    = 0;
+	my $sawSingleFile = 0; #a row with one sequence file was seen
 
 	my $insertPrimers = 0;
 	$insertPrimers = 1 if ($fwdPrimSeq ne "" || $revPrimSeq ne "");
@@ -5296,7 +5099,10 @@ sub readMap {
 		$cnt++;
 		next if ( $cnt > 1 && ( $line =~ m/^#/ || length($line) < 2 ) );
 		chomp($line);
+		#header: a trailing tab or padded cell would otherwise shift or hide column names
+		$line =~ s/[ \t]+$// if ( $cnt == 1 );
 		my @spl = split( "\t", $line );
+		@spl = map { my $h = $_; $h =~ s/^ +| +$//g; $h } @spl if ( $cnt == 1 );
 		if ( @spl == 0 ) {
 			$warnTrig = 1;
 			printL"Mapping file contains lines that cannot be split by tab seperator (line $cnt):\"$line\"\n","w";
@@ -5392,9 +5198,19 @@ sub readMap {
 				elsif ( $numInput == 2 ) {
 					printL "Inconsistent file number in mapping. See row with ID $smplNms.\n", 55;
 				}
+				#the reverse order: paired rows after single-file rows
+				if ( $spl[$fileCol] =~ m/,/ && $sawSingleFile ) {
+					printL "Inconsistent file number in mapping: $smplNms lists two files, but earlier rows list one.\n", 55;
+				}
+				$sawSingleFile = 1 if ( $spl[$fileCol] !~ m/,/ );
 			}
-			
+
 			if ( $CombineCol != -1 && $spl[$CombineCol] ne "" ) {
+				#the CombineSamples value becomes the output sample name, so it needs the same checks as a SampleID
+				my $target = $spl[$CombineCol];
+				printL "CombineSamples value '$target' (row $smplNms) contains whitespace or dashes, which are not supported in sample names.\n", 5
+					if ( $target =~ m/\s|-/ );
+				printL "CombineSamples value \"OTU\" not allowed (row $smplNms), aborting\n", 62 if ( $target =~ m/^OTU$/i );
 				$combH{ $spl[$CombineCol] } = $smplNms;
 			} else {
 				$combH{$smplNms} = $smplNms;#				print "A $smplNms ";
@@ -5418,8 +5234,9 @@ sub readMap {
         }
 		if ($biomWarns == 4) {printL("(skipping further biom warnings..)\n\n");$biomWarns+=5;}
         # Do not rewrite arbitrary whitespace in metadata fields here; warn above but preserve user data.
-		if ( $smplNms =~ m/^\s/ || $smplNms =~ m/\s$/ ) {
-			printL"SampleID $smplNms contains spaces, this is not supported. Aborting LotuS as this will lead to errors, please fix.\n",5;
+		#read labels are "sample___readID" and every downstream parser splits at whitespace
+		if ( $smplNms =~ m/\s/ ) {
+			printL"SampleID '$smplNms' contains whitespace, this is not supported. Aborting LotuS as this will lead to errors, please fix.\n",5;
 		}
 		if ( $smplNms =~ m/-/  ) {
 			printL"SampleID $smplNms contains dashes, this is not supported. Aborting LotuS as this will lead to errors, please fix.\n",5;
@@ -5614,11 +5431,11 @@ sub doDBblasting($ $ $) {
     } elsif ( $doBlasting == 2 ) {    #lambda
         printL "Could not find lambda executable.\n$lambda3Bin\n", 33   unless ( -f $lambda3Bin );
         my $lamVer  = 0.4;
-        my $lverTxt = `$lambda3Bin --version`;
+        my $lverTxt = checked_program_output($lambda3Bin, "--version"); #a crashing binary fails here, not as "too old"
         if ( $lverTxt =~ m/.*lambda\d? version: (\d\.\d)[\.0-9]*.*/ ) {$lamVer = $1;}
 		#die "$lverTxt\n\n$lamVer\n\n";
 		
-		if ($lamVer < 3.0){printL "Found Lambda v $lamVer at $lambda3Bin\nLotuS3 no longer supports lambda below version 3.0\nPlease update\n",333;}
+		if ($lamVer < 3.0){printL "Found Lambda v $lamVer at $lambda3Bin\nLotuS3 no longer supports lambda below version 3.0\nPlease update\n", 113;}
 		#v3 fix:
         # Lambda expects a recognised FASTA suffix. Never rename the user's
         # taxonomy-only input: a failed index/search must leave it intact.
@@ -5886,151 +5703,14 @@ sub makeAbundTable2($ $) {
     return ( \%fails );
 }
 
-sub cutUCstring($) {
-    my ($aref) = @_;
-    my @in = uniq( @{$aref} );
 
-    #my @sa = sort (@in);
-    #die("@in\n");
-    my @newa = ();
-    foreach (@in) {
-        my @spl = split($sep_smplID);
-        push( @newa, $spl[0] );
-    }
-    return \@newa;
-}
 
-sub mergeUCs($ $) {
-    my ( $cref, $dref ) = @_;
-    my %cons   = %{$cref};
-    my %derep  = %{$dref};
-    my $cnt    = 0;
-    my $totlen = keys %cons;
-    foreach my $k ( keys %cons ) {
-
-        #print $cnt." / ".$totlen."  ".@{$cons{$k}}."\n";
-        #if (@{$cons{$k}} == 0){die "$k\n";}
-        my @newa = @{ $derep{$k} };  #first add initial seed, should be the same
-        die "$k not in derep\n" unless exists( $derep{$k} );
-        foreach my $k2 ( @{ $cons{$k} } ) {
-            push( @newa, @{ $derep{$k2} } );
-
-            #print "added $k2 to $k\n";
-        }
-        $cons{$k} = \@newa;
-        $cnt++;
-    }
-    printL "finished merging\n", 0;
-    return %cons;
-}
-
-sub delineateUCs($ $) {
-    my ( $ifi, $mode ) = @_;
-    open UC, "<", $ifi or die "Could not read UC file $ifi: $!\n";
-    my %clus;
-    my %expSize = ();
-    while ( my $line = <UC> ) {
-        chomp($line);
-        next if $line =~ /^\s*$/;
-        my @spl     = split( "\t", $line, -1 );
-        next unless $spl[0] =~ /^(?:S|H|C)$/;
-        die "Malformed UC record in $ifi: $line\n" unless @spl > 8;
-        die "Malformed UC hit record in $ifi: $line\n" if $spl[0] eq "H" && @spl <= 9;
-        my $hit     = $spl[9] // "*";
-        my $que     = $spl[8];
-        my $hitsize = 1;
-        my $quesize = 1;
-        if ( $mode >= 1 ) {
-
-            # if $mode==1;
-            if ( $mode == 1 ) {
-                my ($parsed_query_size) = $que =~ /;size=(\d+)/;
-                die "Missing query size annotation in UC record: $line\n" unless defined $parsed_query_size;
-                $quesize = $parsed_query_size;
-                $que =~ s/;size=\d+.*$//;
-            }
-            if (defined($hit) && $hit ne "*") {
-                my ($parsed_hit_size) = $hit =~ /;size=(\d+)/;
-                die "Missing hit size annotation in UC record: $line\n" if $spl[0] eq "H" && !defined $parsed_hit_size;
-                if (defined $parsed_hit_size) {
-                    $hitsize = $parsed_hit_size;
-                    $hit =~ s/;size=\d+.*$//;
-                }
-            }
-        }
-        if ( $mode == 3 )
-        { #switch hit and que, because in UPARSE case, reads are aligned to OTUs (= not backtracing)
-                #print($quesize." ".$hitsize."\n");
-            my $temp = $hit;
-            $hit     = $que;
-            $que     = $temp;
-            $temp    = $hitsize;
-            $hitsize = $quesize;
-            $quesize = $temp;
-        }
-
-        if ( $spl[0] eq "H" ) {    #in cluster
-            if ( exists( $clus{$hit} ) ) {
-                push( @{ $clus{$hit} }, $que );
-                $expSize{$hit} += $quesize;
-            }
-            else {
-                my @empty = ( $hit, $que );
-                $clus{$hit}    = \@empty;
-                $expSize{$hit} = $quesize + $hitsize;
-            }
-        }
-        if ( $spl[0] eq "S" ) {    #starts new cluster
-
-            #	print $hit." ".$que."\n"; die();
-            if ( !exists( $clus{$que} ) ) {
-                my @empty = ($que);
-                $clus{$que}    = \@empty;
-                $expSize{$que} = $quesize;
-            }
-        }
-        if ( $mode != 2 ) {
-            if ( $spl[0] eq "C" )
-            { #all "H" should have appeared at this point; cross-check if cluster size is right
-
-                if ( !exists( $clus{$que} ) ) {
-                    die("Entry for $que does not exist (but should exist).\n");
-                }
-                else {
-                    my $arraySize = scalar( @{ $clus{$que} } );
-                    if ( $spl[2] != $expSize{$que} ) {
-                        printL(
-                            "$que :: expected "
-                              . $spl[2]
-                              . " cluster size. found cluster size: "
-                              . $expSize{$que}
-                              . " from array with S $arraySize.\n",
-                            0
-                        );
-                        foreach ( @{ $clus{$que} } ) {
-                            printL $_. "\n", 0;
-                        }
-                        die();
-                    }
-                }
-            }
-        }
-    }
-    close UC;
-    return \%clus;
-}
 
 sub uniq {
     my %seen;
     return grep { !$seen{$_}++ } @_;
 }
 
-sub print_nseq($) {
-    my ($tf) = @_;
-    my $nseqs = `grep \">\" $tf | wc -l`;
-    printL( $nseqs . " reads\n", 0 );
-    return ($nseqs);
-}
 
 
 sub selftest_config_values {
@@ -6516,8 +6196,13 @@ sub acquire_output_lock {
     my $parent = dirname($target_outdir);
     $parent = "." if !defined($parent) || $parent eq "";
     ensure_dir($parent) unless -d $parent;
+    #one lock file per real directory, however the output path was spelled (symlinks, "..")
+    $parent = abs_path($parent) // $parent;
     my $base = basename($target_outdir);
+    my $rawBase = $base;
     $base =~ s/[^A-Za-z0-9_.-]/_/g;
+    #keep sanitized names distinct, so "a:b" and "a_b" do not share a lock
+    $base .= "." . substr(Digest::SHA::sha1_hex($rawBase), 0, 8) if $base ne $rawBase;
     $outputLockFile = File::Spec->catfile($parent, ".lotus3.$base.lock");
     open my $lfh, ">>", $outputLockFile or die "Cannot open output lock $outputLockFile: $!\n";
     unless (flock($lfh, LOCK_EX | LOCK_NB)) {
@@ -6575,6 +6260,20 @@ sub validate_reference_databases {
         push @problems, "Reference FASTA missing or empty: $db" if $db ne "" && !-s $db;
         push @problems, "Taxonomy file missing or empty: $tax" if $tax ne "" && !-s $tax;
         push @problems, "Compressed taxonomy files are not supported by downstream taxonomy readers: $tax" if $tax =~ /\.gz$/i;
+        #format and ID agreement of FASTA and taxonomy, on the first records only
+        if ($doBlasting >= 1 && $db ne "" && $tax ne "" && -s $db && -s $tax && $tax !~ /\.gz$/i) {
+            my (undef, $taxProblems, $taxWarnings) = taxonomy_validation_scan($tax, 1000);
+            push @problems, @$taxProblems;
+            push @warnings, @$taxWarnings;
+            my ($overlap, $overlapIssue) = validate_refdb_tax_overlap($db, $tax, 2000);
+            if ($overlapIssue ne "") {
+                push @warnings, $overlapIssue;
+            } elsif ($overlap == 0) {
+                push @problems, "None of the first reference IDs in $db appear in its taxonomy file $tax; check that both files belong to the same database";
+            } elsif ($overlap < 0.5) {
+                push @warnings, sprintf("Only %.0f%% of the first reference IDs in %s have an entry in %s", 100 * $overlap, $db, $tax);
+            }
+        }
     }
     if ($TaxOnly eq "0" && (($forceRefChim && ($noChimChk == 0 || $noChimChk == 2) && ($UCHIME_REFDB eq "" || !-s $UCHIME_REFDB)) ||
         ($UCHIME_REFDB ne "" && !-s $UCHIME_REFDB))) {
@@ -6618,6 +6317,7 @@ sub validate_option_combinations {
     my @problems;
     if ($TaxOnly eq "0") {
         push @problems, "Missing input (-i)" unless defined($input) && $input ne "";
+        push @problems, "\"*\" is not supported in -i; list several input files through the mapping file instead" if defined($input) && $input =~ /\*/;
         push @problems, "Missing mapping file (-m)" unless defined($mapFile) && $mapFile ne "" && -f $mapFile;
     }
     if (@inputArray && !(@inputArray == 1 && -d $inputArray[0])) {
@@ -6651,6 +6351,7 @@ sub validate_option_combinations {
     push @problems, "-threads must be a positive integer (got $uthreads)" unless $uthreads =~ /^\d+$/ && $uthreads > 0;
     push @problems, "-sdmThreads must be a positive integer (got $sdmThreads)" unless $sdmThreads =~ /^\d+$/ && $sdmThreads > 0;
     push @problems, "-id must be greater than 0 and at most 1 (got $id_OTU)" unless $id_OTU > 0 && $id_OTU <= 1;
+    push @problems, "CD-HIT clustering needs -id of at least 0.75 (got $id_OTU)" if $ClusterPipe == 3 && $id_OTU < 0.75;
     push @problems, "-backmap_id must be greater than 0 and at most 1 (got $backMapID)" unless $backMapID == -1 || ($backMapID > 0 && $backMapID <= 1);
     for my $range_check (
         ["-rdp_thr", $RDPCONF], ["-sintax_thr", $utaxConf], ["-LCA_frac", $LCAfraction],
@@ -6739,6 +6440,10 @@ sub validate_cli_safety {
     die "-exe must be 0 or 1.\n" unless $exec =~ /^[01]$/;
     die "-useMini4map must be 0 or 1.\n" unless $useMini4map =~ /^[01]$/;
     die "-saveDemultiplex must be 0, 1, or 2.\n" unless $saveDemulti =~ /^[012]$/;
+    die "-redoTaxOnly must be 0 or 1.\n" unless $onlyTaxRedo =~ /^[01]$/;
+    die "-VXtr must be 0 or 1.\n" unless $doVXTR =~ /^[01]$/;
+    #-endRem lists literal sequences to trim from read ends
+    die "-endRem must be comma-separated IUPAC sequences.\n" if $remFromEnd ne "" && $remFromEnd !~ /^[ACGTRYSWKMBDHVN]+(?:,[ACGTRYSWKMBDHVN]+)*$/i;
     die "-ontDemux must be 0 or barbell.\n" unless $ontDemux eq '0' || $ontDemux eq 'barbell';
     die "-ontDemux barbell requires -p ONT.\n" if $ontDemux ne '0' && lc($platform) ne 'ont';
     die "-CL savont requires -p ONT.\n" if $ClusterPipe_pre =~ /^(?:savont|9)$/i && lc($platform) ne 'ont';
@@ -6896,7 +6601,7 @@ sub validate_dry_run_output_target {
 
     my $absolute = -e $target ? (abs_path($target) // $target) : File::Spec->rel2abs($target);
     die "Unsafe output target for dry-run: $absolute\n"
-        if $absolute eq "/" || $absolute eq "." || $absolute eq ".." || length($absolute) < 8;
+        if $absolute eq "/" || $absolute eq "." || $absolute eq ".." || _path_too_shallow($absolute);
     my $cwd = abs_path(".") // File::Spec->rel2abs(".");
     my $script_root = abs_path($RealBin) // File::Spec->rel2abs($RealBin);
     my $home = defined($ENV{HOME}) && $ENV{HOME} ne "" ? (abs_path($ENV{HOME}) // File::Spec->rel2abs($ENV{HOME})) : "";
@@ -7412,8 +7117,8 @@ sub safe_remove_tree {
     my $abs = abs_path($path) // $path;
     die "Refusing to remove unsafe $label path: $abs\n"
         if $abs eq "/" || $abs eq "." || $abs eq ".." || $abs =~ m{^/+$};
-    die "Refusing to remove very short $label path: $abs\n"
-        if length($abs) < 8;
+    die "Refusing to remove top-level $label path: $abs\n"
+        if _path_too_shallow($abs);
     die "Refusing to recursively remove a file as $label: $abs\n"
         if -f $abs;
     die "Refusing to recursively remove non-directory $label: $abs\n"
@@ -7438,6 +7143,16 @@ sub safe_remove_tree {
         }
         die "Failed to remove $label $abs:\n" . join("\n", @msgs) . "\n";
     }
+}
+
+#a directory directly below / (or / itself) is never a LotuS output or temporary directory;
+#counting components, not characters, keeps short but deep paths such as /tmp/o1 usable
+sub _path_too_shallow {
+    my ($path) = @_;
+    return 1 unless defined $path && $path ne "";
+    my $abs = File::Spec->rel2abs($path);
+    my @parts = grep { $_ ne "" } split m{/+}, $abs;
+    return @parts < 2 ? 1 : 0;
 }
 
 sub _path_is_same_or_parent {
@@ -7474,7 +7189,7 @@ sub _assert_safe_temp_directory_target {
     my ($path) = @_;
     my $abs = -e $path ? (abs_path($path) // $path) : File::Spec->rel2abs($path);
     die "Refusing unsafe temporary directory path: $abs\n"
-        if $abs eq "/" || $abs eq "." || $abs eq ".." || $abs =~ m{^/+$} || length($abs) < 8;
+        if $abs eq "/" || $abs eq "." || $abs eq ".." || $abs =~ m{^/+$} || _path_too_shallow($abs);
     my $cwd = abs_path(".") // File::Spec->rel2abs(".");
     my $script_root = abs_path($RealBin) // File::Spec->rel2abs($RealBin);
     my $output_root = abs_path($outdir) // File::Spec->rel2abs($outdir);
@@ -7592,11 +7307,20 @@ sub split_shell_commands {
             next;
         }
         if ($ch eq "'" || $ch eq '"') { $quote = $ch; $buf .= $ch; next; }
-        if ($ch eq ";") { push @cmds, $buf if $buf =~ /\S/; $buf = ""; next; }
+        #newlines separate commands like ";" so that every step's exit status is checked
+        if ($ch eq ";" || $ch eq "\n") { push @cmds, $buf if $buf =~ /\S/; $buf = ""; next; }
         $buf .= $ch;
     }
     push @cmds, $buf if $buf =~ /\S/;
     return @cmds;
+}
+
+#human readable exit status of system(): exit code, signal, or failure to start
+sub describe_system_status {
+    my ($stat) = @_;
+    return "could not be started" if $stat == -1;
+    return "killed by signal " . ($stat & 127) if ($stat & 127);
+    return "exit code " . ($stat >> 8);
 }
 
 sub systemL {
@@ -7626,9 +7350,9 @@ sub systemL {
         if ($stat != 0) {
             $retStat ||= $stat;
             if ($throwWarn) {
-                my $msg = ($descr ne "" ? "$descr: " : "") . "CMD failed: $subcmd\nsee $progOutPut for error log\nExit status: $stat\n";
-                print $msg;
-                exit(9);
+                #printL writes the failure to LotuS_run.log as well as the terminal, then exits
+                my $msg = ($descr ne "" ? "$descr: " : "") . "CMD failed (" . describe_system_status($stat) . "): $subcmd\nsee $progOutPut for error log\n";
+                printL($msg, 9);
             }
         }
     }
@@ -7636,72 +7360,8 @@ sub systemL {
 }
 
 
-sub splitFastas($ $) {
-    my ( $inF, $num ) = @_;
-    my $protN = cntFastaEntrs($inF);
-    my $pPerFile = int( $protN / $num ) + 1;
-    my $fCnt     = 0;
-    my $curCnt   = 0;
-    my @nFiles   = ("$inF.$fCnt");
 
-    open I, "<$inF" or printL "Fatal: Can't open fasta file $inF\n", 59;
-    open my $out, ">$inF.$fCnt"
-      or printL "Fatal: Can't open output fasta file $inF.$fCnt\n", 59;
-    while ( my $l = <I> ) {
-        if ( $l =~ m/^>/ ) {
-            $curCnt++;
-            if ( $curCnt > $pPerFile ) {
-                $fCnt++;
-                close $out;
-                open $out, ">$inF.$fCnt";
-                push( @nFiles, "$inF.$fCnt" );
-                $curCnt = 0;
-            }
-        }
-        print $out $l;
-    }
-    close I;
-    close $out;
-    return \@nFiles;
-}
 
-sub extractFastas($ $ $) {
-    my ( $in, $hr, $addSize ) = @_;
-    my %tars = %{$hr};
-    my %fasSubs;
-    my $hd = "";
-    open I, "<$in" or printL "Fatal: Can't open fasta file $in\n", 59;
-    my $use = 0;
-    while ( my $l = <I> ) {
-        chomp $l;
-        if ( $l =~ m/^>/ ) {
-            $use = 0;
-			my ($parsed_hd) = $l =~ m/^>(\S+)/;
-			die "Empty FASTA identifier in $in\n" unless defined $parsed_hd;
-			$hd = $parsed_hd;
-            if ( exists( $tars{$hd} ) ) {
-                if ($addSize) { $hd .= ";size=" . $tars{$hd} . ";"; }
-                $use = 1;
-                $fasSubs{$hd} = "";
-            }
-            next;
-        }
-        $fasSubs{$hd} .= $l if ($use);
-    }
-    close I;
-    return \%fasSubs;
-}
-
-sub combine($ $) {
-    my ( $fadd, $freal ) = @_;
-    if ( $osname eq 'MSWin32' ) {
-        systemL("type $fadd  $freal > $freal");
-    }
-    else {
-        systemL("cat $fadd >> $freal");
-    }
-    unlink("$fadd");
-}
 
 
 
@@ -7717,7 +7377,6 @@ sub prefix_find($){
 		last if $first eq "";
 	}
 	
-	print "$first common prefix\n";
 	for (my $i=0; $i<@newRds; $i++){
 		$newRds[$i] =~ s/^\Q$first\E// if $first ne "";
 		$newRds[$i] .= "/" if ($newRds[$i] !~ m/\/$/ && length($newRds[$i] ) != 0 );
@@ -7726,192 +7385,85 @@ sub prefix_find($){
 }
 
 
+#SampleID for a file stem: LotuS rejects dashes and whitespace, so only [A-Za-z0-9_.] is kept
+sub _auto_sample_name {
+	my ($stem, $used) = @_;
+	my $name = $stem;
+	$name =~ s/_S\d+(?:_L\d{3})?$//; #Illumina sample-sheet and lane suffix
+	$name =~ s/[^A-Za-z0-9_.]/_/g;
+	$name = "S_$name" if $name eq "" || $name =~ m/^OTU$/i;
+	my ($base, $i) = ($name, 2);
+	while ($used->{$name}) { $name = "${base}_$i"; $i++; }
+	$used->{$name} = 1;
+	return $name;
+}
+
 sub autoMap{
 	my ($refDirs, $ofile) = @_;
-	my $prefix = "SMPL";
-	my $smpCnt = 0;
-	my $pairedP = "2";#just set default
-	my @paired = split /,/,$pairedP;
+	die "-create_map needs the directory (or comma-separated directories) with the sequence files in -i\n"
+		unless defined($refDirs) && $refDirs ne "";
+	my $seqSuffix = qr/\.f(?:ast)?[aq](?:\.gz)?$/i;
+	#mate tags before the suffix: _R1/_R2 (optionally with Illumina's _001), .R1/.R2, _1/_2, .1/.2
+	my $mateRx = qr/^(.+?)[._](?:R([12])(?:_\d{3})?|([12]))\.f(?:ast)?[aq](?:\.gz)?$/i;
 
-	if (@paired > 1 ){
-		print "Looking for mix of paired and single input files\n";
-	}elsif ($paired[0]==2){
-		print "Looking for paired input files\n";
-	} elsif ($paired[0]==1){
-		print "Looking for single read input files\n";
-	} else {
-		die "Arg 2 has to be supplied and be either \"1\" or \"2\" (single / paired read input in dirs)\n";
-	}
-	#### regex search string
-	my $rawFileSrchStr1 = '(R1_00\d|\.1|_1|\.R1)\.f[^\.]*[aq][\.gz]*$';
-	my $rawFileSrchStr2 = '(R2_00\d|\.2|_2|\.R2)\.f[^\.]*[aq][\.gz]*$';
-	my $rawSingSrchStr = '.f[^\.]*[aq][\.gz]*$';
-
-	my $map = "#SampleID	fastqFile\n";
 	my @preRDs = split(/,/,$refDirs);
-	if (@preRDs > 1 && @paired == 1){ #extend to full length
-		for (my $i=1;$i<@preRDs;$i++){
-			$paired[$i] = $paired[0];
-		}
-	}
 	my ($arRDs,$pathPre) = prefix_find(\@preRDs);
 	$pathPre = "." if $pathPre eq ""; #relative dirs without a shared "/" prefix
 	my @RDs = @{$arRDs};
-	my $cnt=0;
+	my (@rows, %usedNames, %modes);
 	foreach my $RD ( @RDs ){
-		my $paired=2; #decided per directory
-		#print "DIR: $RD\n";
-		opendir(DIR, "$pathPre/$RD") or die $!;
-		my @pa2 =(); 
-		my @pa1 = ();
-		if ($paired == 2){
-			@pa2 = sort ( grep { /$rawFileSrchStr2/ && -e "$pathPre/$RD/$_" } readdir(DIR) );
-            rewinddir DIR;
-			@pa1 = sort ( grep { /$rawFileSrchStr1/  && -e "$pathPre/$RD/$_"} readdir(DIR) );
-			#fix reads double assigned, always assume 2nd is correct
-			if (@pa1 != @pa2){
-				my %h;
-				@h{(@pa2)} = undef;
-				@pa1 = grep {not exists $h{$_}} @pa1;
-			}
-			if (not @pa1 or @pa1 != @pa2){
-				$paired=1;
-			}
-		}
-		
-		#in case things are not matching up.. go for single reads
-		if ($paired == 1){
-			@pa2 = ();
-            rewinddir DIR;
-			@pa1 = sort ( grep { /$rawSingSrchStr/  && -e "$pathPre/$RD/$_"} readdir(DIR) );
-		}
-		close(DIR);
-
-		die "unequal read pairs!: ".@pa1 .",". @pa2."\n" if (@pa1 != @pa2 && $paired == 2);
-		print "Found ".@pa1." samples in dir $RD\n";
-		print "Assuming unpaired reads, as can not find signature for pair 2 files\n" if (@pa2 == 0 && @pa1 >0 && $paired == 2);
-		#add to map
-		foreach (my $i=0; $i< @pa1; $i++){
-			if (@pa2 > 0){
-				$map .= $prefix.$smpCnt."\t".$RD."".$pa1[$i].",".$RD."".$pa2[$i]."\n";
+		my $dir = "$pathPre/$RD";
+		opendir(my $dh, $dir) or die "Cannot read input directory $dir: $!\n";
+		my @files = sort grep { $_ =~ $seqSuffix && -f "$dir/$_" } readdir($dh);
+		closedir($dh);
+		my (%mates, @untagged);
+		for my $f (@files) {
+			if ($f =~ $mateRx) {
+				my ($stem, $mate) = ($1, $2 // $3);
+				die "Two files in $dir look like mate $mate of '$stem': $mates{$stem}{$mate} and $f\n" if exists $mates{$stem}{$mate};
+				$mates{$stem}{$mate} = $f;
 			} else {
-				$map .= $prefix.$smpCnt."\t".$RD."".$pa1[$i]."\n";
+				push @untagged, $f;
 			}
-			$smpCnt ++;
 		}
-		$cnt++;
-		
+		my @complete = grep { exists $mates{$_}{1} && exists $mates{$_}{2} } sort keys %mates;
+		if (@complete) {
+			#pairs are matched by file stem, never by list position
+			my @lonely = map { values %{$mates{$_}} } grep { !(exists $mates{$_}{1} && exists $mates{$_}{2}) } sort keys %mates;
+			die "Found read pairs in $dir, but these files have no mate: @lonely\nMove or fix them, then rerun -create_map.\n" if @lonely;
+			die "Found read pairs in $dir, but these files carry no mate tag (_R1/_R2, _1/_2): @untagged\n" if @untagged;
+			print "Found " . scalar(@complete) . " read pairs in dir $RD\n";
+			push @rows, [ _auto_sample_name($_, \%usedNames), "$RD$mates{$_}{1},$RD$mates{$_}{2}" ] for @complete;
+			$modes{paired} = 1;
+		} else {
+			my @singles = sort(@untagged, map { values %{$mates{$_}} } keys %mates);
+			print "Found " . scalar(@singles) . " single-end files in dir $RD\n";
+			for my $f (@singles) {
+				my $stem = $f =~ $mateRx ? $1 : $f;
+				$stem =~ s/$seqSuffix//;
+				push @rows, [ _auto_sample_name($stem, \%usedNames), "$RD$f" ];
+			}
+			$modes{single} = 1 if @singles;
+		}
 	}
-	open O,">$ofile" or die "Can't open $ofile\n";
-	print O $map;
-	close O;
+	die "Some input directories hold read pairs and others single-end files; a LotuS mapping file needs one kind. Create separate maps.\n"
+		if $modes{paired} && $modes{single};
+	die "No FASTQ/FASTA files found in $refDirs\n" unless @rows;
+	open my $out, ">", $ofile or die "Can't open $ofile: $!\n";
+	print {$out} "#SampleID\tfastqFile\n", map { "$_->[0]\t$_->[1]\n" } @rows;
+	close $out or die "Can't write $ofile: $!\n";
 
-	print "Map is $ofile\n";
-	print "Please check that all files required are present in map $ofile.\n";
-	print "==========================\nTo start analysis:\nlotus3 -m $ofile -i $pathPre/ -o [outdir] [further parameters if desired]\n==========================\n";
+	print "Map is $ofile (" . scalar(@rows) . " samples, " . ($modes{paired} ? "paired" : "single-end") . " reads)\n";
+	print "Sample IDs were derived from the file names; please check them and that all required files are present in $ofile.\n";
+	(my $inArg = "$pathPre/") =~ s{/+$}{/};
+	print "==========================\nTo start analysis:\nlotus3 -m $ofile -i $inArg -o [outdir] [further parameters if desired]\n==========================\n";
 	exit(0);
-
 }
 
-sub usearchDerepSort($ ) {
-    my ($filtered) = @_;
-    my $outputLab = "-output";
-    if ( $usearchVer >= 8 && $VSused == 0 ) { $outputLab = "-fastaout"; }
-
-    printL(
-"\n =========================================================================\n Dereplicate exact sub-sequences & sort (usearch).\n ",
-        0
-    );
-    $cmd = "$VSBin -derep_fulllength $filtered $outputLab $lotus_tempDir/derep.fa -uc $lotus_tempDir/derep.uc -log $logDir/derep.log -sizeout -threads $uthreads;";
-
-    #die($cmd);
-    if ( systemL($cmd) != 0 ) { printL "Failed dereplication\n", 1; }
-
-    my $dcnt          = 1;
-    my $bigDerepCnt   = 0;
-    my @lotsFiles     = ($filtered);
-    my @subDerepFa    = ("$lotus_tempDir/derep.fa");    #my @subDerepUC = ("$lotus_tempDir/derep.uc");
-    my @subDerepFaTmp = ();
-    while ( -f $filtered . "." . $dcnt ) {
-        if ( $dcnt == 1 ) { @subDerepFaTmp = @subDerepFa; @subDerepFa = (); }
-        push( @lotsFiles,     $filtered . "." . $dcnt );
-        push( @subDerepFaTmp, "$lotus_tempDir/derep.fa.$dcnt" )
-          ;    #push(@subDerepUC,"$lotus_tempDir/derep.uc.$dcnt");
-        $cmd = "$VSBin -derep_fulllength $filtered.$dcnt $outputLab $subDerepFaTmp[-1] -sizeout -threads $uthreads;"
-          ;    #-uc $lotus_tempDir/derep.uc -log $logDir/derep.log
-               #die $cmd;
-        if ( systemL($cmd) != 0 ) { printL "Failed dereplication\n", 1; }
-        if ( -f $filterOutAdd . "." . $dcnt ) {
-
-            #Combining low qual reads..
-            combine( $filterOutAdd . "." . $dcnt, $filterOutAdd );
-        }
-        if ( ( $dcnt + 1 ) % 10 == 0 || !-f $filtered . "." . ( $dcnt + 1 ) )
-        {      #intermediary merge.. too big otherwise
-            my $firstF = shift(@subDerepFaTmp);
-
-            #print join(" ",@subDerepFaTmp)."\n";
-            my $pid =
-              open( CMD,
-                "| cat " . join( " ", @subDerepFaTmp ) . " >> $firstF" )
-              || printL "Merge of derep subfiles failed.\n", 1;
-            defined($pid) || printL( "Cannot fork derep of subfiles.\n", 1 );
-            close CMD;
-            foreach (@subDerepFaTmp) { unlink; }
-            @subDerepFaTmp = ();
-
-            my $dereOut = "$lotus_tempDir/derep.inter.$bigDerepCnt.temp";
-            $cmd = "$VSBin -derep_fulllength $firstF $outputLab $dereOut -uc $lotus_tempDir/derep.uc -log $logDir/derep.log -sizeout -threads $uthreads;";
-            if ( systemL($cmd) != 0 ) {
-                printL "Failed intermediate dereplication\n", 1;
-            }
-            newUCSizes( $dereOut, "$lotus_tempDir/derep.uc" );
-
-            #delete tmp files
-            unlink("$lotus_tempDir/derep.uc");
-            unlink("$firstF");
-            push( @subDerepFa, $dereOut );
-            $bigDerepCnt++;
-
-            #consecutive bigger files
-            if ( @subDerepFa > 1 ) {
-                $firstF = shift(@subDerepFa);
-                $pid    = open( CMD,
-                    "| cat " . join( " ", @subDerepFa ) . " >> $firstF" );
-                defined($pid)
-                  || printL( "Cannot fork derep of subfiles.\n", 1 );
-                close CMD || printL "Merge of derep subfiles failed.\n", 1;
-                $cmd = "$VSBin -derep_fulllength $firstF $outputLab $lotus_tempDir/derep.post.temp -uc $lotus_tempDir/derep.uc -log $logDir/derep.log -sizeout -threads $uthreads;";
-                print $cmd. "\n";
-                systemL $cmd || printL "Derep Command Failed: \n$cmd\n", 1;
-                newUCSizes( "$lotus_tempDir/derep.post.temp", "$lotus_tempDir/derep.uc" );
-                foreach (@subDerepFa) { print $_. "\n"; unlink; }
-                systemL("mv $lotus_tempDir/derep.post.temp $lotus_tempDir/derep.fa");
-                unlink("$lotus_tempDir/derep.pre.temp");
-                @subDerepFa = ("$lotus_tempDir/derep.fa");
-            }
-            elsif ( !-f $filtered . "." . ( $dcnt + 1 ) ) {
-                systemL("mv $subDerepFa[0] $lotus_tempDir/derep.fa");
-            }
-        }
-        $dcnt++;
-    }
-    my $dereplicate_minsizeX = $dereplicate_minsize;
-	my ($simple_minsize) = $dereplicate_minsizeX =~ m/^(\d+)/;
-	die "Invalid dereplication minimum size '$dereplicate_minsize'\n" unless defined $simple_minsize;
-	$dereplicate_minsizeX = $simple_minsize;
-    printL "Reset derep min to $dereplicate_minsizeX, as u/vsearch does not support more complex options\n","w";
-
-    #dereplicate_minsize is 2 by default
-    $cmd = "$VSBin -sortbysize  $lotus_tempDir/derep.fa $outputLab $lotus_tempDir/derep.fas -minsize $dereplicate_minsizeX -log $logDir/sortbysize.log;";
-    if ( systemL($cmd) != 0 ) { exit(1); }
-    unlink("$lotus_tempDir/derep.fa");
-    return ("$lotus_tempDir/derep.fas");
-}
 
 sub parseSDMlog($) {
     my ($inF) = @_;
-    open I, "<", $inF;
+    open I, "<", $inF or do { printL "Could not read SDM log $inF; UPARSE clustering uses its small-dataset settings\n", "w"; return (0, 0); };
     my $totSeq = 0;
     my $SeqLen = 0;
     while (<I>) {
@@ -7998,12 +7550,13 @@ sub convertFastqs2fna($ $){
 	my @infqs = @{$aref};
 
 	
-	open Ofas,">$ofna" or die "Can't open $ofna\n";
+	open Ofas,">$ofna" or die "Can't open $ofna: $!\n";
 	foreach my $file1 (@infqs){#double loop to allow for wildcards..
-		my @infqs2 = glob $file1;
-		#print "rewrite fq 2 fna : $infqs2[0]\n";
+		my @infqs2 = grep { -e $_ } glob $file1;
+		#an empty FASTA would silently backmap zero reads
+		die "No FASTQ input matches $file1 for FASTA conversion\n" unless @infqs2;
 		foreach my $inFQ (@infqs2){
-			open Infq, "<", $inFQ;
+			open Infq, "<", $inFQ or die "Can't open FASTQ $inFQ: $!\n";
 			$lnCnt = 0;
 			while ( my $line = <Infq> ) {
 				chomp $line;
@@ -8029,58 +7582,7 @@ sub convertFastqs2fna($ $){
 
 #eg. $CONT_REFDB_PHIX
 #removes all seqs from otusFA, that match at 95% to refDB
-sub derepBash($) {
 
-    #SWARM derep way
-    my ($filtered) = @_;
-    die("DERPRECATED bash derep\n");
-    my $derepCmd = 'grep -v "^>" ' . $filtered . ' | \
-	grep -v [^ACGTacgt] | sort -d | uniq -c | \
-	while read abundance sequence ; do
-		hash=$(printf "${sequence}" | sha1sum)
-		hash=${hash:0:40}
-		printf ">%s_%d_%s\n" "${hash}" "${abundance}" "${sequence}"
-	done | sort -t "_" -k2,2nr -k1.2,1d | \
-	sed -e \'s/\_/\n/2\' > ' . "$lotus_tempDir/derep.fa";    #amplicons_linearized_dereplicated.fasta
-    die $derepCmd . "\n";
-    open( CMD, $derepCmd ) || printL( "Can't derep in swarm:\n$derepCmd\n", 1 );
-    close CMD;
-    return ("$lotus_tempDir/derep.fa");
-}
-
-sub swarmClust($) {
-    my ($outfile) = @_;
-    die("DEPRECATED swarm function\n");
-
-    my $swarmThreads = $uthreads;
-    my $swPath       = "/home/falhil/bin/swarm-dev/";
-    my $swarmBin     = "$swPath/swarm";
-
-    #my $swarmBreakBin = "python $swPath/scripts/swarm_breaker.py";
-    my @UCguide = ( "$lotus_tempDir/finalOTU.uc", 2 );    #,"$lotus_tempDir/otus.uc",1);
-    if ( $exec == 1 ) { return ( \@UCguide ); }
-
-    my $filtered = $filterOut;
-    my $derepl   = "$lotus_tempDir/derep.fas";            #,$totSeqs,$arL)
-    if ( !-f $derepl || -z $derepl ) {
-        printL "The sdm dereplicated output file was either empty or not existant, aborting lotus.\n$derepl\n", 1;
-    }
-
-    my ( $totSeqs, $SeqLength ) = parseSDMlog("$logDir/demulti.log");
-    my @lotsFiles = ($filtered);
-    my $dcnt      = 1;
-    while ( -f $filtered . "." . $dcnt ) {
-        push( @lotsFiles, $filtered . "." . $dcnt );
-        $dcnt++;
-    }
-    if ( !$sdmDerepDo ) {
-        my ($dereplFi) = usearchDerepSort($filtered);
-        onelinerSWM($derepl);
-        $derepl = $dereplFi;
-    }
-
-    return ( \@UCguide );
-}
 
 sub annotateFaProTax{
 	my ($hir,$FaPr) = @_;
@@ -8146,14 +7648,12 @@ sub buildOTUs($) {
 	if ($mergePreCluster){
 		$derepl = "$lotus_tempDir/derep.merg.fas";
 		if ($takeNonMerge && $ClusterPipe != 7 && $ClusterPipe != 1 ){
-			system "cat $lotus_tempDir/derep.fas >> $derepl";
+			systemL "cat $lotus_tempDir/derep.fas >> $derepl;", "Adding unmerged dereplicated reads";
 		}
 	}
 	my ( $totSeqs, $SeqLength ) = parseSDMlog("$logDir/demulti.log");
-	if (!$sdmDerepDo && $ClusterPipe != 9) {
-		my ($derepl) = usearchDerepSort($filtered);
-	}
-	elsif ($sdmDerepDo) {
+	#without SDM dereplication only Savont is supported (validate_cli_safety rejects the rest)
+	if ($sdmDerepDo) {
 		if ($ClusterPipe != 7 && (!-f $derepl || -z $derepl )) {
 			printL "The sdm dereplicated output file was either empty or not existing, aborting lotus.\n$derepl\n",1;
 		}
@@ -8214,13 +7714,9 @@ sub buildOTUs($) {
 	elsif ( $ClusterPipe == 7 ) { #dada2
 		die "incorrect dada2 script defined" unless (-f $dada2Scr);
 		$cmd = "$Rscript $defRscriptOpt $dada2Scr $sdmDemultiDir $lotus_tempDir $dada2Seed $uthreads $cpMapFile $derepl; ";
-		#cleanup of important dada2 files
-		$cmd .= "mv -f $lotus_tempDir/*.pdf $logDir; ";
-		
 		$cmd .= "cp $lotus_tempDir/dada2.uc $finalClustMap; ";
 		$cmd .= "rm -f $OTUfastaTmp;cp $lotus_tempDir/uniqueSeqs.fna $OTUfastaTmp; ";
-		#$cmd .= "cp $sdmDemultiDir/uniqueSeqs.fna $outdir/primary/;gzip $outdir/primary//uniqueSeqs.fna;";
-		$cmd .= "rm -rf $sdmDemultiDir;" if ($saveDemulti==0);
+		#the quality-profile PDFs and demultiplexed reads are handled after the command, see below
 		#die "$cmd\n";
 		$citations .= "DADA2 ASV clustering: Callahan BJ, McMurdie PJ, Rosen MJ, et al. DADA2: High-resolution sample inference from Illumina amplicon data. Nat Methods 2016;13:581–3. doi:10.1038/nmeth.3869\n";
 		$entrMessage = "DADA2 ${OTU_prefix} clustering\ncheck progress at $progOutPut";
@@ -8241,9 +7737,10 @@ sub buildOTUs($) {
 
 		#-z: unsearch size output. -u uclust result file
 		my $uclustFile = "$lotus_tempDir/clusters.uc";
-		my $dofasti    = "-f ";
+		#fastidious mode (and its --ceiling memory limit) is only allowed with d = 1
+		my $dofasti    = "-f --ceiling 4024 ";
 		if ( $swarmClus_d > 1 ) { $dofasti = ""; }
-		$cmd = "$swarmBin -z $dofasti -u $uclustFile -t $uthreads -w $OTUfastaTmp --ceiling 4024 -s $logDir/SWARMstats.log -l $logDir/SWARM.log -o $lotus_tempDir/otus.swarm -d $swarmClus_d < $derepl;";
+		$cmd = "$swarmBin -z $dofasti -u $uclustFile -t $uthreads -w $OTUfastaTmp -s $logDir/SWARMstats.log -l $logDir/SWARM.log -o $lotus_tempDir/otus.swarm -d $swarmClus_d < $derepl;";
 		$citations .= "swarm v2 ${OTU_prefix} clustering: Mahé F, Rognes T, Quince C, de Vargas C, Dunthorn M. 2015. Swarm v2: highly-scalable and high-resolution amplicon clustering. PeerJ. DOI: 10.7717/peerj.1420\n";
 	} elsif ($ClusterPipe == 8){ #vsearch
 		# Create the optional flag string for iddef, only if it is passed by the user
@@ -8252,14 +7749,16 @@ sub buildOTUs($) {
 			$iddef_flag = "--iddef $vsearch_iddef";
 		}
 		$entrMessage = "VSEARCH ${OTU_prefix} clustering\nCluster at ". 100 * $id_OTU . "%";
-		$cmd = "$VSBinOri --cluster_size $derepl --id $id_OTU $iddef_flag --sizein --strand both --consout $OTUfastaTmp --sizeout --uc $finalClustMap;";
+		$cmd = "$VSBinOri --cluster_size $derepl --id $id_OTU $iddef_flag --sizein --strand both --consout $OTUfastaTmp --sizeout --uc $finalClustMap --threads $uthreads;";
 		$citations .= "VSEARCH v$vsearchVer OTU clustering: Rognes T, Flouri T, Nichols B, Quince C, Mahé F. 2016. VSEARCH: A versatile open source tool for metagenomics. PeerJ 2016:1–22.\n";
 	} elsif ( $ClusterPipe == 3 ) {
 		if ( !-e $cdhitBin ) {printL "No valid CD-Hit binary found at $cdhitBin\n", 88;}
 		$entrMessage = "CD-HIT ${OTU_prefix} clustering\nCluster at ". 100 * $id_OTU . "%";
 		my $cdhitSpd = "-g 0"; #g 1 is usually too slow
 		#printL("\n =========================================================================\n CD-HIT ${OTU_prefix} clustering\n Cluster at ". 100 * $id_OTU . "%\n=========================================================================\n", 0 );
-		$cmd = "$cdhitBin -T $uthreads -o $OTUfastaTmp -c $id_OTU -G 0 $cdhitSpd -M 0 -i $derepl -n 9 -d 0 -r 1 -aL 0.0 -aS 0.9 -p 1 -mask NX;";
+		#cd-hit-est word length must fit the identity threshold (see the cd-hit user guide)
+		my $cdhitWord = $id_OTU >= 0.90 ? 9 : $id_OTU >= 0.88 ? 7 : $id_OTU >= 0.85 ? 6 : $id_OTU >= 0.80 ? 5 : 4;
+		$cmd = "$cdhitBin -T $uthreads -o $OTUfastaTmp -c $id_OTU -G 0 $cdhitSpd -M 0 -i $derepl -n $cdhitWord -d 0 -r 1 -aL 0.0 -aS 0.9 -p 1 -mask NX;";
 		my $verchk = `$cdhitBin 2>&1`;
 		my ($cdhit_ver) = $verchk =~ m/CD-HIT version\s+([\d.]+)/i;
 		$cdhit_ver = "unknown" unless defined $cdhit_ver;
@@ -8299,6 +7798,13 @@ sub buildOTUs($) {
 		
 		#post cluster parsing
 		my $d2rep;
+		if ( $ClusterPipe == 7 ) {
+			#keep DADA2's quality-profile PDFs (none is fine), then drop the demultiplexed reads unless saved
+			for my $pdf ( glob("$lotus_tempDir/*.pdf") ) {
+				move( $pdf, $logDir ) or printL "Could not move $pdf to $logDir: $!\n", "w";
+			}
+			safe_remove_tree( $sdmDemultiDir, "demultiplexed reads" ) if ( $saveDemulti == 0 && $sdmDemultiDir ne "" && -d $sdmDemultiDir );
+		}
 		if  ( $ClusterPipe == 7 ) {#report within dada2 R script
 			$d2rep = `grep 'Found .* ASVs.*(dada2)' $progOutPut`;
 			if ($d2rep eq ""){
@@ -8328,8 +7834,6 @@ sub buildOTUs($) {
 #------------------ 2nd part: --------------------
 ##------------------ backmap reads to OTUs/ASVs/zOTUs --------------------
 
-    my $cnt = 0;
-    my @allUCs;
     my $userachDffOpt = "--maxhits 1 --query_cov 0.8 --maxrejects 200 -top_hits_only -strand both -id $backMapID -threads $uthreads";
     my $vsearchSpcfcOpt = "";#" --minqt 0.8 ";
     #$vsearchSpcfcOpt = " --minqt 0.3 " if ( $platform eq "454" );
@@ -8354,8 +7858,9 @@ sub buildOTUs($) {
         @lotsFiles = ($firstFilterOutAdd, $firstFilterOutAdd . ".singl");
     }
     my $dcnt = 1;
-	while ( -f $filterOutAdd . "." . $dcnt && $dcnt < 100000 ) {
-		push( @lotsFiles, $filterOutAdd . "." . $dcnt );
+	#numbered chunks of the (first mate's) mid-quality file; $filterOutAdd itself can be a comma list
+	while ( defined($firstFilterOutAdd) && $firstFilterOutAdd ne "" && -f $firstFilterOutAdd . "." . $dcnt && $dcnt < 100000 ) {
+		push( @lotsFiles, $firstFilterOutAdd . "." . $dcnt );
 		$dcnt++;
 	}
 
@@ -8410,40 +7915,8 @@ sub buildOTUs($) {
 			$backMapRep .= backmap_line(ucfirst($mapping_label), $hits, $total);
 			
         }
-	} else {         #map all qual filtered files to OTUs
-	# !!!       deprecated             !!!!!!
-		die "Backmapping all reads no longer supported\n";
-		if ( $usearchVer >= 8 ) {
-			printL "\n\nWarning:: usearch v8 can potentially cause decreased lotus performance in seed extension step, when used with option -highMem 0\n\n", 0;
-			sleep(10);
-		}
-		my @lotsFiles = ($filtered);
-		my $dcnt      = 1;
-		while ( -f ($filtered . "." . $dcnt) ) {
-			push( @lotsFiles, ($filtered . "." . $dcnt ) );
-			$dcnt++;
-		}
-		my %checkDblLotsFiles;
-		foreach my $fil (@lotsFiles) {
-			if (exists($checkDblLotsFiles{$fil})){
-				printL "\@lotsFiles contains doubles: @lotsFiles\n.. aborting", 925;
-			}
-			my $tmpUC = "$lotus_tempDir/tmpUCs.$cnt.uct";
-			push( @allUCs, $tmpUC );
-			
-			$cmd = "$VSBin --usearch_global $fil -db $outfile -uc $tmpUC -strand both -id $backMapID -threads $uthreads $vsearchSpcfcOpt;";    #-threads  $BlastCores";
-			if ( systemL($cmd) != 0 ) { exit(1); }
-			if ( $cnt > 0 ) {
-				combine( $fil, $filtered );
-				unlink($fil);
-			}
-			$cnt++;
-		}
-		if (systemL( "cat " . join( " ", @allUCs ) . " > " . $finalClustMap ) != 0 ){
-			printL "Merge of UC subfiles failed.\n", 1;
-			exit(1);
-		}
-		foreach (@allUCs) { unlink; }
+	} else {         #mapping all quality-filtered reads was removed; validate_cli_safety rejects this setup
+		die "Backmapping all reads is no longer supported (SDM dereplication or Savont is required)\n";
 	}
 
 	$cmd="";

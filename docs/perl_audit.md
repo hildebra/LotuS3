@@ -47,7 +47,7 @@ prove -v tests/
 
 The suites were ported from Python `unittest` to Perl `Test::More` on 2026-09-24, keeping every test case; LotuS3 no longer ships Python.
 
-The suites comprise 25 installer/extraction tests, 11 interactive installer tests, 51 ONT integration/converter tests, and 26 Perl-audit tests. All pass in this environment. Perl syntax checks also pass for `lotus3`, `helpers/autoInstall.pl`, `helpers/autoMap.pl`, and `bin/savont2uc.pl`; `git diff --check` passes.
+The suites comprise 25 installer/extraction tests, 11 interactive installer tests, 51 ONT integration/converter tests, and 26 Perl-audit tests. All pass in this environment. Perl syntax checks also pass for `lotus3`, `helpers/autoInstall.pl` and `bin/savont2uc.pl`; `git diff --check` passes.
 
 Bioconda extraction tests require `zstd` on `PATH` or an executable path supplied through `LOTUS_TEST_ZSTD`; unavailable extraction dependencies are reported as skipped tests. Neither the test harness nor the installer or pipeline uses Python.
 
@@ -65,10 +65,32 @@ The Savont pass-through follow-up disables SDM dereplication only for Savont and
 
 A real SDM 3.51 -> Savont 0.7.0 smoke test on the upstream `ont_zymo_1000.trimmed.fq.gz` fixture (902 actual FASTQ records) retained 817 primary-quality reads with the initial preset (average Q20, no ambiguous bases, 500–5000 bp) and produced 16 ASVs in strand-specific mode. Retained sequences and qualities matched the already-trimmed input exactly; no dereplication artifacts were produced. A control with filtering disabled retained all 902 reads but still produced only 2 ASVs when the strand-evidence requirement remained enabled, identifying header/orientation handling rather than the new quality thresholds as the cause of that large loss. This test stopped after real Savont ASV generation; mapping and complete output remain covered by controlled mapper regressions. These small-fixture results establish execution behavior, not biological accuracy or optimal quality cutoffs.
 
+## Follow-up audit (2026-09-25)
+
+A second pass reviewed all of `lotus3`, `helpers/autoInstall.pl`, the extractor and the configuration template. The following were corrected; regressions are in `tests/audit_fixes.t`, `tests/installer_downloads.t` and `tests/installer_options.t`.
+
+| Area | Previous behavior | Correction |
+| --- | --- | --- |
+| Copied mapping file | An empty `SequencingRun` cell grouped under the empty string, which sorts above `#SampleID`, so `primary/in.map` began with a data row. | Empty or space-padded `SequencingRun` values abort (66); `writeMap` always writes the header first. |
+| IQ-TREE | The tree command was joined with newlines, so the shell's final status came from the appended log redirect; a crashing iqtree passed. | Newlines now separate checked commands in `split_shell_commands`, the command uses `;`, and a missing tree file aborts. |
+| Subprocess failures | `systemL` printed failures to stdout only, with the raw `$?`. | Failures go through `printL` (terminal and `LotuS_run.log`) with a readable exit code or signal. |
+| Downloads | Only the three ONT tools were checksummed; most programs, scripts and databases came over plain HTTP. `-forceUpdate` unpacked an unverified HTTP archive over the installation. | Every download is HTTPS and pinned to a SHA-256 (`%PINNED_SHA256`); mismatches are deleted and stop the install. `-forceUpdate` was removed. |
+| VSEARCH | `bin/vsearch` (2.17.1) crashed with signal 11. | Replaced by a static VSEARCH 2.32.0 build from the checksummed upstream source; the installer registers it, or a pinned release elsewhere. |
+| Installer prerequisites | Missing `unzip`, `make`, a C compiler or a runnable `sdm`/`LCA` surfaced only after all databases were downloaded; FastTree failures exited mid-install. | A preflight lists missing items before any download; FastTree and rtk failures only warn. |
+| Installer probes | The Rscript probe read stdout only, so R 4.0/4.1 was reported as older than 4. `-lambdaIndex` on a fresh install died because Lambda is installed after the databases. | Version probes read stderr too; Lambda indices are built once Lambda is installed. |
+| Option handling | A default `-refDB` made RDP-only installations fail with "Requested similarity search"; `-xtalk` passed with only VSEARCH; LSU runs replaced custom `-refDB` lists with SILVA; `-saveDemultiplex 3` was advertised but rejected. | Defaulted databases fall back to RDP; `-xtalk` requires a real USEARCH 11; LSU keeps custom files; the help text no longer lists mode 3. |
+| Mapping checks | Whitespace inside sample IDs and invalid `CombineSamples` targets were only warned about; paired rows after single-file rows were not detected. | These abort with a clear message. Trailing header tabs are tolerated. |
+| SINTAX taxonomy | Ranks were filled by position, so a lineage without `o:` put the genus in the Order column. | Ranks follow their rank letters. |
+| Reference databases | The taxonomy validators had no callers. | Taxonomy files are format-checked, and a FASTA/taxonomy pair sharing no IDs aborts (55). |
+| `-create_map` | `_R1`/`_R2` names were not recognised, mates were paired by list position, and samples were named `SMPL<n>`. | Mates pair by file stem, unmatched mates abort, and sample IDs come from the file names. |
+| Other | Exit codes above 255 were truncated; `-t` was not passed to VSEARCH clustering; SWARM kept `--ceiling` without `-f`; CD-HIT used word length 9 at every identity; DADA2 failed when R wrote no PDF; update checks could stall runs; paths such as `/tmp/o1` were rejected as too short. | Fixed as described in the commit; about 470 lines of unreachable code were removed. |
+
+Not changed: the output lock still lives in the parent of `-o`, which must be writable. Rerunning the installer after a partial failure still downloads the selected databases again.
+
 ## Remaining limits and findings
 
 - **A real Savont source build was not performed.** Rust/Cargo and CMake are absent in this environment. The download/build/configuration orchestration is tested using fixture archives and a controlled build command, while real upstream archive checksums and Savont's source CLI were checked separately. macOS/ARM builds have not been executed here.
-- **The bundled VSEARCH executable crashes on this host.** `bin/vsearch --version` prints `v2.17.1_linux_x86_64` and exits with signal 11. The new version check detects this. A compatible VSEARCH installation and configuration are needed for real workflows using it. VSEARCH was not replaced; the ONT integration follow-up updates only the bundled SDM executable.
+- **Resolved 2026-09-25: the bundled VSEARCH 2.17.1 crashed on this host** (signal 11). `bin/vsearch` is now a static VSEARCH 2.32.0 build; see [installation](installation.md#download-verification).
 - **Savont's own length limits matter.** LotuS now passes 1000–2000 bp to Savont, matching the default SDM Savont preset and overriding its native 1100-base minimum. Custom SDM length limits alone do not change the Savont command-line bounds. The operon preset remains unexposed; shorter/longer amplicons need further integration work or another clusterer.
 - **Optional ASV post-clustering remains coupled to phyloseq creation.** In `runPhyloObj`, an absent/failed phyloseq setup returns before `-asvPostClust` runs. That pre-existing behavior was identified but not changed here; separating these R workflows needs its own integration validation.
 - **Reference index builds are not coordinated across separate runs.** The output lock protects one output directory. Runs sharing an unbuilt reference database can still attempt to build its index simultaneously. Database-index locking is outside this change.
