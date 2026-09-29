@@ -1,2 +1,3 @@
+eol=lf
 bin/sdm -text -diff merge=take-incoming
 bin/LCA -text -diff merge=take-incoming
