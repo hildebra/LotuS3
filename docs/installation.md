@@ -93,7 +93,7 @@ Conda normally handles its package dependencies. The source autoinstaller expect
 
 - `tar`, `gzip`, `unzip`, `make` and a C compiler (`gcc` or `cc`);
 - `xz`, when Lambda is selected on Linux;
-- a working `sdm` and `LCA`. The bundled `bin/sdm` and `bin/LCA` are Linux x86-64 builds; on other systems, place builds from [sdm](https://github.com/hildebra/sdm) and [LCA](https://github.com/hildebra/LCA) at those paths first (see [manual sdm compilation](#manual-sdm-compilation)).
+- a working `sdm` and `LCA`. The bundled `bin/sdm` and `bin/LCA` are Linux x86-64 builds; on macOS the installer compiles them from source ([macOS](#macos)), on other systems place builds from [sdm](https://github.com/hildebra/sdm) and [LCA](https://github.com/hildebra/LCA) at those paths first (see [manual sdm compilation](#manual-sdm-compilation)).
 
 A missing item stops the installer with a list of what to install, before anything is downloaded. Java is only reported, since it is needed at run time for RDP classification. Downloads need `wget` or `curl`.
 
@@ -101,7 +101,18 @@ A missing item stops the installer with a list of what to install, before anythi
 
 Every file the autoinstaller downloads is checked against a SHA-256 checksum pinned in `helpers/autoInstall.pl`, and all downloads use HTTPS. A file whose checksum differs is deleted and the installation stops, so a changed or substituted upstream file is never installed. To move a tool or database to a new release, download it, check it, and update its URL and checksum together in the `%PINNED_SHA256` table.
 
-Archives already present in `bin/installs/` (IQ-TREE and MAFFT for Linux) are used instead of downloading them again when their checksum matches. The macOS BLAST+ and Clustal Omega files that the installer used to fetch are no longer available upstream; on macOS the installer skips them with a warning. Install `blastn`/`makeblastdb` separately if you need BLAST; alignments use MAFFT.
+Archives already present in `bin/installs/` (IQ-TREE and MAFFT for Linux) are used instead of downloading them again when their checksum matches.
+
+## macOS
+
+On macOS (Intel or Apple silicon) the installer needs the Xcode command line tools (`xcode-select --install`) and Rscript. It then:
+
+- fetches `sdm` and `LCA` from GitHub at a pinned commit and compiles them (the bundled executables are Linux builds). `sdm` includes BAM/CRAM input only when HTSlib is installed (`brew install htslib pkg-config`);
+- downloads the macOS builds of VSEARCH, Savont, minimap2 (source), infernal, IQ-TREE, MAFFT and Lambda. The last four are Intel builds, so on Apple silicon they need Rosetta 2 (`softwareupdate --install-rosetta`); without it the installer uses copies on `PATH` instead;
+- takes programs that have no macOS download (BLAST+, `hmmsearch` for ITSx, Clustal Omega, USEARCH) from `PATH`, for example from Homebrew or Bioconda;
+- skips anything it can neither install nor find, with a warning at the end that says what is missing and how to add it. Rerun the installer after installing it, or set its path in `lOTUs.cfg`.
+
+Barbell has no Intel macOS release; on Intel Macs it is built with Rust >= 1.88 or skipped. `rtk` is not installed on macOS (LotuS3 does not call it).
 
 `bin/vsearch` is a statically linked Linux x86-64 build of VSEARCH 2.32.0 and is registered directly when it runs. It was compiled from the upstream release source (`vsearch-2.32.0.tar.gz`, SHA-256 `99578a8b960a0fb87c1f19dc65aedecddc01cfa91851b697dac8294dd08a6ceb`) with `./configure LDFLAGS=-static`, `make` and `strip`. The resulting executable has SHA-256 `8472f7852e4f320f1cc67e5dc09507e2e31034cd962bd1b8979bec894711c5a3`. On other platforms the installer downloads the pinned VSEARCH 2.32.0 release for Linux ARM64 (static) or macOS.
 

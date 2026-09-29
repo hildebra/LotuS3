@@ -13,6 +13,8 @@ myTestRun*
 DB
 test/
 rtk_src
+sdm_src/
+LCA_src/
 lotus.pl
 lOTUs.cfg.bak
 lOTUs.cfg

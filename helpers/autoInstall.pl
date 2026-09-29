@@ -73,6 +73,7 @@ my $ontOnly = 0;
 my $withBarbell = 0; #accepted for compatibility; Barbell is included with ONT tools
 my $showHelp = 0;
 my @pendingLambdaIndex; #databases waiting for lambda3, which a fresh install adds after the databases
+my %ontMacSkipWarned; #ONT programs already reported as skipped on macOS
 
 # SHA-256 of every file the installer downloads, recorded from the upstream files on 2026-09-25.
 # getS2 refuses any URL that is neither listed here nor given an explicit checksum by its caller,
@@ -128,6 +129,12 @@ my %PINNED_SHA256 = (
 	'https://ftp.arb-silva.de/release_138.1/Exports/taxonomy/tax_slv_lsu_138.1.txt.gz' => 'bfc32b01b1285857bdbc0d06bd0f62e4d8efc80c71adcad0a9c07aab0bc158e6',
 	'https://lotus2.earlham.ac.uk/lambdaDBs/v3.0/GG2.2022.10.fasta.lba.gz' => '764dfa7a04067ef6a30a92d7689dc1bec1a2256ff3b46f6dc9c72ec705f700f5',
 	'https://ksgp.earlham.ac.uk/lambdaDBs/v3.0/SLV_138.1_SSU.fasta.lba.gz' => 'c320cfd668a6da868f0f9283f1f051c1a90d8041fa77e4fd5c60fed0609b8fce',
+);
+# Source commits for sdm and LCA, fetched on macOS where the bundled Linux executables cannot run.
+# A git commit id pins the content, like the checksums above (recorded 2026-09-29).
+my %PINNED_SOURCE = (
+	sdm => ['https://github.com/hildebra/sdm.git', 'c677c6b80f6c55dffb92d3912e0c41026aab809f'],
+	LCA => ['https://github.com/hildebra/LCA.git', '5b6771ce7fb68175766c7b15bcf26e1b99780d53'],
 );
 
 GetOptions(
@@ -187,9 +194,15 @@ my $WGETpres = command_exists("wget") ? 1 : 0;
 my $CURLpres = command_exists("curl") ? 1 : 0;
 
 my $isMac = 0;
+my $macArm = 0; #Apple silicon
+my $macRosetta = 0; #Intel-only macOS builds can run (Intel Mac, or Apple silicon with Rosetta 2)
 if ($^O eq "darwin"){
 	$isMac = 1;
-	print "Detected MAC.. will install LotuS3 for MAC\n";
+	$macArm =((uname())[4] =~ /^(?:arm64|aarch64)$/) ? 1 : 0;
+	$macRosetta = !$macArm || (-x "/usr/bin/arch" && system("/usr/bin/arch", "-x86_64", "/usr/bin/true") == 0);
+	print "Detected macOS (" . ($macArm ? "Apple silicon" : "Intel") . ").. will install LotuS3 for macOS\n";
+	print "Rosetta 2 is not available: Intel-only macOS programs are taken from PATH (Homebrew/conda) or skipped.\n"
+		. "Enable them with \"softwareupdate --install-rosetta\" and rerun the installer.\n" unless $macRosetta;
 } elsif ($^O !~ m/linux/){
 	die "Unsupported operating system '$^O'. The LotuS3 installer supports Linux and macOS only.\n";
 }
@@ -362,8 +375,11 @@ $nsdmp = compile_LCA("$ldir/LCA_src");
 @txt = addInfoLtS("LCA",$nsdmp,\@txt,1);
 
 #rtk (rarefaction) is a standalone helper that lotus3 itself does not call: a failure only warns
-my $rtkPath = eval { install_bundled_rtk("$ldir/bin/rtk") };
-if (defined $rtkPath) {
+my $rtkPath = $isMac ? undef : eval { install_bundled_rtk("$ldir/bin/rtk") };
+if ($isMac) {
+	my $msg = "rtk was not installed: the bundled rtk is a Linux build (lotus3 itself does not call rtk).\n";
+	print $msg; $finalWarning .= $msg;
+} elsif (defined $rtkPath) {
 	@txt = addInfoLtS("rtk",$rtkPath,\@txt,1);
 } else {
 	my $msg = "rtk was not installed: $@";
@@ -1115,10 +1131,13 @@ sub compile_LCA($){
 		my ($lcaV,$status) = capture_cmd($expPath, "-v");
 		return $expPath if ($status == 0 && $lcaV =~ m/0\.\d+/);
 	}
+	fetch_pinned_source("LCA", $ldi2) if $isMac && !-f "$ldi2/Makefile";
 	if (-d $ldi2 && -f "$ldi2/Makefile" ){
 		print "Compiling LCA..\n";
 		unlink bsd_glob("$ldi2/*.o");
-		my $stat = system("make", "-C", $ldi2);
+		#macOS cannot link statically: replace the Makefile's CXXFLAGS (which add -static)
+		my @macArgs = $isMac ? ("CXXFLAGS=-Wall -O3 -std=c++20") : ();
+		my $stat = system("make", "-C", $ldi2, @macArgs);
 		if ($stat == 0){
 			unlink("$ldir/LCA") if -e "$ldir/LCA"; unlink("$bdir/LCA") if -e "$bdir/LCA"; move("$ldi2/LCA", "$bdir/LCA") or die "Cannot install LCA: $!\n"; run_cmd("chmod", "+x", "$bdir/LCA");
 		} else {
@@ -1158,10 +1177,22 @@ sub compile_sdm($){
 		my ($sdmV,$status) = capture_cmd($expPath, "-v");
 		return $expPath if ($status == 0 && $sdmV =~ m/sdm \d/);
 	}
+	fetch_pinned_source("sdm", $ldi2) if $isMac && !-f "$ldi2/Makefile";
 	if (-d $ldi2 && -f "$ldi2/Makefile" && -f "$ldi2/DNAconsts.cpp"){
 		print "Compiling sdm..\n";
 		unlink bsd_glob("$ldi2/*.o");
-		my $stat = system("make", "-C", $ldi2);
+		#macOS cannot link statically; HTSlib (alignment input) only when it is installed
+		my @macArgs;
+		if ($isMac) {
+			push @macArgs, "STATIC=0";
+			my $pkgConfig = command_exists("pkg-config");
+			if (!$pkgConfig || system($pkgConfig, "--exists", "htslib") != 0) {
+				push @macArgs, "WITH_HTS=0";
+				my $msg = "sdm was built without HTSlib (no BAM/CRAM input). Install it with \"brew install htslib pkg-config\" and rerun the installer to add it.\n";
+				print $msg; $finalWarning .= $msg;
+			}
+		}
+		my $stat = system("make", "-C", $ldi2, @macArgs);
 		if ($stat != 0){#repeat without gzip
 			print "\n\n\n\n=================\nProblem compiling sdm with gzip support\nFallback to sdm compilation without gzip support\n";
 			my $header = "$ldi2/DNAconsts.h";
@@ -1169,7 +1200,7 @@ sub compile_sdm($){
 			copy($header, $backup) or die "Cannot back up $header before fallback compilation: $!\n";
 			run_cmd($^X, "-pi", "-e", "s/#define _gzipread/#define _notgzip/g", $header);
 			unlink bsd_glob("$ldi2/*.o");
-			$stat = system("make", "-C", $ldi2);
+			$stat = system("make", "-C", $ldi2, @macArgs);
 			copy($backup, $header) or die "Cannot restore $header after fallback compilation: $!\n";
 			unlink($backup) or warn "Could not remove temporary backup $backup: $!\n";
 			$finalWarning .= "Can not read gzip file\n";
@@ -1185,6 +1216,44 @@ sub compile_sdm($){
 	die "Compilation did not produce executable $expPath\n" unless (-e $expPath);
 	run_cmd("chmod", "+x", $expPath);
 	return $expPath;
+}
+
+# Check out the pinned commit of sdm or LCA into $dir (macOS, where the bundled executables are Linux builds).
+sub fetch_pinned_source {
+	my ($name, $dir) = @_;
+	my ($repo, $commit) = @{$PINNED_SOURCE{$name}};
+	my $git = command_exists("git") or die "git is needed to fetch the $name source for macOS (install the Xcode command line tools: xcode-select --install).\n";
+	print "Fetching $name source ($repo, commit $commit)..\n";
+	die "$dir exists but has no Makefile; remove it or check out the $name source there, then rerun the installer.\n" if -e $dir;
+	my $stage = "$dir.fetch.$$";
+	remove_tree($stage) if -e $stage;
+	run_cmd($git, "init", "-q", $stage);
+	run_cmd($git, "-C", $stage, "fetch", "-q", "--depth", "1", $repo, $commit);
+	run_cmd($git, "-C", $stage, "-c", "advice.detachedHead=false", "checkout", "-q", "FETCH_HEAD");
+	my ($head) = capture_cmd($git, "-C", $stage, "rev-parse", "HEAD");
+	chomp $head;
+	if ($head ne $commit) {
+		remove_tree($stage);
+		die "Fetched $name source is at commit $head, expected $commit; nothing was installed.\n";
+	}
+	rename($stage, $dir) or die "Cannot move $stage to $dir: $!\n";
+}
+
+# macOS: register a program found on PATH (Homebrew, MacPorts, conda) under the lOTUs.cfg entry $key.
+# Without one the program is skipped with a warning; returns the registered path or undef.
+sub mac_program_from_path {
+	my ($key, $names, $hint, $consequence) = @_;
+	for my $name (@$names) {
+		my $path = command_exists($name) or next;
+		$path = abs_path($path) // $path;
+		print "Using $name found at $path\n";
+		@txt = addInfoLtS($key, $path, \@txt, 1);
+		return $path;
+	}
+	my $msg = "$names->[0] was not installed: no usable macOS build is available to the installer and none is on PATH. "
+		. "Install it ($hint) and rerun the installer, or set \"$key\" in lOTUs.cfg. $consequence\n";
+	print $msg; $finalWarning .= $msg;
+	return;
 }
 
 sub command_exists {
@@ -1639,7 +1708,22 @@ sub find_ont_program {
 
 sub ont_programs_to_install {
     # Minimap2 is also the default mapper for non-ONT workflows.
-    return ('minimap2', ($installONT ? ('savont', 'barbell') : ()));
+    my @names = ('minimap2', ($installONT ? ('savont', 'barbell') : ()));
+    return grep { !ont_skipped_on_mac($_) } @names;
+}
+
+# Barbell has no Intel macOS release: without Rust it is skipped there instead of stopping the install.
+sub ont_skipped_on_mac {
+    my ($name) = @_;
+    return 0 unless $isMac && $name eq 'barbell';
+    my @release = ont_release_binary($name); #a list: in scalar context it would be its empty last element
+    return 0 if @release || ont_rust_available() || find_ont_program($name);
+    if (!$ontMacSkipWarned{$name}++) {
+        my $msg = "barbell was not installed: there is no Intel macOS release and building it needs Rust >= 1.88 (https://rustup.rs). "
+            . "ONT demultiplexing with Barbell is unavailable until then; rerun the installer after installing Rust.\n";
+        print $msg; $finalWarning .= $msg;
+    }
+    return 1;
 }
 
 sub check_ont_build_requirements {
@@ -1682,6 +1766,11 @@ sub check_full_install_requirements {
         push @missing, $tool unless command_exists($tool);
     }
     push @missing, 'a C compiler (gcc or cc)' unless command_exists('gcc') || command_exists('cc');
+    if ($isMac) {
+        #sdm and LCA are compiled from source on macOS
+        push @missing, 'a C++ compiler and git (install the Xcode command line tools: xcode-select --install)'
+            unless command_exists('c++') && command_exists('git');
+    }
     push @missing, 'xz (unpacks the Lambda .tar.xz release)'
         if !$isMac && ($installBlast == 2 || $installBlast == 3) && !command_exists('xz');
     # sdm and LCA: the bundled Linux x86-64 executables, or their sources to compile
@@ -1696,7 +1785,7 @@ sub check_full_install_requirements {
         }
         push @missing, "a working $name: $exe does not run on this system and $ldir/${name}_src/$makefile is not present "
             . "(the bundled $name is a Linux x86-64 build; on other systems compile it from its source and place it at $exe)"
-            unless $runs || -f "$ldir/${name}_src/$makefile";
+            unless $runs || -f "$ldir/${name}_src/$makefile" || $isMac; #macOS fetches the pinned source
     }
     die "The full installation needs:\n" . join("", map { " - $_\n" } @missing)
         . "Install these and rerun perl helpers/autoInstall.pl. Nothing has been downloaded yet.\n" if @missing;
@@ -1848,7 +1937,14 @@ sub get_programs{
 		getS2("https://lotus2.earlham.ac.uk/lotus/packs/ITSx_1.1.4.tar.gz",$tarUTN);
 		run_cmd("tar", "-xzf", $tarUTN, "-C", $bdir); unlink($tarUTN) or warn "Could not remove $tarUTN: $!\n";
 		@txt = addInfoLtS("itsx","$bdir/ITSx_1.1.4/./ITSx",\@txt,1);
-		@txt = addInfoLtS("hmmsearch","$bdir/ITSx_1.1.4/bin/hmmsearch",\@txt,1);
+		my $hmmsearch = "$bdir/ITSx_1.1.4/bin/hmmsearch";
+		my (undef, $hmmStatus) = $isMac ? capture_cmd_merged($hmmsearch, "-h") : (undef, 0);
+		if ($hmmStatus == 0) {
+			@txt = addInfoLtS("hmmsearch",$hmmsearch,\@txt,1);
+		} else { #the ITSx package bundles a Linux hmmsearch
+			mac_program_from_path("hmmsearch", ["hmmsearch"], "brew install hmmer",
+				"ITS extraction with ITSx is unavailable until then.");
+		}
 
 	}
 
@@ -1860,8 +1956,11 @@ sub get_programs{
 		$exe = "$bdir/blast.tar.gz";
 		if ($isMac){
 			#the former macOS archive is no longer available upstream (HTTP 404)
-			my $msg = "BLAST was not installed: no verified macOS BLAST+ package is available. Install blastn and makeblastdb (e.g. via conda or Homebrew) and set \"blastn\" and \"makeBlastDB\" in lOTUs.cfg, or use Lambda.\n";
-			print $msg; $finalWarning .= $msg;
+			if (mac_program_from_path("blastn", ["blastn"], "brew install blast",
+					"BLAST taxonomy assignment is unavailable; use Lambda instead.")) {
+				mac_program_from_path("makeBlastDB", ["makeblastdb"], "brew install blast",
+					"BLAST cannot index reference databases until then.");
+			}
 		} else {
 		getS2("https://lotus2.earlham.ac.uk/lotus/packs/".$blfil,$exe);
 
@@ -1889,6 +1988,10 @@ sub get_programs{
 			getS2($lmdD,$exe);
 			run_cmd("tar", "-xf", $exe, "-C", $bdir); move("$bdir/lambda3-3.1.0-Linux-x86_64/bin/lambda3", "$bdir/lambda3") or die "Cannot move lambda3: $!\n"; for my $old (bsd_glob("$bdir/lambda3-3*")){ remove_tree($old) if -d $old; unlink($old) if -f $old; }
 
+		}elsif (!$macRosetta){ #the macOS release is an Intel build
+			$exe = "";
+			mac_program_from_path("lambda3", ["lambda3"], "conda install -c bioconda lambda, or enable Rosetta 2",
+				"Lambda taxonomy assignment is unavailable until then.");
 		}else{
 			my $lmdD = "https://github.com/seqan/lambda/releases/download/lambda-v3.1.0/lambda3-3.1.0-Darwin-x86_64.zip";
 			$exe = "$bdir/lambda.zip";
@@ -1896,11 +1999,13 @@ sub get_programs{
 			run_cmd("unzip", "-q", "-o", "-d", $bdir, $exe); move("$bdir/lambda3-3.1.0-Darwin-x86_64/bin/lambda3", "$bdir/lambda3") or die "Cannot move lambda3: $!\n"; for my $old (bsd_glob("$bdir/lambda3-3*")){ remove_tree($old) if -d $old; unlink($old) if -f $old; }
 		}
 
-		unlink($exe);
-		#$exe = "$bdir/lambda/lambda_indexer";
-		#@txt = addInfoLtS("lambda_index",$exe,\@txt,1);
-		$exe = "$bdir/lambda3";
-		@txt = addInfoLtS("lambda3",$exe,\@txt,1);
+		if ($exe ne ""){ #empty: lambda3 was taken from PATH or skipped
+			unlink($exe);
+			#$exe = "$bdir/lambda/lambda_indexer";
+			#@txt = addInfoLtS("lambda_index",$exe,\@txt,1);
+			$exe = "$bdir/lambda3";
+			@txt = addInfoLtS("lambda3",$exe,\@txt,1);
+		}
 	}
 	#die "$bdir/lambda3";
 	if ($installBlast == 0){
@@ -1925,11 +2030,14 @@ sub get_programs{
 	#die($sexe."\n");
 
 	if ($callrets != 0){
-		print "\n\n=================\nProblem while compiling swarm.\n"; $finalWarning.="swarm did not compile. The -CL 2 option will not be available to LotuS unless you reinstall swarm manually (lotus.cfg).\n";
+		print "\n\n=================\nProblem while compiling swarm.\n"; $finalWarning.="swarm did not compile. The -CL 2 option will not be available to LotuS unless you reinstall swarm manually (lotus.cfg).\n" unless $isMac;
 	}
 	if (-e $sexe){ #not essential
 		run_cmd("chmod", "+x", $sexe);
 		@txt = addInfoLtS("swarm",$sexe,\@txt,1);
+	} elsif ($isMac){ #swarm 2 needs x86 SSE and does not build on Apple silicon
+		mac_program_from_path("swarm", ["swarm"], "brew install swarm",
+			"Clustering with swarm (-CL 2) is unavailable until then.");
 	} else {
 		print "Swarm exe did not exist at $sexe\n Therefore swarm was not installed.\n";
 	}
@@ -1937,8 +2045,20 @@ sub get_programs{
 	install_vsearch();
 
 	#infernal
-	print "Downloading infernal executables..\n";
+	#the macOS builds of infernal, IQ-TREE 2.1.1, MAFFT 7.471 and Lambda 3.1.0 predate Apple silicon (Intel only)
 	my $iexe = "$bdir/inf112.tar.gz";
+	if ($isMac && !$macRosetta){
+		my $cmalign = command_exists("cmalign");
+		if ($cmalign){ #lOTUs.cfg takes infernal's binary directory
+			my $infDir = dirname(abs_path($cmalign) // $cmalign) . "/";
+			print "Using infernal found at $infDir\n";
+			@txt = addInfoLtS("infernal",$infDir,\@txt,2);
+		} else {
+			my $msg = "infernal was not installed: its macOS build needs Rosetta 2 and no cmalign is on PATH. Install it (brew install infernal) and rerun the installer. LotuS falls back to de novo alignments.\n";
+			print $msg; $finalWarning .= $msg;
+		}
+	} else {
+	print "Downloading infernal executables..\n";
 	if ($isMac){
 		getS2("https://lotus2.earlham.ac.uk/lotus/packs/infernal/infernal-1.1.2-macosx-intel.tar.gz",$iexe);
 	} else {
@@ -1953,6 +2073,7 @@ sub get_programs{
 		$finalWarning .= "infernal binary dir did not exist at $iexe\n Therefore infernal was not installed (fallback to de novo clustal omega).\n";
 	}
 	unlink("$bdir/inf112.tar.gz") or warn "Could not remove $bdir/inf112.tar.gz: $!\n" if -e "$bdir/inf112.tar.gz";
+	}
 
 	#die "$vexe\n";
 
@@ -1974,6 +2095,10 @@ sub get_programs{
 
 
 	## iqtree2
+	if ($isMac && !$macRosetta){
+		mac_program_from_path("iqtree", ["iqtree2", "iqtree"], "brew install iqtree2, or enable Rosetta 2",
+			"IQ-TREE trees (-buildPhylo 2) are unavailable; FastTree is used by default.");
+	} else {
 	print "Downloading IQ-TREE 2 executables..\n";
 	$dtar = "$bdir/iqtree-2.1.1-Linux.tar.gz";
 	$dexe = "$bdir/iqtree-2.1.1-Linux/bin/iqtree2";
@@ -1993,8 +2118,13 @@ sub get_programs{
 		$finalWarning .= "iqtree2 exe did not exist at $dexe\n Therefore iqtree2 was not installed (please manually install).\n";
 		print "iqtree2 exe did not exist at $dexe\n Therefore iqtree2 was not installed (please manually install).\n";
 	}
+	}
 
 	##mafft
+	if ($isMac && !$macRosetta){
+		mac_program_from_path("mafft", ["mafft"], "brew install mafft, or enable Rosetta 2",
+			"Multiple alignments for phylogenetic trees are unavailable until then.");
+	} else {
 	print "Downloading MAFFT 7 executables..\n";
 	$dtar = "$bdir/mafft-7.471-linux.tgz";
 	$dexe = "$bdir/mafft-linux64/mafft.bat";
@@ -2016,6 +2146,7 @@ sub get_programs{
 		$finalWarning .= "MAFFT exe did not exist at $dexe\n Therefore MAFFT was not installed (please manually install).\n";
 		print "MAFFT exe did not exist at $dexe\n Therefore MAFFT was not installed (please manually install).\n";
 	}
+	}
 
 	#fasttree
 	print "Downloading FastTree executables..\n";
@@ -2027,13 +2158,24 @@ sub get_programs{
 	my $fastt = "https://lotus2.earlham.ac.uk/lotus/packs/FastTree.c"; #http://www.microbesonline.org/fasttree/
 	getS2($fastt,$exe1);
 	my $cc = command_exists("gcc") // command_exists("cc") // "gcc";
-	$callret = system($cc, "-DOPENMP", "-fopenmp", "-O3", "-finline-functions", "-funroll-loops", "-Wall", "-o", $exe, $exe1, "-lm");
+	my @ompFlags = ("-fopenmp");
+	if ($isMac){ #Apple clang has no built-in OpenMP: use Homebrew's libomp when installed (brew install libomp)
+		my ($ompPrefix) = command_exists("brew") ? capture_cmd(command_exists("brew"), "--prefix", "libomp") : ("");
+		chomp $ompPrefix;
+		@ompFlags = ("-Xpreprocessor", "-fopenmp", "-I$ompPrefix/include", "-L$ompPrefix/lib", "-lomp")
+			if $ompPrefix ne "" && -d "$ompPrefix/lib";
+		push @ompFlags, "-DNO_SSE" if $macArm; #no x86 SSE intrinsics on Apple silicon
+	}
+	$callret = system($cc, "-DOPENMP", @ompFlags, "-O3", "-finline-functions", "-funroll-loops", "-Wall", "-o", $exe, $exe1, "-lm");
 	if ($callret != 0){
 		print "\n\n=================\nProblem while compiling fasttree, trying fasttree without multithread and SSE support (might be slower, but if it's working..)\n";
 		$finalWarning .= "fasttree compiled without multithreading support (you can not use the -thr LotuS option.\n";
 		$exe = "$bdir/FastTree";
 		$callret = system($cc, "-DNO_SSE", "-O3", "-finline-functions", "-funroll-loops", "-Wall", "-o", $exe, $exe1, "-lm");}
-	if ($callret != 0){
+	if ($callret != 0 && $isMac){
+		mac_program_from_path("fasttree", ["FastTreeMP", "FastTree", "fasttree"], "brew install fasttree",
+			"Until then run LotuS3 with -buildPhylo 2 (IQ-TREE) or -buildPhylo 0.");
+	} elsif ($callret != 0){
 		#the remaining programs still install; only FastTree trees (-buildPhylo 1, the default) are unavailable
 		my $msg = "fasttree compilation failed, so FastTree was not installed. This is most likely an issue with your C compiler or the OpenMP libraries (see http://www.microbesonline.org/fasttree/#Install). Until it is installed, run LotuS3 with -buildPhylo 2 (IQ-TREE) or -buildPhylo 0.\n";
 		print "\n\n=================\n$msg"; $finalWarning .= $msg;
@@ -2074,7 +2216,14 @@ sub get_programs{
 	run_cmd("unzip", "-o", "-q", $ctar, "-d", $bdir);
 	unlink($ctar);
 	$callret = system("make", "-C", $cdhitdir);
-	if ($callret != 0){
+	if ($callret != 0 && $isMac){ #Apple clang has no built-in OpenMP
+		print "Retrying CD-HIT without OpenMP (single-threaded)..\n";
+		$callret = system("make", "-C", $cdhitdir, "openmp=no");
+	}
+	if ($callret != 0 && $isMac){
+		mac_program_from_path("cd-hit", ["cd-hit-est"], "brew install cd-hit",
+			"The -UP 3 option is unavailable until then.");
+	} elsif ($callret != 0){
 		print "\n\n=================\nProblem while compiling CD-HIT.\n"; $finalWarning.="CD-HIT did not compile. The -UP 3 option will not be available to LotuS unless you reinstall cd-hit-est manually (and add to lotus.cfg). \n";
 	} else {
 		run_cmd("chmod", "+x", $cexe);
@@ -2098,7 +2247,14 @@ sub get_programs{
 	#clustalO
 	#optional: LotuS aligns with MAFFT. The former macOS binary is gone upstream (HTTP 403).
 	if ($isMac){
-		print "Clustal Omega was not installed on macOS (no verified binary available); it is optional, MAFFT is used for alignments.\n";
+		my $clustalo = command_exists("clustalo");
+		if ($clustalo){
+			$clustalo = abs_path($clustalo) // $clustalo;
+			print "Using clustalo found at $clustalo\n";
+			@txt = addInfoLtS("clustalo",$clustalo,\@txt,1);
+		} else { #optional, so no warning at the end
+			print "Clustal Omega was not installed on macOS (no verified binary available; brew install clustal-omega adds it); it is optional, MAFFT is used for alignments.\n";
+		}
 		return;
 	}
 	my $clo = "https://lotus2.earlham.ac.uk/lotus/packs/clustalo-1.2.0-Ubuntu-x86_64";
@@ -2160,7 +2316,7 @@ sub user_options(){
 		print "Some programs require a recent C++ compiler. Existing files are retained until their replacements download successfully, and lOTUs.cfg will be updated.\n";
 		print "Install LotuS3 with all possible dependencies (all databases, ITS, ONT related workflows)?\nSimply enter or \"1\" for yes, \"0\" for detailed configuration via question.\nAnswer: ";
 		$installAll = read_user_input("the all-dependencies choice", [0, 1], 1);
-		if ($isMac){print "Mac system detected, installing corresponding mac software.\n";}
+		if ($isMac){print "macOS detected: installing macOS builds where they exist and compiling sdm/LCA from source. Programs without a macOS build are taken from PATH (Homebrew/conda) or skipped with a warning.\n";}
 		if ($installAll) {
 			$installBlast = 3; #both BLAST and Lambda
 			@refDBinstall = (0) x 10;
