@@ -317,6 +317,10 @@ my $strictMode = 1;    # fail early on inconsistent inputs/dependencies
 my $depReportFile = "";
 my $manifestFile  = "";
 my $profilePreset  = "";
+my $macMode        = "auto"; # -macMode auto|0|1: adapt tool choices to what runs on this Mac
+my $macModeOn      = 0;
+my @macModeNotes;            # substitutions made by the macOS mode, listed in the run summary
+my $macNoRosetta;            # undef until checked: 1 on Apple silicon without Rosetta 2
 my $cpMapFile = "";
 my %userProvidedOption;
 my $outputLockFH;
@@ -356,6 +360,7 @@ GetOptions(
 	"dry-run|dryRun!"       => \$dryRun,
 	"self-test|selfTest!"    => \$selfTest,
 	"profile=s"             => \$profilePreset,
+	"macMode=s"             => \$macMode,
 	"strict!"               => \$strictMode,
 	"keepTmpFiles=i"        => \$keepTmpFiles,
 	"extendedLogs=i"        => \$extendedLogs,
@@ -442,6 +447,7 @@ GetOptions(
 #die "$refDBwanted\n";
 
 validate_cli_safety();
+$macModeOn = ($macMode eq "1" || (lc($macMode) eq "auto" && $osname =~ m/darwin/i)) ? 1 : 0;
 my $userInput = $input; #keep original sources when ONT demultiplexing rewrites $input
 
 #!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
@@ -3213,6 +3219,9 @@ sub announce_options{
 	printL "NumCores    $uthreads\n";
 	printL "------------ Pipeline config   --------------\n", 0;
 	printL "Profile preset          $profilePreset\n", 0 if (defined($profilePreset) && $profilePreset ne "");
+	if ($macModeOn) {
+		printL "macOS mode              active, " . (@macModeNotes ? scalar(@macModeNotes) . " adjustment(s):\n" . join("", map { "  - $_\n" } @macModeNotes) : "all selected programs run on this Mac\n"), 0;
+	}
 	#printL "$clustMode sequence clustering with $clusteringNameStr into ${OTU_prefix}'s\n",0;
 	printL "Sequencing platform     $platform\n", 0 ;
 	printL "Amplicon target         $organism, $ampliconType\n", 0;
@@ -3576,6 +3585,183 @@ sub getDefAligner($){
 	return $defaultTaxAlig;
 }
 
+# ---------- macOS mode (-macMode) ----------
+sub mac_note {
+	my ($msg) = @_;
+	push @macModeNotes, $msg;
+	printL("macOS mode: $msg\n", "w");
+}
+
+sub mac_needs_rosetta {
+	return $macNoRosetta if defined $macNoRosetta;
+	my $arm = (POSIX::uname())[4] =~ m/^(?:arm64|aarch64)$/ ? 1 : 0;
+	$macNoRosetta = ($arm && system("/usr/bin/arch -x86_64 /usr/bin/true >/dev/null 2>&1") != 0) ? 1 : 0;
+	return $macNoRosetta;
+}
+
+# Why the executable at $path cannot run on this Mac, or "" if it can (or is a script).
+sub mac_binary_problem {
+	my ($path) = @_;
+	return "" unless defined($path) && $path ne "" && -f $path;
+	open my $fh, "<:raw", $path or return "";
+	my $n = read($fh, my $head, 8);
+	close $fh;
+	return "" unless defined($n) && $n == 8;
+	return "is a Linux executable" if substr($head, 0, 4) eq "\x7fELF";
+	#thin 64-bit Mach-O (magic, CPU type); universal binaries carry every architecture
+	my ($magic, $cpu) = unpack("V V", $head);
+	return "is an Intel-only build and Rosetta 2 is not available (softwareupdate --install-rosetta)"
+		if $magic == 0xfeedfacf && $cpu == 0x01000007 && mac_needs_rosetta();
+	return "";
+}
+
+sub mac_java_runs { #macOS ships a java stub that only asks to install a JDK
+	my $java = command_exists("java") or return 0;
+	my $out = qx{@{[shell_quote($java)]} -version 2>&1};
+	return $? == 0 ? 1 : 0;
+}
+
+# Configured programs that cannot run on this Mac count as not installed, so the usual
+# defaults and the checks below pick alternatives. sdm and LCA have none.
+sub mac_mode_screen_binaries {
+	#MAFFT's macOS package is a wrapper script; judge it by one of its programs
+	my $mafftProbe = $mafftBin;
+	$mafftProbe = dirname($mafftBin) . "/mafftdir/libexec/mafft/disttbfast" if $mafftBin =~ m/mafft\.bat$/;
+	for my $crucial (["sdm", $sdmBin], ["LCA", $LCABin]) {
+		my $problem = mac_binary_problem($crucial->[1]);
+		printL "macOS mode: $crucial->[0] at $crucial->[1] $problem. $crucial->[0] is required; run \"perl $RealBin/helpers/autoInstall.pl\", which compiles it for macOS.\n", 3
+			if $problem ne "";
+	}
+	for my $prog (
+		["vsearch", \$VSBin, "brew install vsearch"], ["usearch", \$usBin, "perl helpers/autoInstall.pl -link_usearch <path>"],
+		["swarm", \$swarmBin, "brew install swarm"], ["cd-hit", \$cdhitBin, "brew install cd-hit"],
+		["savont", \$savontBin, "perl helpers/autoInstall.pl --ont-only"], ["barbell", \$barbellBin, "perl helpers/autoInstall.pl --ont-only"],
+		["minimap2", \$mini2Bin, "brew install minimap2"], ["blastn", \$blastBin, "brew install blast"],
+		["makeblastdb", \$mkBldbBin, "brew install blast"], ["lambda3", \$lambda3Bin, "conda install -c bioconda lambda"],
+		["clustalo", \$clustaloBin, "brew install clustal-omega"], ["FastTree", \$fasttreeBin, "brew install fasttree"],
+		["IQ-TREE", \$iqTreeBin, "brew install iqtree2"], ["FLASH", \$flashBin, "brew install flash"],
+		["hmmsearch", \$hmmsrchBin, "brew install hmmer"],
+	) {
+		my ($name, $ref, $hint) = @$prog;
+		my $problem = mac_binary_problem($$ref);
+		next if $problem eq "";
+		mac_note("$name at $$ref $problem; treated as not installed (install a macOS build: $hint, or rerun helpers/autoInstall.pl).");
+		$$ref = "";
+	}
+	$VSBinOri = $VSBin; #the clustering checks use the configured vsearch
+	my $mafftProblem = mac_binary_problem($mafftProbe);
+	if ($mafftProblem ne "") {
+		mac_note("MAFFT at $mafftBin $mafftProblem; treated as not installed (brew install mafft).");
+		$mafftBin = "";
+	}
+}
+
+# Taxonomy: an unavailable classifier is replaced by a similarity search that runs on this Mac.
+sub mac_mode_taxonomy {
+	my ($defaultTaxAlig, $defDBset) = @_;
+	my %name = (0 => "RDP classifier", 1 => "BLAST", 2 => "Lambda", 3 => "SINTAX", 4 => "VSEARCH", 5 => "USEARCH");
+	my %have = (1 => -f $blastBin, 2 => -f $lambda3Bin, 3 => -f $usBin, 4 => -f $VSBinOri, 5 => -f $usBin);
+	my %hint = (1 => "brew install blast", 2 => "conda install -c bioconda lambda",
+		3 => "perl helpers/autoInstall.pl -link_usearch <path>", 5 => "perl helpers/autoInstall.pl -link_usearch <path>",
+		4 => "brew install vsearch");
+	my ($simAlt) = grep { $have{$_} } (2, 4, 5, 1); #similarity searches that run here, preferred first
+	my $its = substr($ampliconType, 0, 3) eq "ITS";
+	if ($doBlasting == 0) {
+		my $rdp_path = $mjar ne "" ? $mjar : $rdpjar ne "" ? $rdpjar : ($ENV{RDP_JAR_PATH} // "");
+		my $why = !mac_java_runs() ? "needs Java, which is not installed (brew install openjdk)"
+			: !($rdp_path ne "" && -f $rdp_path) ? "is not installed (rerun helpers/autoInstall.pl)" : "";
+		return if $why eq "";
+		if (defined $simAlt) {
+			mac_note("the RDP classifier $why; using $name{$simAlt} against $refDBwanted for taxonomy instead (-taxAligner $simAlt).");
+			$doBlasting = $simAlt;
+		} else {
+			mac_note("the RDP classifier $why, and no similarity search program (Lambda, VSEARCH, USEARCH, BLAST) runs on this Mac: taxonomy cannot be assigned.");
+		}
+		return;
+	}
+	return if $doBlasting < 0 || $have{$doBlasting};
+	if (defined $simAlt) {
+		my $db = "";
+		if ($doBlasting == 3 && grep { m/^(?:UTAX|SINTAX)$/i } split /,/, $refDBwanted) {
+			$refDBwanted = $its ? "UNITE" : "KSGP"; #the SINTAX DB directory is for usearch only
+			$db = " against $refDBwanted";
+		}
+		mac_note("$name{$doBlasting} is not available on this Mac ($hint{$doBlasting}); using $name{$simAlt}$db for taxonomy instead (-taxAligner $simAlt).");
+		$doBlasting = $simAlt;
+	} elsif (!$its && mac_java_runs()) {
+		mac_note("$name{$doBlasting} is not available on this Mac ($hint{$doBlasting}) and no other similarity search runs here; using the RDP classifier instead.");
+		$doBlasting = 0;
+	} else {
+		mac_note("$name{$doBlasting} is not available on this Mac ($hint{$doBlasting}), and no alternative taxonomy program runs here.");
+	}
+}
+
+# Clustering, read mapping, phylogeny, ITSx and LULU: switch to programs that run on this Mac.
+sub mac_mode_tools {
+	if ($ontDemux eq "barbell" && !-f $barbellBin) {
+		mac_note("-ontDemux barbell needs Barbell, which is not installed (Intel Macs build it with Rust >= 1.88: https://rustup.rs, then perl helpers/autoInstall.pl --ont-only). Demultiplex with SDM instead (omit -ontDemux).");
+	}
+	if ($doITSx == 1 && (!$itsxBin || !-f $hmmsrchBin)) {
+		mac_note("ITSx needs hmmsearch, which is not installed (brew install hmmer); ITS regions are not extracted (-ITSx 0).");
+		$doITSx = 0;
+	}
+	return unless $TaxOnly eq "0" && !$onlyTaxRedo;
+
+	my $cl = uc $ClusterPipe_pre;
+	my $haveR = -f $Rscript;
+	my ($want, $ok, $hint);
+	if ($cl =~ m/^(?:SWARM|2)$/) { ($want, $ok, $hint) = ("SWARM", -f $swarmBin, "brew install swarm"); }
+	elsif ($cl =~ m/^(?:CD-?HIT|3)$/) { ($want, $ok, $hint) = ("CD-HIT", -f $cdhitBin, "brew install cd-hit"); }
+	elsif ($cl =~ m/^(?:UPARSE|1|UNOISE3?|6)$/) { ($want, $ok, $hint) = ($cl =~ m/^(?:UPARSE|1)$/ ? "UPARSE" : "UNOISE3", -f $usBin, "perl helpers/autoInstall.pl -link_usearch <path>"); }
+	elsif ($cl =~ m/^(?:DADA2|7)$/) { ($want, $ok, $hint) = ("DADA2", $haveR && -f $dada2Scr, "install R >= 4 and rerun helpers/autoInstall.pl"); }
+	elsif ($cl =~ m/^(?:SAVONT|9)$/ && !-f $savontBin) {
+		mac_note("Savont is not installed (perl helpers/autoInstall.pl --ont-only); ONT ASVs cannot be called.");
+	}
+	if (defined($want) && !$ok) {
+		my $alt = "";
+		if ($want eq "UNOISE3" && $haveR && -f $dada2Scr) { $alt = "DADA2"; } #also error-profile ASVs
+		elsif ($want eq "DADA2" && -f $usBin) { $alt = "UNOISE3"; }
+		elsif (-f $VSBinOri) { $alt = "VSEARCH"; }
+		if ($alt ne "") {
+			mac_note("$want clustering is not available on this Mac ($hint); clustering with $alt instead (-CL $alt).");
+			$ClusterPipe_pre = $alt;
+			if (!_option_was_provided(qw(s sdmopt))) { #platform presets picked CD-HIT specific SDM options
+				$sdmOpt = $sdm454Opt if $sdmOpt eq $sdm454CDHITOpt;
+				$sdmOpt = $sdmMiseqOpt if $sdmOpt eq $sdmHiseqOpt;
+			}
+		} else {
+			mac_note("$want clustering is not available on this Mac ($hint), and no alternative clustering program runs here.");
+		}
+	}
+
+	if ($useMini4map == 1 && !-f $mini2Bin && -f $VSBin) {
+		mac_note("minimap2 is not installed (brew install minimap2); mapping reads with " . ($VSused ? "VSEARCH" : "USEARCH") . " instead (-useMini4map 0).");
+		$useMini4map = 0;
+		$internalMapper = "V/USEARCH";
+	}
+
+	if ($buildPhylo == 1 || $buildPhylo == 2) {
+		my @missing;
+		push @missing, "MAFFT (brew install mafft)" unless -f $mafftBin;
+		my $fast = -f $mafftBin && -f $fasttreeBin;
+		my $iq = -f $mafftBin && -f $iqTreeBin;
+		my $ok = $buildPhylo == 1 ? $fast : $iq;
+		if (!$ok) {
+			push @missing, $buildPhylo == 1 ? "FastTree (brew install fasttree)" : "IQ-TREE (brew install iqtree2)"
+				if -f $mafftBin;
+			my $alt = $buildPhylo == 1 ? ($iq ? 2 : 0) : ($fast ? 1 : 0);
+			my $what = $alt == 1 ? "building the tree with FastTree instead" : $alt == 2 ? "building the tree with IQ-TREE instead" : "no phylogenetic tree is built";
+			mac_note("the phylogeny needs " . join(" and ", @missing) . "; $what (-buildPhylo $alt).");
+			$buildPhylo = $alt;
+		}
+	}
+
+	if ($doLULU && !($haveR && -f $LULUscript)) {
+		mac_note("LULU needs R (install R >= 4 and rerun helpers/autoInstall.pl); the LULU OTU-table correction is skipped (-lulu 0).");
+		$doLULU = 0;
+	}
+}
+
 sub prepLtsOptions{
 	
 	#create dirs
@@ -3800,6 +3986,7 @@ sub prepLtsOptions{
 	#read primary paths to binaries
 	readPaths_aligners($lotusCfg);
 	validate_runtime_path_safety();
+	mac_mode_screen_binaries() if $macModeOn; #before the defaults below look at which tools exist
 	my $defaultTaxAlig = getDefAligner($defDBset);
 
 	getSimBasedTax();
@@ -3840,10 +4027,12 @@ sub prepLtsOptions{
 	} elsif ( $doBlasting == 0 && $refDBwanted ne "" ) {
 		printL "RefDB $refDBwanted requested, but -taxAligner set to \"0\": therefore RDP classification of reads will be done\n",0;
 	}
+	mac_mode_taxonomy($defaultTaxAlig, $defDBset) if $macModeOn;
 	$doRDPing = $doBlasting < 1 ? 1 : 0;
 	setMapperName();
 
 	readPaths($lotusCfg,$defDBset);
+	mac_mode_tools() if $macModeOn;
 	setClusterAlgo();
 	validate_reference_databases();
 	validate_option_combinations();
@@ -3959,6 +4148,7 @@ my @runtime_options = (
   ['--dry-run|--dryRun', 'Read-only validation mode. Checks options, inputs, dependencies, selected reference databases, and output-directory compatibility in an isolated temporary workspace, then removes that workspace. The requested output directory, logs, dependency-report path, and manifest path are never created, deleted, or modified.'],
   ['--self-test|--selfTest', 'Run the built-in LotuS3 self tests based on Example/miSeqMap.sm.txt. Validates example FASTQ structure and mate IDs, checks required dependencies, executes VSEARCH/RDP and DADA2/Lambda example runs using the maximum CPU count available to the process, checks FASTA/table/BIOM consistency, writes a self-test report, and exits. Optional -o <dir> sets the self-test root directory.'],
   ['--strict|--no-strict', 'Strict mode makes validation failures fatal. --no-strict reports validation problems as warnings where possible. Default: --strict.'],
+  ['-macMode <auto|0|1>', 'macOS mode: configured programs that cannot run on this Mac (Linux builds, or Intel-only builds on Apple silicon without Rosetta 2) count as not installed, and clustering, taxonomy, read mapping, phylogeny, ITSx and LULU switch to an available alternative, with a warning that names the substitution and how to install the missing program. auto enables it on macOS. Default: auto.'],
   ['--dependencyReport <file>', 'Write the dependency report to this file instead of <outputDir>/LotuSLogS/dependency_report.txt.'],
   ['--manifest <file>', 'Write the reproducibility manifest to this file instead of <outputDir>/LotuSLogS/run_manifest.txt.'],
   ['-exe|-executionMode <0|1>', 'Internal/developer execution control. For user-facing validation without execution, prefer --dry-run. Default: 0.'],
@@ -6437,6 +6627,7 @@ sub validate_cli_safety {
     my $savont_selected = lc($platform) eq 'ont' && $ClusterPipe_pre =~ /^(?:\?|savont|9)$/i;
     die "-highmem 0 is not supported for this clusterer; LotuS requires SDM dereplication outside Savont.\n"
         if $sdmDerepDo == 0 && !$savont_selected;
+    die "-macMode must be auto, 0 or 1.\n" unless $macMode =~ /^(?:auto|0|1)$/i;
     die "-exe must be 0 or 1.\n" unless $exec =~ /^[01]$/;
     die "-useMini4map must be 0 or 1.\n" unless $useMini4map =~ /^[01]$/;
     die "-saveDemultiplex must be 0, 1, or 2.\n" unless $saveDemulti =~ /^[012]$/;
@@ -6983,6 +7174,8 @@ sub write_repro_manifest {
     push @lines, "Temp directory: " . ($dryRun ? "isolated temporary dry-run workspace" : $lotus_tempDir);
     push @lines, "Dry run: $dryRun";
     push @lines, "Strict mode: $strictMode";
+    push @lines, "macOS mode: " . ($macModeOn ? "on" : "off");
+    push @lines, map { "macOS mode adjustment: $_" } @macModeNotes;
     push @lines, "Amplicon type: $ampliconType";
     push @lines, "Platform: $platform";
     push @lines, "SDM dereplication: " . ($sdmDerepDo ? "enabled" : "disabled");
@@ -7600,9 +7793,7 @@ sub checkOS{
 	if( $osname =~ m/MSWin/i ){
 		$OSn = "Windows OS";
 	}
-	if( $osname =~ m/darwin/i ){
-		$OSn = "MacOS";
-	}
+	#macOS is supported through the macOS mode (-macMode), which checks the tools after the options are read
 	if ($OSn ne ""){
 		printL (frame("$OSn ($osname) detected. Please note that $selfID does only support Unix OSs\nContinue at your own risk...\n"),"w");
 	}

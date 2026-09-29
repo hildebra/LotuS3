@@ -114,6 +114,8 @@ On macOS (Intel or Apple silicon) the installer needs the Xcode command line too
 
 Barbell has no Intel macOS release; on Intel Macs it is built with Rust >= 1.88 or skipped. `rtk` is not installed on macOS (LotuS3 does not call it).
 
+When `lotus3` runs on macOS it switches on its macOS mode (`-macMode auto`, the default). Configured programs that cannot run on the Mac (Linux builds, or Intel-only builds on Apple silicon without Rosetta 2) count as not installed. Where an option needs a missing program, LotuS3 picks an available alternative and prints a warning that names the substitution and how to install the program. For example, SWARM or CD-HIT clustering falls back to VSEARCH, Lambda or BLAST taxonomy to VSEARCH, RDP without Java to a similarity search, minimap2 mapping to VSEARCH, and a phylogeny without MAFFT is skipped. The run summary and `run_manifest.txt` list every adjustment. A Linux `sdm` or `LCA` stops the run with a pointer to the installer. `-macMode 0` turns the mode off.
+
 `bin/vsearch` is a statically linked Linux x86-64 build of VSEARCH 2.32.0 and is registered directly when it runs. It was compiled from the upstream release source (`vsearch-2.32.0.tar.gz`, SHA-256 `99578a8b960a0fb87c1f19dc65aedecddc01cfa91851b697dac8294dd08a6ceb`) with `./configure LDFLAGS=-static`, `make` and `strip`. The resulting executable has SHA-256 `8472f7852e4f320f1cc67e5dc09507e2e31034cd962bd1b8979bec894711c5a3`. On other platforms the installer downloads the pinned VSEARCH 2.32.0 release for Linux ARM64 (static) or macOS.
 
 ## Installer options
