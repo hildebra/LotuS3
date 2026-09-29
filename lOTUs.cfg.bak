@@ -25,7 +25,7 @@ cd-hit /hpc-home/hildebra/dev/lotus//bin/cdhit-master//cd-hit-est
 vsearch /hpc-home/hildebra/dev/lotus//bin//vsearch-2.15.0-linux-x86_64/bin/vsearch
 #dnaclust ref based OTU clustering
 dnaclust dnaclust
-minimap2 /hpc-home/hildebra/dev/lotus//bin//minimap2-2.28_x64-linux/minimap2
+minimap2 /hpc-home/hildebra/dev/lotus/bin/minimap2-2.28_x64-linux/minimap2
 
 
 #RDP multiclassifier java archieve (e.g. /YY/MultiClassifier.jar)
@@ -125,3 +125,5 @@ IdentityThresholds 97,95,88,83,81,78
 
 #This will check for more & less important updates each time lotus is run. Note that we will never track your LotuS usuage in any way, this is purely a convenience option if desired.
 CheckForUpdates 0
+savont /hpc-home/hildebra/dev/lotus/bin/savont
+barbell /hpc-home/hildebra/dev/lotus/bin/barbell
