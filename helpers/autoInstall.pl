@@ -85,7 +85,9 @@ my %PINNED_SHA256 = (
 	'https://lotus2.earlham.ac.uk/lotus/packs/ncbi-blast-2.2.29+-x64-linux.tar.gz' => 'f53e97aaff424c2583cebff76a318f36610b5444657cee2b2072513ca907fedf',
 	'https://github.com/seqan/lambda/releases/download/lambda-v3.1.0/lambda3-3.1.0-Linux-x86_64.tar.xz' => '854e42d41521c483a0e6a92730fc1daf058ca8df9c0fe7af40b66f4e885d2d49',
 	'https://github.com/seqan/lambda/releases/download/lambda-v3.1.0/lambda3-3.1.0-Darwin-x86_64.zip' => '51f546f78300277962af810e66ee8019a232d99c6dd5b2e265d02c39c24241b0',
-	'https://lotus2.earlham.ac.uk/lotus/packs/swarm2.1.13.zip' => 'bbfb326adc68d1ac96603a8eb828dc591dac9f1410cbac144054f078d8a433d9',
+	'https://github.com/torognes/swarm/releases/download/v3.2.0/swarm-3.2.0-linux-x86_64.tar.gz' => '474fffa567b48e0b038884de8ae51657578b11308f310bc7bbae6f4de3ab680e',
+	'https://github.com/torognes/swarm/releases/download/v3.2.0/swarm-3.2.0-linux-aarch64.tar.gz' => '49908889def08f69eafe4abca1aac809e745b5fa959df7315374673192f8c1fa',
+	'https://github.com/torognes/swarm/releases/download/v3.2.0/swarm-3.2.0-macos-universal.tar.gz' => '88a369c3d23ae7d7f0bb47201a016f69d4f09fc0e029269d21a4ad0c0e5b06fb',
 	'https://lotus2.earlham.ac.uk/lotus/packs/infernal/infernal-1.1.2-macosx-intel.tar.gz' => '87adbf63c61f66127f14823f1a17451fa960567d0dfdc1d72735a16d41a6a171',
 	'https://lotus2.earlham.ac.uk/lotus/packs/infernal/infernal-1.1.2-linux-intel-gcc.tar.gz' => 'ad062059dfff6450d4a9417846e2695087f5b7c13d64a6deef4a5bcb51b75f3e',
 	'https://lotus2.earlham.ac.uk/lotus/packs/VXtractor/vxtractor.pl' => '76f7d103470a89d4dfad19a4c444b7095feaba37b7de241bc2619fc849f1f739',
@@ -1920,6 +1922,41 @@ sub install_vsearch {
 	}
 }
 
+sub swarm_works {
+	my ($exe) = @_;
+	return 0 unless defined($exe) && -f $exe;
+	chmod(0755, $exe);
+	my ($version, $status) = capture_cmd_merged($exe, "--version");
+	return 0 unless $status == 0 && $version =~ m/^Swarm (\d+)\./m;
+	return $1 >= 3;
+}
+
+# swarm 3 release binaries; swarm 2 was compiled here and needed x86 SSE.
+sub install_swarm {
+	my $arch = ont_architecture();
+	my $name = $isMac ? "swarm-3.2.0-macos-universal"
+		: $arch eq 'aarch64' ? "swarm-3.2.0-linux-aarch64"
+		: $arch eq 'x86_64' ? "swarm-3.2.0-linux-x86_64" : "";
+	my $sexe = "$bdir/$name/bin/swarm";
+	if ($name ne "") {
+		print "Downloading swarm 3.2.0 ($name)..\n";
+		my $stars = "$bdir/swarm.tar.gz";
+		getS2("https://github.com/torognes/swarm/releases/download/v3.2.0/$name.tar.gz", $stars);
+		run_cmd("tar", "-xzf", $stars, "-C", $bdir);
+		unlink($stars) or warn "Could not remove $stars: $!\n";
+	}
+	if ($name ne "" && swarm_works($sexe)) {
+		@txt = addInfoLtS("swarm", $sexe, \@txt, 1);
+	} elsif ($isMac) {
+		mac_program_from_path("swarm", ["swarm"], "brew install swarm",
+			"Clustering with swarm (-CL 2) is unavailable until then.");
+	} else {
+		my $why = $name eq "" ? "no pinned swarm release for architecture $arch" : "swarm at $sexe did not run on this system";
+		my $msg = "swarm was not installed: $why. The -CL swarm option is unavailable unless you install swarm 3 and set its path in lOTUs.cfg.\n";
+		print "\n\nWARNING::\n$msg\n"; $finalWarning .= $msg;
+	}
+}
+
 sub get_programs{
 	my ($dtar, $dexe);
 	#-----------  exit prog here, if set
@@ -2016,31 +2053,8 @@ sub get_programs{
 	#usearch
 	getUsearch();
 	
-	#swarm
-	print "Downloading swarm executables..\n";
-	my $swarmdir = $bdir."swarm-master/";
-	my $sexe = "$swarmdir/bin/swarm";
-	my $tars = "$bdir/swarm.zip";
-	#
-	my $swarmtar = "https://lotus2.earlham.ac.uk/lotus/packs/swarm2.1.13.zip";#"https://github.com/torognes/swarm/archive/master.zip";#"https://lotus2.earlham.ac.uk/lotus/packs/swarm206d.tgz";
-	getS2($swarmtar,$tars);
-	run_cmd("unzip", "-q", "-o", "-d", $bdir, $tars);
-	unlink($tars);
-	my $callrets = system("make", "-C", "$swarmdir/src/");
-	#die($sexe."\n");
-
-	if ($callrets != 0){
-		print "\n\n=================\nProblem while compiling swarm.\n"; $finalWarning.="swarm did not compile. The -CL 2 option will not be available to LotuS unless you reinstall swarm manually (lotus.cfg).\n" unless $isMac;
-	}
-	if (-e $sexe){ #not essential
-		run_cmd("chmod", "+x", $sexe);
-		@txt = addInfoLtS("swarm",$sexe,\@txt,1);
-	} elsif ($isMac){ #swarm 2 needs x86 SSE and does not build on Apple silicon
-		mac_program_from_path("swarm", ["swarm"], "brew install swarm",
-			"Clustering with swarm (-CL 2) is unavailable until then.");
-	} else {
-		print "Swarm exe did not exist at $sexe\n Therefore swarm was not installed.\n";
-	}
+	#swarm: a pinned swarm 3 release (not essential)
+	install_swarm();
 	#vsearch: the static Linux x86-64 build shipped as bin/vsearch, otherwise a pinned release
 	install_vsearch();
 

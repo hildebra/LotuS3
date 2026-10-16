@@ -48,6 +48,7 @@ bin/*.gz
 bin/cdhit-master/
 bin/lambda/
 bin/swarm-master/
+bin/swarm-3*
 bin/dnaclust_linux_release3/
 bin/vsearch-2*
 bin/FastTr*

@@ -279,6 +279,7 @@ my $ASVpostClust = 0;
 my $doXtalk             = -1;    #check for cross talk in OTU tables
 my $usearchVer          = 0; my $usearchsubV = 0; my $vsearchVer = 0;
 my $usearchVerFull      = ""; #full dotted USEARCH version, e.g. 11.0.667; empty if not parsed
+my $swarmVer            = ""; #set by detect_swarm_version for -CL swarm; empty if not parsed
 my $mini2RdPreset = " -x sr --sr -u b --secondary=no -c "; #minimap2 general parameters
 my $useMini4map = 1; #use minimap (1) or u/vsearch (2) for mapping
 
@@ -3360,6 +3361,24 @@ sub usearch_version_at_least {
     return version_at_least( $usearchVerFull ne "" ? $usearchVerFull : $usearchVer, $required );
 }
 
+# swarm 2 takes the same options, but 2.2 and 3.x fixed abundance output and multithreading bugs.
+sub detect_swarm_version {
+    my $out = checked_program_output($swarmBin, "--version");
+    ($swarmVer) = $out =~ m/^Swarm (\d+(?:\.\d+)+)/m;
+    if (!defined $swarmVer) {
+        $swarmVer = "";
+        printL "Could not parse the swarm version from '$swarmBin --version'; output was: $out\n", "w";
+    } elsif (!version_at_least($swarmVer, "3.0")) {
+        printL "swarm $swarmVer at $swarmBin is outdated; rerun helpers/autoInstall.pl to install swarm 3.\n", "w";
+    }
+}
+
+sub swarm_citation {
+    return "swarm v$swarmVer ${OTU_prefix} clustering: Mahé F, Czech L, Stamatakis A, Quince C, de Vargas C, Dunthorn M, Rognes T. 2022. Swarm v3: towards tera-scale amplicon clustering. Bioinformatics 38:267–269. DOI: 10.1093/bioinformatics/btab493\n"
+        if $swarmVer ne "" && version_at_least($swarmVer, "3.0");
+    return "swarm v2 ${OTU_prefix} clustering: Mahé F, Rognes T, Quince C, de Vargas C, Dunthorn M. 2015. Swarm v2: highly-scalable and high-resolution amplicon clustering. PeerJ. DOI: 10.7717/peerj.1420\n";
+}
+
 sub checked_program_output {
     my (@command) = @_;
     my ($fh, $path) = tempfile("lotus3-version-XXXXXXXX", TMPDIR => 1, UNLINK => 1);
@@ -3471,6 +3490,7 @@ sub setClusterAlgo{
 		if ( !-e $swarmBin ) {
 			printL "No valid swarm binary found at $swarmBin\n", 88;
 		}
+		detect_swarm_version();
 	}elsif ( $ClusterPipe_pre eq "DNACLUST" || $ClusterPipe_pre eq "4" ) {
 		printL "DNACLUST/reference-based OTU clustering has been removed. Choose UPARSE, VSEARCH, CD-HIT, SWARM, UNOISE, or DADA2.\n", 64;
 	}elsif ( $ClusterPipe_pre eq "0" ) {
@@ -4840,25 +4860,6 @@ sub writeFasta($ $) {
     }
     close O;
 }
-
-sub swarm4us_size($) {
-    my ($otuf) = @_;
-    open I, "<$otuf"      or die "Can't open $otuf\n";
-    open O, ">$otuf.ttmp" or die "Can't open $otuf.ttmp: $!\n";
-    while ( my $line = <I> ) {
-        chomp $line;
-        if ( $line =~ m/^>/ ) {
-            $line =~ s/_(\d+)$/;size=$1;/;
-        }
-        print O $line . "\n";
-    }
-    close I;
-    close O;
-
-    #	die $otuf."\n";
-    systemL "rm -f $otuf;mv $otuf.ttmp $otuf;";
-}
-
 
 sub validate_rdp_fixrank_fields {
     my ($fields) = @_;
@@ -7932,7 +7933,7 @@ sub buildOTUs($) {
 		my $dofasti    = "-f --ceiling 4024 ";
 		if ( $swarmClus_d > 1 ) { $dofasti = ""; }
 		$cmd = "$swarmBin -z $dofasti -u $uclustFile -t $uthreads -w $OTUfastaTmp -s $logDir/SWARMstats.log -l $logDir/SWARM.log -o $lotus_tempDir/otus.swarm -d $swarmClus_d < $derepl;";
-		$citations .= "swarm v2 ${OTU_prefix} clustering: Mahé F, Rognes T, Quince C, de Vargas C, Dunthorn M. 2015. Swarm v2: highly-scalable and high-resolution amplicon clustering. PeerJ. DOI: 10.7717/peerj.1420\n";
+		$citations .= swarm_citation();
 	} elsif ($ClusterPipe == 8){ #vsearch
 		# Create the optional flag string for iddef, only if it is passed by the user
 		my $iddef_flag = "";
@@ -8018,7 +8019,6 @@ sub buildOTUs($) {
     }
 	
 	#die $cmd;
-    if ( $ClusterPipe == 2 ) {swarm4us_size($OTUfastaTmp); }
 	#if ( $ClusterPipe == 3 ){resortcdhit("$OTUfastaTmp.clstr");}#resort cdhit #with sdm 1.94 no longer required
 
 

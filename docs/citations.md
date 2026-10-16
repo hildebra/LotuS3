@@ -25,7 +25,7 @@ Related publications:
 - **DADA2** - Callahan B, McMurdie PJ, Rosen MJ, et al. (2016) DADA2: High-resolution sample inference from Illumina amplicon data. *Nature Methods* 13:581-583.
 - **UPARSE** - Edgar RC. (2013) UPARSE: highly accurate OTU sequences from microbial amplicon reads. *Nature Methods* 10:996-998.
 - **VSEARCH** - Rognes T, Flouri T, Nichols B, Quince C, Mahé F. (2016) VSEARCH: a versatile open source tool for metagenomics. *PeerJ* 4:e2584.
-- **swarm** - Mahé F, Rognes T, Quince C, de Vargas C, Dunthorn M. (2014) Swarm: robust and fast clustering method for amplicon-based studies. *PeerJ* 2:e593.
+- **swarm** - Mahé F, Czech L, Stamatakis A, Quince C, de Vargas C, Dunthorn M, Rognes T. (2022) Swarm v3: towards tera-scale amplicon clustering. *Bioinformatics* 38:267-269.
 - **CD-HIT** - Fu L, Niu B, Zhu Z, Wu S, Li W. (2012) CD-HIT: accelerated clustering for next-generation sequencing data. *Bioinformatics* 28:3150-3152.
 - **UCHIME** - Edgar RC, Haas BJ, Clemente JC, Quince C, Knight R. (2011) UCHIME improves sensitivity and speed of chimera detection. *Bioinformatics* 27:2194-2200.
 - **RDP classifier** - Wang Q, Garrity GM, Tiedje JM, Cole JR. (2007) Naive Bayesian classifier for rapid assignment of rRNA sequences into the new bacterial taxonomy. *Applied and Environmental Microbiology* 73:5261-5267.

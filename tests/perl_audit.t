@@ -292,6 +292,25 @@ case test_old_minimap_version_rejected => sub {
     contains($result->{output}, 'too low, expected at least 2.17');
 };
 
+case test_swarm_version_sets_citation => sub {
+    my $t = shift;
+    write_text("$t->{tools}/swarm", "#!/usr/bin/env perl\nprint \"Swarm \$ENV{TEST_SWARM_VERSION}\\nCopyright (C) 2012-2026\\n\";\n");
+    chmod 0755, "$t->{tools}/swarm";
+    append_text($t->{cfg}, "swarm $t->{tools}/swarm\n");
+    for my $c (['3.2.0', 'Swarm v3: towards tera-scale', 0], ['2.1.13', 'Swarm v2: highly-scalable', 1]) {
+        my ($version, $citation, $outdated) = @$c;
+        subtest "swarm $version" => sub {
+            $t->{env}{TEST_SWARM_VERSION} = $version;
+            my $body = 'prepLtsOptions(); print "SWARMV=[$swarmVer]\n", swarm_citation();';
+            my $output = $t->probe($body, extra => ['-p', 'miSeq', '-CL', 'swarm'])->{output};
+            contains($output, "SWARMV=[$version]\n");
+            contains($output, $citation);
+            if ($outdated) { contains($output, "swarm $version at $t->{tools}/swarm is outdated") }
+            else { lacks($output, 'is outdated') }
+        };
+    }
+};
+
 case test_semantic_version_comparison => sub {
     my $t = shift;
     $t->probe('die "wrong version order" if version_at_least("0.9", "0.25") || version_at_least("3.9", "3.43") || !version_at_least("2.28.1", "2.28");');
