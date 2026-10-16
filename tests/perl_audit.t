@@ -292,6 +292,19 @@ case test_old_minimap_version_rejected => sub {
     contains($result->{output}, 'too low, expected at least 2.17');
 };
 
+case test_lca_threads_only_from_version_0_32 => sub {
+    my $t = shift;
+    write_text("$t->{tools}/LCA", "#!/usr/bin/env perl\nprint \"\$ENV{TEST_LCA_VERSION}\\n\";\n");
+    for my $c (['0.30', ''], ['0.32', ' -t 3']) {
+        my ($version, $expected) = @$c;
+        subtest "LCA $version" => sub {
+            $t->{env}{TEST_LCA_VERSION} = $version;
+            my $body = 'prepLtsOptions(); print "LCAT=[" . LCAthreadArg() . "]\n";';
+            contains($t->probe($body, extra => ['-t', '3'])->{output}, "LCAT=[$expected]\n");
+        };
+    }
+};
+
 case test_swarm_version_sets_citation => sub {
     my $t = shift;
     write_text("$t->{tools}/swarm", "#!/usr/bin/env perl\nprint \"Swarm \$ENV{TEST_SWARM_VERSION}\\nCopyright (C) 2012-2026\\n\";\n");

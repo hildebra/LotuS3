@@ -94,6 +94,7 @@ my $cmdCall = qx/ps -o args $$/;
 # --------------------
 # Progams Pathways  -- get info from lotus.cfg
 my $LCABin      = "";
+my $LCAver      = ""; #set by checkProgVersions; LCA >= 0.32 takes -t threads
 my $sdmBin      = "./sdm";
 my $usBin       = ""; #absolute path to usearch binary
 my $dada2Scr    = ""; #R script to dada2 pipeline 
@@ -3396,7 +3397,7 @@ sub checkProgVersions{
 	#version checks
 	#die "$mini2Bin\n";
 	my $LCAout = checked_program_output($LCABin, "-v");
-	my ($LCAver) = $LCAout =~ /(\d+(?:\.\d+)+)/;
+	($LCAver) = $LCAout =~ /(\d+(?:\.\d+)+)/;
 	if (!defined($LCAver) || !version_at_least($LCAver, "0.25")){
 		printL "Could not verify LCA >= 0.25 (output: $LCAout) at $LCABin\n", 124;
 	}
@@ -5834,13 +5835,18 @@ sub assignTaxOnly($ $) {
         my $LCxtr = "";
         if ($pseudoRefOTU) { $LCxtr = "-showHitRead -reportBestHit"; }
 		my $repHitPat = "-reportHitPattern $logDir/LCAhits.log";
-        my $cmd =  "$LCABin  -i " . join( ",", @blOuts ) . " -r ". join( ",", @TAX_RANKS ) . " -o $SIM_hierFile $repHitPat $LCxtr -LCAfrac $LCAfraction -cover $LCAcover -minAlignLen $LCAminAliLen -id ". join( ",", @idThr ) . ";";
+        my $cmd =  "$LCABin  -i " . join( ",", @blOuts ) . " -r ". join( ",", @TAX_RANKS ) . " -o $SIM_hierFile $repHitPat $LCxtr -LCAfrac $LCAfraction -cover $LCAcover -minAlignLen $LCAminAliLen -id ". join( ",", @idThr ) . LCAthreadArg() . ";";
 
         #die $cmd;
         if ( systemL $cmd) { printL "LCA command $cmd failed\n", 44; }
 		reworkSIMhiera($SIM_hierFile);#only for removing unwanted tax
     }
 	return $doRDPing > 0 ? $RDP_hierFile : $SIM_hierFile;
+}
+
+# LCA threads; older LCA builds reject -t as an unknown option.
+sub LCAthreadArg {
+	return defined($LCAver) && version_at_least($LCAver, "0.32") ? " -t $BlastCores" : "";
 }
 
 sub makeAbundTable2($ $) {
@@ -5879,7 +5885,7 @@ sub makeAbundTable2($ $) {
         if ($pseudoRefOTU) { $LCxtr = "-showHitRead -reportBestHit"; }
 		my $repHitPat = "-reportHitPattern $logDir/LCAhits.log";
 
-        my $cmd = "$LCABin  -i " . join( ",", @blOuts ) . " -r " . join( ",", @TAX_RANKS ) . " -o $SIM_hierFile $repHitPat $LCxtr -LCAfrac $LCAfraction  -cover $LCAcover -minAlignLen $LCAminAliLen -id " . join( ",", @idThr ) . ";";
+        my $cmd = "$LCABin  -i " . join( ",", @blOuts ) . " -r " . join( ",", @TAX_RANKS ) . " -o $SIM_hierFile $repHitPat $LCxtr -LCAfrac $LCAfraction  -cover $LCAcover -minAlignLen $LCAminAliLen -id " . join( ",", @idThr ) . LCAthreadArg() . ";";
 
         #die $cmd;
         if ( systemL $cmd) { printL "LCA command $cmd failed\n", 44; }
