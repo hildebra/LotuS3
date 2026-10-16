@@ -103,27 +103,34 @@ PERL
     is(read_file("$t->{root}/wget.log"), "https://example.org/fresh.tar.gz\n", 'only the missing file was downloaded');
 };
 
-# Stand-in swarm release: a .tar.gz holding $dir/bin/swarm, which prints $banner.
-sub swarm_release {
-    my ($dir, $banner) = @_;
+# A .tar.gz holding the given files (path => content), all executable.
+sub targz {
+    my (%files) = @_;
     my $tar = Archive::Tar->new;
-    $tar->add_data("$dir/bin/swarm", perl_script("print \"$banner\\n\";\n"), { mode => 0755 })
-        or die "Cannot add swarm: " . $tar->error . "\n";
+    for my $path (sort keys %files) {
+        $tar->add_data($path, $files{$path}, { mode => 0755 }) or die "Cannot add $path: " . $tar->error . "\n";
+    }
     gzip(\($tar->write) => \my $gz) or die "Cannot gzip fixture: $GzipError\n";
     return $gz;
 }
 
-subtest 'test_swarm_3_release_is_installed' => sub {
-    # arch, macOS, release archive, banner of the downloaded swarm, expected lOTUs.cfg entry
-    for my $c (['x86_64', 0, 'swarm-3.2.0-linux-x86_64', 'Swarm 3.2.0', 'release'],
-               ['aarch64', 0, 'swarm-3.2.0-linux-aarch64', 'Swarm 3.2.0', 'release'],
-               ['x86_64', 0, 'swarm-3.2.0-linux-x86_64', 'cannot execute binary file', 'none'],
-               ['aarch64', 1, 'swarm-3.2.0-macos-universal', 'Swarm 3.2.0', 'release'],
-               ['x86_64', 1, 'swarm-3.2.0-macos-universal', 'Bad CPU type in executable', 'PATH']) {
-        my ($arch, $mac, $name, $banner, $expected) = @$c;
-        subtest "$name, $banner" => sub {
+subtest 'test_swarm_3_release_or_source_is_installed' => sub {
+    my $srcUrl = 'https://codeload.github.com/torognes/swarm/tar.gz/refs/tags/v3.2.0';
+    my $srcArchive = targz('swarm-3.2.0/Makefile' => "all:\n");
+    # arch, macOS, banner of the downloaded release swarm (undef: no release for arch),
+    # whether a working make is on PATH, expected lOTUs.cfg entry
+    for my $c (['x86_64', 0, 'Swarm 3.2.0', 0, 'release'],
+               ['aarch64', 0, 'Swarm 3.2.0', 0, 'release'],
+               ['x86_64', 0, 'GLIBCXX_3.4.30 not found', 1, 'source'],
+               ['x86_64', 0, 'cannot execute binary file', 0, 'none'],
+               ['ppc64le', 0, undef, 1, 'source'],
+               ['aarch64', 1, 'Swarm 3.2.0', 0, 'release'],
+               ['x86_64', 1, 'Bad CPU type in executable', 0, 'PATH']) {
+        my ($arch, $mac, $banner, $make, $expected) = @$c;
+        my $name = $mac ? 'swarm-3.2.0-macos-universal' : defined $banner ? "swarm-3.2.0-linux-$arch" : '';
+        subtest "$arch mac=$mac, " . ($banner // 'no release') . ", make=$make" => sub {
             my $url = "https://github.com/torognes/swarm/releases/download/v3.2.0/$name.tar.gz";
-            my $archive = swarm_release($name, $banner);
+            my $archive = defined $banner ? targz("$name/bin/swarm" => perl_script("print \"$banner\\n\";\n")) : '';
             my ($t, $status, $output) = installer_probe(<<"PERL", setup => sub {
 no warnings 'redefine';
 \$isMac = $mac;
@@ -133,30 +140,52 @@ print "WARNINGS:\$finalWarning\\n";
 PERL
                 my $t = shift;
                 my $source = read_file($t->{installer});
-                ok($source =~ s{('\Q$url\E' => ')[0-9a-f]{64}}{$1 . sha256_hex($archive)}e, "$name is pinned");
+                ok($source =~ s{('\Q$url\E' => ')[0-9a-f]{64}}{$1 . sha256_hex($archive)}e, "$name is pinned") if $name ne '';
+                ok($source =~ s{('\Q$srcUrl\E' => ')[0-9a-f]{64}}{$1 . sha256_hex($srcArchive)}e, 'swarm source is pinned');
                 write_file($t->{installer}, $source);
                 write_file("$t->{root}/swarm.tar.gz", $archive);
+                write_file("$t->{root}/swarm-src.tar.gz", $srcArchive);
                 $t->tool(wget => perl_script(<<'WGET'));
 use File::Copy qw(copy);
 my ($i) = grep { $ARGV[$_] eq '-O' } 0 .. $#ARGV;
-copy("$ENV{SWARM_FIXTURE}", $ARGV[$i + 1]) or die "wget: $!\n";
+my $fixture = $ARGV[-1] =~ m{^https://codeload\.github\.com/} ? $ENV{SWARM_SOURCE} : $ENV{SWARM_FIXTURE};
+copy($fixture, $ARGV[$i + 1]) or die "wget: $!\n";
 open my $log, '>>', "$ENV{WGET_LOG}" or die; print {$log} "$ARGV[-1]\n"; close $log;
 WGET
                 $t->{env}{SWARM_FIXTURE} = "$t->{root}/swarm.tar.gz";
+                $t->{env}{SWARM_SOURCE} = "$t->{root}/swarm-src.tar.gz";
+                # stand-in make: builds a working swarm in the unpacked source tree
+                $t->tool(make => perl_script(<<'MAKE')) if $make;
+my ($i) = grep { $ARGV[$_] eq '-C' } 0 .. $#ARGV;
+my $dir = $ARGV[$i + 1];
+die "make: no Makefile in $dir\n" unless -f "$dir/Makefile";
+mkdir "$dir/bin";
+open my $o, '>', "$dir/bin/swarm" or die "make: $!\n";
+print {$o} "#!$^X\nprint \"Swarm 3.2.0\\n\";\n"; close $o; chmod 0755, "$dir/bin/swarm";
+MAKE
                 $t->tool(swarm => perl_script("print \"Swarm 3.1.8\\n\";\n")) if $expected eq 'PATH';
             });
             is($status, 0, 'probe ran') or diag($output);
-            is(read_file("$t->{root}/wget.log"), "$url\n", 'downloaded the archive for this platform');
+            my $compiles = !$mac && $expected ne 'release';
+            my @downloads = (($name ne '' ? $url : ()), ($compiles ? $srcUrl : ()));
+            is(read_file("$t->{root}/wget.log"), join('', map { "$_\n" } @downloads), 'downloaded the archives for this platform');
             my ($entry) = -e $t->{cfg} ? read_file($t->{cfg}) =~ /^swarm (.*)$/m : ();
+            (my $path = $entry // '') =~ s{/+}{/}g; #$bdir ends in a slash
             if ($expected eq 'release') {
-                (my $path = $entry // '') =~ s{/+}{/}g; #$bdir ends in a slash
                 is($path, "$t->{install}/bin/$name/bin/swarm", 'release binary registered');
+                lacks_ok($output, 'swarm was not installed');
+            } elsif ($expected eq 'source') {
+                is($path, "$t->{install}/bin/swarm-3.2.0/bin/swarm", 'compiled swarm registered');
+                (my $said = $output) =~ s{/+}{/}g;
+                contains_ok($said, $name eq '' ? "there is no swarm release for architecture $arch; compiling swarm 3.2.0 from source"
+                    : "the swarm release binary $t->{install}/bin/$name/bin/swarm does not run on this system; compiling");
                 lacks_ok($output, 'swarm was not installed');
             } elsif ($expected eq 'PATH') {
                 is($entry, "$t->{tools}/swarm", 'swarm from PATH registered');
             } else {
                 ok(!defined $entry, 'no swarm entry written');
-                contains_ok($output, "swarm was not installed: swarm at");
+                contains_ok($output, 'swarm was not installed: the swarm release binary');
+                contains_ok($output, 'compiling swarm 3.2.0 from source failed');
             }
         };
     }

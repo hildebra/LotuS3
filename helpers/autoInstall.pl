@@ -88,6 +88,7 @@ my %PINNED_SHA256 = (
 	'https://github.com/torognes/swarm/releases/download/v3.2.0/swarm-3.2.0-linux-x86_64.tar.gz' => '474fffa567b48e0b038884de8ae51657578b11308f310bc7bbae6f4de3ab680e',
 	'https://github.com/torognes/swarm/releases/download/v3.2.0/swarm-3.2.0-linux-aarch64.tar.gz' => '49908889def08f69eafe4abca1aac809e745b5fa959df7315374673192f8c1fa',
 	'https://github.com/torognes/swarm/releases/download/v3.2.0/swarm-3.2.0-macos-universal.tar.gz' => '88a369c3d23ae7d7f0bb47201a016f69d4f09fc0e029269d21a4ad0c0e5b06fb',
+	'https://codeload.github.com/torognes/swarm/tar.gz/refs/tags/v3.2.0' => '93bdb47bb1d068e9ce67b8813092ebdef4f1aa623e718ecfd55f7fb9121dda0c',
 	'https://lotus2.earlham.ac.uk/lotus/packs/infernal/infernal-1.1.2-macosx-intel.tar.gz' => '87adbf63c61f66127f14823f1a17451fa960567d0dfdc1d72735a16d41a6a171',
 	'https://lotus2.earlham.ac.uk/lotus/packs/infernal/infernal-1.1.2-linux-intel-gcc.tar.gz' => 'ad062059dfff6450d4a9417846e2695087f5b7c13d64a6deef4a5bcb51b75f3e',
 	'https://lotus2.earlham.ac.uk/lotus/packs/VXtractor/vxtractor.pl' => '76f7d103470a89d4dfad19a4c444b7095feaba37b7de241bc2619fc849f1f739',
@@ -1931,7 +1932,20 @@ sub swarm_works {
 	return $1 >= 3;
 }
 
-# swarm 3 release binaries; swarm 2 was compiled here and needed x86 SSE.
+# Builds the pinned swarm source (C++11, needs make and g++); returns the binary, or "" on failure.
+sub compile_swarm {
+	my $src = "$bdir/swarm-3.2.0";
+	my $stars = "$bdir/swarm-src.tar.gz";
+	getS2("https://codeload.github.com/torognes/swarm/tar.gz/refs/tags/v3.2.0", $stars);
+	run_cmd("tar", "-xzf", $stars, "-C", $bdir);
+	unlink($stars) or warn "Could not remove $stars: $!\n";
+	my $stat = system("make", "-C", $src);
+	return $stat == 0 && swarm_works("$src/bin/swarm") ? "$src/bin/swarm" : "";
+}
+
+# swarm 3: the pinned release binary, else the pinned source compiled here. Upstream ships no
+# static Linux build; its binaries need glibc 2.34 and libstdc++ from GCC 12, which older
+# clusters lack.
 sub install_swarm {
 	my $arch = ont_architecture();
 	my $name = $isMac ? "swarm-3.2.0-macos-universal"
@@ -1947,14 +1961,23 @@ sub install_swarm {
 	}
 	if ($name ne "" && swarm_works($sexe)) {
 		@txt = addInfoLtS("swarm", $sexe, \@txt, 1);
-	} elsif ($isMac) {
+		return;
+	}
+	if ($isMac) {
 		mac_program_from_path("swarm", ["swarm"], "brew install swarm",
 			"Clustering with swarm (-CL 2) is unavailable until then.");
-	} else {
-		my $why = $name eq "" ? "no pinned swarm release for architecture $arch" : "swarm at $sexe did not run on this system";
-		my $msg = "swarm was not installed: $why. The -CL swarm option is unavailable unless you install swarm 3 and set its path in lOTUs.cfg.\n";
-		print "\n\nWARNING::\n$msg\n"; $finalWarning .= $msg;
+		return;
 	}
+	my $why = $name eq "" ? "there is no swarm release for architecture $arch" : "the swarm release binary $sexe does not run on this system";
+	print "$why; compiling swarm 3.2.0 from source..\n";
+	my $built = compile_swarm();
+	if ($built ne "") {
+		@txt = addInfoLtS("swarm", $built, \@txt, 1);
+		return;
+	}
+	my $msg = "swarm was not installed: $why, and compiling swarm 3.2.0 from source failed (see the make output above; it needs make and g++). "
+		. "The -CL swarm option is unavailable unless you install swarm 3 (e.g. conda install -c bioconda swarm) and set its path in lOTUs.cfg.\n";
+	print "\n\nWARNING::\n$msg\n"; $finalWarning .= $msg;
 }
 
 sub get_programs{
