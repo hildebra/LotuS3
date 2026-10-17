@@ -22,7 +22,7 @@ swarm /hpc-home/hildebra/dev/lotus//bin/swarm-master//bin/swarm
 #cd-hit-est clustering program
 cd-hit /hpc-home/hildebra/dev/lotus//bin/cdhit-master//cd-hit-est
 #vsearch chimera checking, OTU clustering and mapping
-vsearch /hpc-home/hildebra/dev/lotus//bin//vsearch-2.15.0-linux-x86_64/bin/vsearch
+vsearch /hpc-home/hildebra/dev/lotus//bin//vsearch-2.32.0-linux-x86_64/bin/vsearch
 #dnaclust ref based OTU clustering
 dnaclust dnaclust
 minimap2 /hpc-home/hildebra/dev/lotus/bin/minimap2-2.28_x64-linux/minimap2
