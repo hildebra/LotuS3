@@ -20,7 +20,8 @@ sub result { my (undef, $json) = split /RESULT:/, $_[0]{output}, 2; return json_
 
 # Stand-in USEARCH: prints a configurable version banner and, like usearch12
 # (label.cpp GetSizeFromLabel, uchime3denovo.cpp), rejects de novo chimera input
-# that lacks ;size= labels or is not sorted by decreasing size.
+# that lacks ;size= labels or is not sorted by decreasing size, and, like
+# usearch12, has no -sortbysize command.
 my $USEARCH = <<'PERL';
 #!/usr/bin/env perl
 use strict; use warnings; use JSON::PP ();
@@ -39,11 +40,7 @@ sub records { open my $fh, '<', $_[0] or die "$_[0]: $!\n"; local $/; my (undef,
     return map { my @l = split /\n/; [$l[0], join '', @l[1 .. $#l]] } @p }
 sub size { return $_[0] =~ /;size=(\d+)/ ? $1 : quit("Missing size= in >$_[0]") }
 sub spew { my ($path, @recs) = @_; open my $out, '>', $path or die "$path: $!\n"; print {$out} map { ">$_->[0]\n$_->[1]\n" } @recs; close $out }
-if ($args[0] eq '-sortbysize') {
-    my @recs = records($args[1]); my @s = map { size($_->[0]) } @recs;
-    spew(arg('-fastaout'), @recs[sort { $s[$b] <=> $s[$a] || $a <=> $b } 0 .. $#recs]);
-}
-elsif (grep { $args[0] eq $_ } qw(-uchime3_denovo -uchime2_denovo -uchime_denovo)) {
+if (grep { $args[0] eq $_ } qw(-uchime3_denovo -uchime2_denovo -uchime_denovo)) {
     my @recs = records($args[1]); my @s = map { size($_->[0]) } @recs;
     quit('Not sorted by size') if "@s" ne join ' ', sort { $b <=> $a } @s;
     spew(arg('-nonchimeras'), @recs); spew(arg('-chimeras')); spew(arg('-log'));
@@ -577,9 +574,9 @@ PERL
             my %got = map { my @l = text_lines($_); ($l[0] => join '', @l[1 .. $#l]) } @entries;
             is_deeply(\%got, \%seqs, 'plain OTU ids and sequences');
             my @calls = map { json_decode($_) } text_lines(read_text($t->{usearch_calls}));
-            is_deeply([map { $_->[0] } @calls], ['-sortbysize', $command], 'USEARCH commands');
-            is($calls[1][1], "$t->{out}/otus.fna.srt", 'chimera check reads the sorted FASTA');
-            ok(has_arg($calls[1], $_), "chimera option $_") for @$opts;
+            is_deeply([map { $_->[0] } @calls], [$command], 'USEARCH commands');
+            is($calls[0][1], "$t->{out}/otus.fna.srt", 'chimera check reads the sorted FASTA');
+            ok(has_arg($calls[0], $_), "chimera option $_") for @$opts;
         };
     }
 };

@@ -2036,15 +2036,29 @@ sub replaceFastaHd($ $) {
 
 
 
-sub addSize2OTUfna($ $){
-	my ($otuFA,$hr) = @_;
-	my %siz = %{$hr};
-
-	replaceFastaHd($hr,$otuFA);
-
+# Write $otuFA to $out with ;size=N; labels (abundances from $hr), sorted by
+# decreasing size as USEARCH de novo chimera checks require. Done here, as
+# usearch12 dropped -sortbysize; ties keep their input order.
+sub write_size_sorted_fasta($$$){
+	my ($otuFA,$hr,$out) = @_;
+	my @recs;
+	open my $in, "<", $otuFA or printL "Cannot read $otuFA: $!\n", 33;
+	while (my $line = <$in>) {
+		if ($line =~ /^>(.*)/) {
+			(my $id = $1) =~ s/;size=\d+;?//;
+			printL "Can't find abundance of $id in OTU matrix\n", 33 unless exists $hr->{$id};
+			push @recs, [">$id;size=$hr->{$id};\n", $hr->{$id}, "", scalar @recs];
+		} elsif (@recs) {
+			$recs[-1][2] .= $line;
+		}
+	}
+	close $in;
+	open my $o, ">", $out or printL "Cannot write $out: $!\n", 33;
+	print {$o} $_->[0], $_->[2] for sort { $b->[1] <=> $a->[1] || $a->[3] <=> $b->[3] } @recs;
+	close $o or printL "Cannot close $out: $!\n", 33;
 }
 
-# Undo addSize2OTUfna: restore plain OTU IDs after USEARCH has used the labels.
+# Undo the ;size= labels after USEARCH has used them: restore plain OTU IDs.
 sub strip_fasta_size_labels($){
 	my ($fasta) = @_;
 	my $tmp = "$fasta.tmp";
@@ -2096,9 +2110,8 @@ sub chimera_denovo($$){
 		($usearchDenovo, $usearchDenovoOpts, $progUsed) = ("-uchime_denovo", "-abskew $chimera_absskew", "usearch uchime");
 	}
 	if ($usearchDenovo ne "") {
-		addSize2OTUfna($OTUfa, getOTUsize($otuMatrix));
-		$cmd = "$usBin -sortbysize $OTUfa -fastaout $OTUfa.srt; \n";
-		$cmd .= "$usBin $usearchDenovo $OTUfa.srt $usearchDenovoOpts -chimeras $chimOut -nonchimeras $lotus_tempDir/tmp1.fa -log $logDir/chimera_dn.log;";
+		write_size_sorted_fasta($OTUfa, getOTUsize($otuMatrix), "$OTUfa.srt");
+		$cmd = "$usBin $usearchDenovo $OTUfa.srt $usearchDenovoOpts -chimeras $chimOut -nonchimeras $lotus_tempDir/tmp1.fa -log $logDir/chimera_dn.log;";
 		$cmd .= "rm -f $OTUfa.srt\n";
 	}
 
