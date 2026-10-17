@@ -41,7 +41,7 @@ use FindBin qw($RealBin);
 
 
 
-sub systemL; sub uniq; sub printL;sub frame; sub parse_sdm_short_report;
+sub systemL; sub uniq; sub printL;sub frame; sub parse_sdm_short_report; sub archive_sdm_logs;
 sub command_exists; sub detect_available_cpus; sub ensure_dir; sub safe_remove_tree; sub split_shell_commands; sub shell_quote;
 sub acquire_output_lock; sub release_output_lock; sub atomic_write_text; sub file_signature;
 sub dependency_report; sub validate_reference_databases; sub validate_option_combinations; sub validate_inputs_before_execution; sub validate_output_directory_compatibility; sub apply_profile_preset; sub fastq_validation_scan; sub fasta_validation_scan; sub validate_refdb_tax_overlap; sub write_schema_metadata; sub schema_metadata_text; sub write_repro_manifest;
@@ -1393,7 +1393,7 @@ sub sdmStep1{
 			systemL "mkdir -p $logDir/SDMperFile/; mv $mainSDMlog". "0* $logDir/SDMperFile/";
 		}
 		if ( $fileNum > 10 ) {
-			systemL "tar zcf $logDir/SDMperFile.tar.gz $logDir/SDMperFile/; rm -r $logDir/SDMperFile/;";
+			archive_sdm_logs("$logDir/SDMperFile", "$logDir/SDMperFile.tar.gz");
 		}
 		open my $sdm_log_fh, "<", $mainSDMlog
 			or printL("Could not read the SDM summary log $mainSDMlog: $!\n", 4);
@@ -7570,6 +7570,29 @@ sub systemL {
         }
     }
     return $retStat;
+}
+
+#bundles the per-file SDM logs into one tarball and removes the directory afterwards.
+#GNU tar exits with 1 ("file changed as we read it") when the directory's metadata moves
+#while it is read, which happens on network and parallel file systems even though the
+#archive is complete. That is not fatal: status 1 is accepted once the archive reads back.
+#Archiving only saves space, so a real failure keeps the logs in place and warns.
+sub archive_sdm_logs {
+    my ($dir, $archive) = @_;
+    $dir =~ s{/+$}{};
+    my ($qdir, $qarchive, $qtmp) = map { shell_quote($_) } ($dir, $archive, "$archive.tmp");
+    my $changedWhileRead = 1 << 8; #exit code 1, no signal
+    my $stat = systemL("tar zcf $qtmp $qdir", "", 0);
+    $stat = systemL("tar zcf $qtmp $qdir", "", 0) if $stat == $changedWhileRead; #the directory has settled by now
+    if (($stat == 0 || $stat == $changedWhileRead)
+        && systemL("tar tzf $qtmp > /dev/null", "", 0) == 0
+        && systemL("mv $qtmp $qarchive", "", 0) == 0) {
+        systemL("rm -r $qdir", "", 0);
+        return 1;
+    }
+    systemL("rm -f $qtmp", "", 0);
+    printL("Could not archive the per-file SDM logs ($dir), leaving them in place; see $progOutPut\n", "w");
+    return 0;
 }
 
 

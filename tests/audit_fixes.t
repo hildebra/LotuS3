@@ -139,4 +139,52 @@ case test_create_map_pairs_by_file_stem => sub {
     contains($output, 'these files have no mate: D_R1.fastq.gz');
 };
 
+# GNU tar exits 1 ("file changed as we read it") on busy file systems although the archive
+# is complete (issue 29). A wrapper around the real tar reproduces each tar outcome.
+sub run_sdm_log_archive {
+    my ($t, $mode) = @_;
+    my ($real) = grep { -x $_ } map { "$_/tar" } split /:/, $ENV{PATH};
+    die "tar not found\n" unless defined $real;
+    my $bin = "$t->{root}/tarbin";
+    mkdir $bin or die "$bin: $!\n";
+    chmod 0755, write_text("$bin/tar", <<'PERL');
+#!/usr/bin/env perl
+my $create = $ARGV[0] eq 'zcf';
+exit 2 if $create && $ENV{FAKE_TAR_MODE} eq 'broken';
+my $rc = system($ENV{FAKE_TAR_REAL}, @ARGV) >> 8;
+exit(($create && $ENV{FAKE_TAR_MODE} eq 'changed' && !$rc) ? 1 : $rc);
+PERL
+    $t->{env} = { %{ $t->{env} }, PATH => "$bin:$ENV{PATH}", FAKE_TAR_REAL => $real, FAKE_TAR_MODE => $mode };
+    my $r = $t->probe("$LOGS\n" . <<'PERL');
+my $sdmDirT = "$logDir/SDMperFile"; ensure_dir($sdmDirT);
+for my $n (1 .. 12) { open(my $o, ">", sprintf("%s/sdm.log%03d", $sdmDirT, $n)) or die; print $o "log $n\n"; close $o }
+my $archivedT = archive_sdm_logs($sdmDirT, "$logDir/SDMperFile.tar.gz");
+print "ARCHIVED=$archivedT DIR=" . (-d $sdmDirT ? 1 : 0) . " TMP=" . (-e "$logDir/SDMperFile.tar.gz.tmp" ? 1 : 0) . "\n";
+print "RUN CONTINUES\n";
+PERL
+    my $archive = "$t->{out}/LotuSLogS/SDMperFile.tar.gz";
+    my @members = -e $archive ? grep { /sdm\.log\d+$/ } `$real tzf $archive` : ();
+    return ($r, scalar @members);
+}
+
+case test_sdm_log_archive_accepts_file_changed_warning => sub {
+    for my $mode ('', 'changed') {
+        my ($r, $members) = run_sdm_log_archive(LotusTest->new, $mode);
+        contains($r->{output}, 'ARCHIVED=1 DIR=0 TMP=0', "archived with tar mode '$mode'");
+        contains($r->{output}, 'RUN CONTINUES');
+        lacks($r->{output}, 'WARNING');
+        is($members, 12, "all logs in the archive with tar mode '$mode'");
+    }
+};
+
+case test_sdm_log_archive_failure_keeps_logs_and_run_going => sub {
+    my $t = shift;
+    my ($r, $members) = run_sdm_log_archive($t, 'broken');
+    contains($r->{output}, 'ARCHIVED=0 DIR=1 TMP=0');
+    contains($r->{output}, 'Could not archive the per-file SDM logs');
+    contains($r->{output}, 'RUN CONTINUES');
+    is($members, 0, 'no archive left behind');
+    is(scalar(() = glob("$t->{out}/LotuSLogS/SDMperFile/sdm.log*")), 12, 'logs kept in place');
+};
+
 done_testing();
