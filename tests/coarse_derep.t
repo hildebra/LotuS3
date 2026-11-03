@@ -537,6 +537,27 @@ handoff test_metadata_records_effective_search_and_cut_settings => sub {
     contains($m->{hq_sequence_policy}, 'logical tails retained');
 };
 
+handoff test_min_read_merge_bp_reaches_both_paired_sdm_calls => sub {
+    my $t = shift;
+    my $extra = $t->inputs(1, retain => 0);
+    my $base = $t->{out};
+    for my $value (undef, '12', '20') {
+        $t->{out} = $base . '_' . ($value // 'default');
+        $t->run_lotus(extra => [@$extra, defined $value ? ('-minReadMergeBP', $value) : ()]);
+        my $cmds = $t->sdm_commands;
+        is(scalar @$cmds, 2, 'preprocessing and seed extension');
+        # only a non-default (12) overlap is passed on
+        if (($value // '12') eq '12') { lacks($_, '-minReadMergeBP') for @$cmds }
+        else { contains($_, "-minReadMergeBP $value") for @$cmds }
+    }
+};
+
+case test_min_read_merge_bp_below_eight_rejected => sub {
+    my $t = shift;
+    my $result = $t->run_lotus(extra => ['-minReadMergeBP', '5', '--dry-run'], ok => 0);
+    contains($result->{output}, '-minReadMergeBP must be an integer of at least 8');
+};
+
 handoff test_paired_hq_keeps_tails_and_removes_technical_sequences_once => sub {
     my $t = shift;
     my @primers = qw(AGGTCAGTACCGTAAC TCCAGATGCTACGTCA);

@@ -187,4 +187,24 @@ case test_sdm_log_archive_failure_keeps_logs_and_run_going => sub {
     is(scalar(() = glob("$t->{out}/LotuSLogS/SDMperFile/sdm.log*")), 12, 'logs kept in place');
 };
 
+# SDM >= 3.47 writes seeds of unmerged pairs only to otu_seeds.1/.2.fq; they must
+# still reach otu_seeds.fna (as R1), once each, or their ASVs vanish as "chimeras".
+case test_unmerged_seed_pairs_reach_seed_fasta => sub {
+    my $t = shift;
+    my $d = "$t->{root}/seeds";
+    mkdir $d or die "$d: $!\n";
+    write_text("$d/merg.fq", "\@ASV_1.1\nAAAACCCC\n+\nIIIIIIII\n");
+    # ASV_1 also appears here, as older SDM wrote every seed pair to .1.fq
+    write_text("$d/r1.fq", "\@ASV_1.1\nAAAA\n+\nIIII\n\@ASV_2.1\nGGGG\n+\nIIII\n");
+    write_text("$d/singl.fq", "\@ASV_3.1\nTTTT\n+\nIIII\n");
+    write_text("$d/mat.txt", "OTU\ts1\nASV_1\t5\nASV_2\t3\nASV_3\t1\nASV_4\t2\n");
+    my $r = $t->probe("$LOGS\n" . <<"PERL");
+forceMerge_fq2fna("$d/merg.fq", "$d/r1.fq", "$d/singl.fq", "$d/out.fna", "$d/mat.txt");
+PERL
+    is(read_text("$d/out.fna"), ">ASV_1\nAAAACCCC\n>ASV_2\nGGGG\n>ASV_3\nTTTT\n", 'merged, unmerged R1 and single seeds, no duplicates');
+    my $log = join ' ', split ' ', read_text("$t->{out}/LotuSLogS/LotuS_run.log"); # frame() wraps lines
+    contains($log, '1 from merged pairs, 1 from unmerged pairs (R1), 1 from SDM singles');
+    like($log, qr/Warning: 1 \S+ in the abundance matrix have no seed sequence/, 'seedless matrix row reported');
+};
+
 done_testing();
