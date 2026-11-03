@@ -6964,8 +6964,13 @@ sub taxonomy_validation_scan {
         } else {
             my $id = $fields[0];
             push @problems, "Empty taxonomy ID at record $records in $file" if $id eq "";
-            push @problems, "Duplicate taxonomy ID '$id' in the first $records records of $file" if $id ne "" && $seen{$id}++;
             my $taxonomy = join("\t", @fields[1..$#fields]);
+            # SILVA IDs are truncated to the accession by the installer, so repeats are expected; only conflicting ones matter
+            if ($id ne "" && exists $seen{$id}) {
+                push @warnings, "Taxonomy ID '$id' repeated with a different annotation (record $records) in $file" if $seen{$id} ne $taxonomy;
+            } else {
+                $seen{$id} = $taxonomy;
+            }
             push @problems, "Empty taxonomy annotation for '$id' in $file" if $taxonomy !~ /\S/;
             push @warnings, "Control character in taxonomy annotation for '$id' in $file" if $taxonomy =~ /[\x00-\x08\x0B\x0C\x0E-\x1F]/;
         }

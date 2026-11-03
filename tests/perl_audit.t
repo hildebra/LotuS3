@@ -333,7 +333,7 @@ case test_duplicate_ids_rejected_by_default => sub {
     my $body = <<'PERL';
 my ($fn,$fp,$fw,$fi) = fasta_validation_scan($ENV{AUDIT_DUP_FASTA}, 10);
 my ($tn,$tp,$tw) = taxonomy_validation_scan($ENV{AUDIT_DUP_TAX}, 10);
-print "RESULT:", JSON::PP->new->encode({fasta => $fp, taxonomy => $tp});
+print "RESULT:", JSON::PP->new->encode({fasta => $fp, taxonomy => $tp, taxwarn => $tw});
 PERL
     for my $duplicate (0, 1) {
         subtest 'duplicate=' . ($duplicate ? 'True' : 'False') => sub {
@@ -344,14 +344,21 @@ PERL
             if ($duplicate) {
                 is(scalar @{ $errors->{fasta} }, 1, 'one FASTA error');
                 contains($errors->{fasta}[0], 'Duplicate FASTA ID');
-                is(scalar @{ $errors->{taxonomy} }, 1, 'one taxonomy error');
-                contains($errors->{taxonomy}[0], 'Duplicate taxonomy ID');
             }
             else {
-                is_deeply($errors, { fasta => [], taxonomy => [] }, 'no validation errors');
+                is_deeply($errors->{fasta}, [], 'no FASTA errors');
             }
+            # repeated taxonomy IDs with the same annotation occur in the installed SILVA DB
+            is_deeply([@$errors{qw(taxonomy taxwarn)}], [[], []], 'no taxonomy errors or warnings');
         };
     }
+    subtest 'conflicting taxonomy duplicate warns' => sub {
+        write_text($taxonomy, "asv1\tk__Bacteria\nasv1\tk__Archaea\n");
+        my $errors = result($t->probe($body));
+        is_deeply($errors->{taxonomy}, [], 'no taxonomy errors');
+        is(scalar @{ $errors->{taxwarn} }, 1, 'one taxonomy warning');
+        contains($errors->{taxwarn}[0], "Taxonomy ID 'asv1' repeated with a different annotation");
+    };
 };
 
 case test_taxonomy_prefixes_missing_ranks_and_reference_ids => sub {
