@@ -36,7 +36,7 @@ Install LotuS3 with all possible dependencies (all databases, ITS, ONT related w
 Simply enter or "1" for yes, "0" for detailed configuration via question.
 ```
 
-Press **Enter** or enter **1** to select all dependencies supported by the installer: KSGP, SILVA, GreenGenes2, HITdb, PR2 and beeTax reference databases; ITS/UNITE and ITS chimera resources; UTAX databases; both BLAST and Lambda; Savont and Barbell; and the standard programs and R packages. This skips the individual package-selection questions. The existing SILVA license acceptance and any incompatible-R-version question still apply. System prerequisites such as Rscript and compilers must already be available; the installer checks them before any download (see [requirements](#requirements)).
+Press **Enter** or enter **1** to select all dependencies supported by the installer: KSGP, SILVA, GreenGenes2, HITdb, PR2 and beeTax reference databases; ITS/UNITE and ITS chimera resources; UTAX databases; both BLAST and Lambda; Savont and Barbell; and the standard programs and R packages. This skips the individual package-selection questions. Any incompatible-R-version question still applies. System prerequisites such as Rscript and compilers must already be available; the installer checks them before any download (see [requirements](#requirements)).
 
 Enter **0** for detailed configuration. It asks about similarity-search programs, reference databases, ITS, UTAX, and then:
 

@@ -126,12 +126,12 @@ my %PINNED_SHA256 = (
 	'https://lotus2.earlham.ac.uk/lotus/packs/DB/UNITE/Lambda3/sh_refs_v10_19.02.2025.fasta.lba.gz' => '9c279ab807e79d43dc7b788cd44736671eefc5f86a5e4fc84cd86e0c698b0403',
 	'https://ksgp.earlham.ac.uk/downloads/greengenes2/GG2.2022.10.fasta.gz' => '38c581c7d18360aadb7504aec10b012fcbd1fb3b28ddade02c925a3cf0f0d6bf',
 	'https://ksgp.earlham.ac.uk/downloads/greengenes2/GG2.2022.10.tax.gz' => '673122791d3f6fce079fae1c775f670775437bfa9658238278305c6399b6fc91',
-	'https://ftp.arb-silva.de/release_138.1/Exports/SILVA_138.1_SSURef_NR99_tax_silva.fasta.gz' => '7078a4e54ee962ca3108e776b8935795c744869e73e24c4718b8b5ff240410d0',
+	'https://ftp.arb-silva.de/release_144/Exports/SILVA_144_SSURef_NR99_tax_silva_trunc.fasta.gz' => '2cbdfb7b31e117d8b30dec40f80eebeb947e538d478fd341b8865b09027c2862',
+	'https://ftp.arb-silva.de/release_144/Exports/taxonomy/tax_slv_ssu_144.txt.gz' => '88a4123775689299e5f14f8aa1da0a581519f3b3a5240c9233e7999651b0c74a',
 	'https://ftp.arb-silva.de/release_138.1/Exports/taxonomy/tax_slv_ssu_138.1.txt.gz' => '887627935d83cc0ad88fb3cac93b154470304fec6e73cbb2a04ae625427a203d',
-	'https://ftp.arb-silva.de/release_138.1/Exports/SILVA_138.1_LSURef_tax_silva.fasta.gz' => '43e3b8183c11343df2b0fcb98cdae5aa9bdc98f1091974698698969e5bb6a748',
+	'https://ftp.arb-silva.de/release_138.1/Exports/SILVA_138.1_LSURef_NR99_tax_silva.fasta.gz' => '38a9c2959e70338b1b0b2c914992323358ae1d3e776fc7f4f7010d5a49b83ff1',
 	'https://ftp.arb-silva.de/release_138.1/Exports/taxonomy/tax_slv_lsu_138.1.txt.gz' => 'bfc32b01b1285857bdbc0d06bd0f62e4d8efc80c71adcad0a9c07aab0bc158e6',
 	'https://lotus2.earlham.ac.uk/lambdaDBs/v3.0/GG2.2022.10.fasta.lba.gz' => '764dfa7a04067ef6a30a92d7689dc1bec1a2256ff3b46f6dc9c72ec705f700f5',
-	'https://ksgp.earlham.ac.uk/lambdaDBs/v3.0/SLV_138.1_SSU.fasta.lba.gz' => 'c320cfd668a6da868f0f9283f1f051c1a90d8041fa77e4fd5c60fed0609b8fce',
 );
 # Source commits for sdm and LCA, fetched on macOS where the bundled Linux executables cannot run.
 # A git commit id pins the content, like the checksums above (recorded 2026-09-29).
@@ -795,11 +795,10 @@ sub getSLV($){
 	#changed to 128
 	#changed to 132
 #	my $baseSP = "http://www.arb-silva.de/fileadmin/silva_databases/release_123_1/Exports";
-	my $SLVver = "138.1";
-	#my $baseSP = "http://www.arb-silva.de/fileadmin/silva_databases/release_$SLVver/Exports";
+	#changed to 144 (SSU only; release 144 ships no LSU files, LSU stays on 138.1 below)
+	my $SLVver = "144";
 	my $baseSP = "https://ftp.arb-silva.de/release_$SLVver/Exports";
-#	my $baseSN = "SILVA_123.1";my $baseLN = "SLV_123.1";	my $SLVver = "123.1";
-	my $baseSN = "SILVA_$SLVver";	my $baseLN = "SLV_$SLVver";	
+	my $baseSN = "SILVA_$SLVver";	my $baseLN = "SLV_$SLVver";
 	
 	my $DB2 = "$ddir/$baseLN"."_SSU.tax";
 	my $DB = "$ddir/$baseLN"."_SSU.fasta";
@@ -814,9 +813,9 @@ sub getSLV($){
 		#system("gunzip -c $DB2.gz > $DB2;rm -f $DB2.gz"); 
 	} 
 	
-	my $SLV = $baseSP."/".$baseSN."_SSURef_NR99_tax_silva.fasta.gz";
+	my $SLV = $baseSP."/".$baseSN."_SSURef_NR99_tax_silva_trunc.fasta.gz";
 	getS2($SLV,"$DB.gz");
-	getS2("https://ksgp.earlham.ac.uk/lambdaDBs/v3.0/SLV_138.1_SSU.fasta.lba.gz","$DB.lba.gz") if ($downloadLmbdIdx);
+	#no prebuilt lambda index for SILVA 144 (use -lambdaIndex to build it locally)
 	#print "$SLV\n";
 	gunzip_file("$DB.gz", "$ddir/SSUsilva.fasta"); 
 	getS2($baseSP."/taxonomy/tax_slv_ssu_$SLVver.txt.gz","$ddir/SLVtaxSSU.csv.gz");
@@ -825,33 +824,36 @@ sub getSLV($){
 	prepareSILVA("$ddir/SSUsilva.fasta",$DB,$DB2,"$ddir/SLVtaxSSU.csv","");
 	unlink("$ddir/SSUsilva.fasta");
 
-	$finalWarning .= "\nWARNING: Silva $SLVver does not have consistent taxonomy levels for LSU's, therefore the taxonomy used in LotuS will contain \"?\" after taxonomy name.\n";
+	$finalWarning .= "\nWARNING: Silva LSU (release 138.1) does not have consistent taxonomy levels for LSU's, therefore the taxonomy used in LotuS will contain \"?\" after taxonomy name.\n";
 	
 	@txt = addInfoLtS("TAX_REFDB_SSU_SLV",$DB,\@txt,1);
 	@txt = addInfoLtS("TAX_RANK_SSU_SLV",$DB2,\@txt,1);
 	buildIndex($DB);
 	
 #------------------------------ LSU SLV DB --------------------------
+	#SILVA 144 has no LSU export, so LSU stays on the last release that has one (138.1)
+	$SLVver = "138.1";
+	$baseSP = "https://ftp.arb-silva.de/release_$SLVver/Exports";
+	$baseSN = "SILVA_$SLVver";	$baseLN = "SLV_$SLVver";
 	$DB = "$ddir/$baseLN"."_LSU.fasta";
 	$DB2 = "$ddir/$baseLN"."_LSU.tax";
 	print "Downloading SILVA LSU release $SLVver..\n";
-	$locSLBdl=0; $SLVver="138.1";#change this to local (132 release), since SIVLA doesn't have that yet..
-	if ($locSLBdl){ #in case silva server doesn't work again..
-		$baseSP = "https://lotus2.earlham.ac.uk/lotus/packs/DB/SLV/";
-	}
 	#	my $SlvAltFna = "https://lotus2.earlham.ac.uk/lotus/packs/DB/SLV/SLV_132_LSU.fasta.gz";
 	#	getS2($SlvAltFna,"$DB.gz");
 	#	system("gunzip -c $DB.gz > $DB;rm -f $DB.gz"); 
 	#	my $SlvAltTax = "https://lotus2.earlham.ac.uk/lotus/packs/DB/SLV/SLV_132_LSU.tax.gz";
 	#	getS2($SlvAltTax,"$DB2.gz");
 	#	system("gunzip -c $DB2.gz > $DB2;rm -f $DB2.gz"); 
-	$SLV = $baseSP."/".$baseSN."_LSURef_tax_silva.fasta.gz";
+	$SLV = $baseSP."/".$baseSN."_LSURef_NR99_tax_silva.fasta.gz";
 	getS2($SLV,"$DB.gz");
 	getS2($baseSP."/taxonomy/tax_slv_lsu_$SLVver.txt.gz","$ddir/SLVtaxLSU.csv.gz");
 	gunzip_file("$ddir/SLVtaxLSU.csv.gz", "$ddir/SLVtaxLSU.csv");
+	#the LSU taxonomy needs the SSU guide of the same (138.1) release for its Eukaryota levels
+	getS2($baseSP."/taxonomy/tax_slv_ssu_$SLVver.txt.gz","$ddir/SLVtaxSSU138.csv.gz");
+	gunzip_file("$ddir/SLVtaxSSU138.csv.gz", "$ddir/SLVtaxSSU138.csv");
 	gunzip_file("$DB.gz", "$ddir/LSUSILVA.fasta"); #unlink("$DB.tgz");
-	prepareSILVA("$ddir/LSUSILVA.fasta",$DB,$DB2,"$ddir/SLVtaxLSU.csv","$ddir/SLVtaxSSU.csv");
-	unlink("$ddir/LSUSILVA.fasta"); unlink("$ddir/SLVtaxLSU.csv");unlink("$ddir/SLVtaxSSU.csv");
+	prepareSILVA("$ddir/LSUSILVA.fasta",$DB,$DB2,"$ddir/SLVtaxLSU.csv","$ddir/SLVtaxSSU138.csv");
+	unlink("$ddir/LSUSILVA.fasta"); unlink("$ddir/SLVtaxLSU.csv");unlink("$ddir/SLVtaxSSU.csv");unlink("$ddir/SLVtaxSSU138.csv");
 	@txt = addInfoLtS("TAX_REFDB_LSU_SLV",$DB,\@txt,1);
 	@txt = addInfoLtS("TAX_RANK_LSU_SLV",$DB2,\@txt,1);
 	buildIndex($DB);
@@ -886,6 +888,12 @@ sub prepareSILVA($ $ $ $ $){
 	} 
 	close I;
 	}
+
+	#SILVA >=144 has a kingdom level in Bacteria/Archaea (plus sub/super ranks): map by rank from the guide, not by position
+	my $rankGuided = 0;
+	foreach my $k (keys %taxG){ if ($k =~ m/^(Bacteria|Archaea);/ && $taxG{$k} eq "kingdom"){$rankGuided = 1; last;} }
+	my %rankIdx = ("domain"=>0,"phylum"=>1,"class"=>2,"order"=>3,"family"=>4,"genus"=>5);
+	print "Using rank-guided taxonomy conversion for Bacteria/Archaea\n" if ($rankGuided);
 
 	my $taxTmp = "$taxF.tmp.$$";
 	my $seqTmp = "$SeqF.tmp.$$";
@@ -956,7 +964,21 @@ sub prepareSILVA($ $ $ $ $){
 			}
 			#die "@spl\n";
 			my $tline;
-			if (!$eukMode){
+			if (!$eukMode && $rankGuided){
+				my @lv = ("") x 7; my $pre = "";
+				for (my $i=0;$i<@spl;$i++){
+					$pre .= $spl[$i].";";
+					my $r = $taxG{$pre};
+					my $nm = ($spl[$i] =~ m/^unidentified/) ? "?" : $spl[$i];
+					if (defined($r) && exists($rankIdx{$r})){
+						$lv[$rankIdx{$r}] = $nm;
+					} elsif (!defined($r) && $i == $#spl){ #not a guide node, last entry = species
+						$lv[6] = $nm;
+					}
+				}
+				for (my $i=0;$i<7;$i++){ $lv[$i] = $tdesign[$i].$lv[$i]; }
+				$tline = $ID ."\t".join(";",@lv);
+			} elsif (!$eukMode){
 				if (@spl > 7 ){
 					print $line."\n";
 					print("too many categories\n");
@@ -2370,7 +2392,7 @@ sub user_options(){
 
 	if (!$installAll) {
 		print "\n\nDo you want to install a reference database for similarity based annotations?\n";
-		print " (1) KSGP (~1.5 GB), covering SSU for Archaea, Bacteria and Eukaryotes, 2026 release. \n (2) SILVA (~2.5 GB), contains LSU as well as SSU, 138.1 2020 release.\n (3) GreenGenes2 (~1 GB), 2022 release.\n (4) HITdb (~100 MB) 16S bacterial database specialized on the gut environment.\n";
+		print " (1) KSGP (~1.5 GB), covering SSU for Archaea, Bacteria and Eukaryotes, 2026 release. \n (2) SILVA (~2.5 GB), SSU release 144 (LSU: release 138.1, newer releases have none).\n (3) GreenGenes2 (~1 GB), 2022 release.\n (4) HITdb (~100 MB) 16S bacterial database specialized on the gut environment.\n";
 		print " (5) PR2 (~100 MB), an SSU database specialized for marine eukaryotes.\n";
 		print " (6) beeTax (~2 MB) database specialized (and named) on taxonomy specific to the bee gut.\n";
 		print " (8) KSGP + SILVA + GG2 + PR2 + HITdb + beeTax (select a specific DB in each LotuS3 run)\n (0) no database.\n";
@@ -2380,21 +2402,7 @@ sub user_options(){
 		$refDBinstall[$choice] = 1;
 	}
 
-	#SILVA license
-	if ($refDBinstall[2] || $refDBinstall[8]){
-		print "Please read the SILVA license: https://www.arb-silva.de/fileadmin/silva_databases/LICENSE.txt. Do you accept (y/n)? \n";
-		while (1){
-			my $choice = lc(read_user_input("the SILVA license response"));
-			if ($choice eq "y" || $choice eq "yes"){
-				last;
-			} elsif ($choice eq "n" || $choice eq "no") {
-				die "You need to accept the SILVA license before installation can continue.\n";
-			}
-			print "Please answer y or n: ";
-		}
-	}
-
-	return if $installAll; #the license response above is still required
+	return if $installAll;
 
 	print "\n\n -- ITS -- Do you want to\n (1) install databases and programs required to process ITS data (including fungi ITS UNITE database)\n (0) no ITS related packages\n Answer:";
 	$ITSready = read_user_input("the ITS package choice", [0, 1]);

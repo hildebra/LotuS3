@@ -63,7 +63,7 @@ sub assert_all {
     my ($t, $answer, $prefix) = @_;
     local $Test::Builder::Level = $Test::Builder::Level + 1;
     prepare_programs($t);
-    my ($output, $state) = run_choices($t, ($prefix // '') . "$answer\ny\n");
+    my ($output, $state) = run_choices($t, ($prefix // '') . "$answer\n");
     is($state->{search}, 3, 'search');
     is_json($state->{databases}, [(0) x 8, 1, 0], 'databases');
     is($state->{$_}, 1, $_) for qw(its utax ont r_packages);
@@ -71,7 +71,7 @@ sub assert_all {
     is($t->config->{$_}, "$t->{tools}/$_", "$_ registered") for @{$state->{programs}};
     lacks_ok($output, $_) for 'For similarity based', 'Do you want to install a reference database',
         '-- ITS --', '-- UTAX --', '-- ONT --';
-    contains_ok($output, 'Do you accept (y/n)?');
+    lacks_ok($output, 'SILVA license');
     contains_ok($output, 'Install LotuS3 with all possible dependencies');
     lacks_ok($output, 'Continue (y/n)?');
 }
@@ -143,19 +143,10 @@ subtest 'test_invalid_choices_are_reprompted' => sub {
     is($state->{ont}, 1, 'ont');
 };
 
-subtest 'test_all_dependencies_still_requires_silva_acceptance' => sub {
-    my $t = fixture();
-    my ($output, $state) = run_choices($t, "\nn\n", ok => 0);
-    is($state, undef, 'stopped before the checkpoint');
-    contains_ok($output, 'You need to accept the SILVA license');
-    ok(!-e $t->{cfg}, 'no config written');
-    ok(!-e "$t->{install}/DB", 'no DB directory');
-};
-
 subtest 'test_end_of_input_is_not_default_acceptance' => sub {
     my $t = fixture();
     my $original = read_file($t->{installer});
-    for (["", 'all-dependencies choice'], ["\n", 'SILVA license response'], ["0\n2\n0\n0\n0\n", 'ONT tools choice']) {
+    for (["", 'all-dependencies choice'], ["0\n2\n0\n0\n0\n", 'ONT tools choice']) {
         my ($answers, $context) = @$_;
         subtest "context=$context" => sub {
             write_file($t->{installer}, $original);
@@ -170,7 +161,7 @@ subtest 'test_end_of_input_is_not_default_acceptance' => sub {
 subtest 'test_database_only_refresh_has_no_program_questions' => sub {
     my $t = fixture();
     write_file($t->{cfg}, replaced(read_file($t->{default}), 'UID ??', 'UID 123'));
-    my ($output, $state) = run_choices($t, "2\n8\ny\n1\n1\n");
+    my ($output, $state) = run_choices($t, "2\n8\n1\n1\n");
     is($state->{db_only}, 1, 'db_only');
     is_json($state->{databases}, [(0) x 8, 1, 0], 'databases');
     lacks_ok($output, 'all possible dependencies');
@@ -184,7 +175,7 @@ subtest 'test_rscript_version_on_stderr_is_recognised' => sub {
     prepare_programs($t);
     # R before 4.2 prints "Rscript --version" to stderr only
     $t->tool(Rscript => qq{#!/bin/sh\necho "R scripting front-end version 4.1.2 (2021-11-01)" >&2\n});
-    my ($output, $state) = run_choices($t, "\ny\n");
+    my ($output, $state) = run_choices($t, "\n");
     lacks_ok($output, 'older than 4');
     is($state->{r_packages}, 1, 'R packages still installed');
 };
@@ -194,7 +185,7 @@ subtest 'test_missing_build_tools_stop_before_downloads' => sub {
     prepare_programs($t);
     unlink "$t->{tools}/unzip" or die "Cannot remove unzip: $!\n";
     write_executable("$t->{install}/bin/sdm", perl_script("kill 'TERM', \$\$;\n"));
-    my ($output, $state) = run_choices($t, "\ny\n", ok => 0);
+    my ($output, $state) = run_choices($t, "\n", ok => 0);
     is($state, undef, 'stopped before the database downloads');
     contains_ok($output, 'The full installation needs:');
     contains_ok($output, ' - unzip');
